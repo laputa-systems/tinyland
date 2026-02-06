@@ -477,6 +477,11 @@ void seat_close_device(struct client *client, struct seat_device *seat_device) {
 		return;
 	}
 
+	// The caller might be closing devices in error handling. As we cannot
+	// fail anyway, let's ensure we do not clobber errno for caller
+	// convenience.
+	int stored_errno = errno;
+
 	linked_list_remove(&seat_device->link);
 	if (seat_device->fd != -1) {
 		seat_deactivate_device(seat_device);
@@ -484,6 +489,8 @@ void seat_close_device(struct client *client, struct seat_device *seat_device) {
 	}
 	free(seat_device->path);
 	free(seat_device);
+
+	errno = stored_errno;
 }
 
 /*
