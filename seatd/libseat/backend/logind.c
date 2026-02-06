@@ -122,7 +122,6 @@ static int open_device(struct libseat *base, const char *path, int *fd) {
 				 major(st.st_rdev), minor(st.st_rdev));
 	if (ret < 0) {
 		log_errorf("Could not take device: %s", error.message);
-		tmpfd = -1;
 		goto out;
 	}
 
@@ -130,7 +129,6 @@ static int open_device(struct libseat *base, const char *path, int *fd) {
 	ret = sd_bus_message_read(msg, "hb", &tmpfd, &paused);
 	if (ret < 0) {
 		log_errorf("Could not parse D-Bus response: %s", strerror(-ret));
-		tmpfd = -1;
 		goto out;
 	}
 
@@ -138,8 +136,8 @@ static int open_device(struct libseat *base, const char *path, int *fd) {
 	// so we just clone it.
 	tmpfd = fcntl(tmpfd, F_DUPFD_CLOEXEC, 0);
 	if (tmpfd < 0) {
-		log_errorf("Could not duplicate fd: %s", strerror(errno));
-		tmpfd = -1;
+		ret = -errno;
+		log_errorf("Could not duplicate fd: %s", strerror(-ret));
 		goto out;
 	}
 
@@ -149,6 +147,10 @@ out:
 	sd_bus_error_free(&error);
 	sd_bus_message_unref(msg);
 	check_pending_events(session);
+	if (ret < 0) {
+		errno = -ret;
+		return -1;
+	}
 	return tmpfd;
 }
 
@@ -179,7 +181,11 @@ static int close_device(struct libseat *base, int device_id) {
 	sd_bus_error_free(&error);
 	sd_bus_message_unref(msg);
 	check_pending_events(session);
-	return ret < 0 ? -1 : 0;
+	if (ret < 0) {
+		errno = -ret;
+		return -1;
+	}
+	return 0;
 }
 
 static int switch_session(struct libseat *base, int s) {
@@ -202,7 +208,11 @@ static int switch_session(struct libseat *base, int s) {
 	sd_bus_error_free(&error);
 	sd_bus_message_unref(msg);
 	check_pending_events(session);
-	return ret < 0 ? -1 : 0;
+	if (ret < 0) {
+		errno = -ret;
+		return -1;
+	}
+	return 0;
 }
 
 static int disable_seat(struct libseat *base) {
