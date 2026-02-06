@@ -227,14 +227,14 @@ static int handle_open_device(struct client *client, char *path) {
 	struct seat_device *device = seat_open_device(client, path);
 	if (device == NULL) {
 		log_errorf("Could not open device: %s", strerror(errno));
-		goto fail;
+		return client_send_error(client, errno);
 	}
 
 	int dupfd = dup(device->fd);
 	if (dupfd == -1) {
 		log_errorf("Could not dup fd: %s", strerror(errno));
 		seat_close_device(client, device);
-		goto fail;
+		return client_send_error(client, errno);
 	}
 
 	if (connection_put_fd(&client->connection, dupfd) == -1) {
@@ -257,9 +257,6 @@ static int handle_open_device(struct client *client, char *path) {
 	}
 
 	return 0;
-
-fail:
-	return client_send_error(client, errno);
 }
 
 static int handle_close_device(struct client *client, int device_id) {
@@ -271,8 +268,7 @@ static int handle_close_device(struct client *client, int device_id) {
 	struct seat_device *device = seat_find_device(client, device_id);
 	if (device == NULL) {
 		log_error("No such device");
-		errno = EBADF;
-		goto fail;
+		return client_send_error(client, EBADF);
 	}
 
 	seat_close_device(client, device);
@@ -288,9 +284,6 @@ static int handle_close_device(struct client *client, int device_id) {
 	}
 
 	return 0;
-
-fail:
-	return client_send_error(client, errno);
 }
 
 static int handle_switch_session(struct client *client, int session) {
@@ -300,7 +293,7 @@ static int handle_switch_session(struct client *client, int session) {
 	}
 
 	if (seat_set_next_session(client, session) == -1) {
-		goto fail;
+		return client_send_error(client, errno);
 	}
 
 	struct proto_header header = {
@@ -314,9 +307,6 @@ static int handle_switch_session(struct client *client, int session) {
 	}
 
 	return 0;
-
-fail:
-	return client_send_error(client, errno);
 }
 
 static int handle_disable_seat(struct client *client) {
@@ -326,7 +316,7 @@ static int handle_disable_seat(struct client *client) {
 	}
 
 	if (seat_ack_disable_client(client) == -1) {
-		goto fail;
+		return client_send_error(client, errno);
 	}
 
 	struct proto_header header = {
@@ -340,9 +330,6 @@ static int handle_disable_seat(struct client *client) {
 	}
 
 	return 0;
-
-fail:
-	return client_send_error(client, errno);
 }
 
 static int handle_ping(struct client *client) {
