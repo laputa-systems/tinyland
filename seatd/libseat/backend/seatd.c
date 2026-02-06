@@ -376,7 +376,8 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 	struct backend_seatd *backend = calloc(1, sizeof(struct backend_seatd));
 	if (backend == NULL) {
 		log_errorf("Allocation failed: %s", strerror(errno));
-		goto alloc_error;
+		close(fd);
+		return NULL;
 	}
 
 	backend->seat_listener = listener;
@@ -430,8 +431,6 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 
 backend_error:
 	destroy(backend);
-alloc_error:
-	close(fd);
 	return NULL;
 }
 
