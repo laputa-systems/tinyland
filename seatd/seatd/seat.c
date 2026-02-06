@@ -259,9 +259,7 @@ void seat_remove_client(struct client *client) {
 
 	while (!linked_list_empty(&client->devices)) {
 		struct seat_device *device = (struct seat_device *)client->devices.next;
-		if (seat_close_device(client, device) == -1) {
-			log_errorf("Could not close %s: %s", device->path, strerror(errno));
-		}
+		seat_close_device(client, device);
 	}
 
 	bool was_current = seat->active_client == client;
@@ -470,13 +468,13 @@ static int seat_deactivate_device(struct seat_device *seat_device) {
  * seat_close_device reduces the reference count for the device. If it reaches
  * zero, the device is deactivated, closed and removed.
  */
-int seat_close_device(struct client *client, struct seat_device *seat_device) {
+void seat_close_device(struct client *client, struct seat_device *seat_device) {
 	log_debugf("Closing device %s for client %d on %s", seat_device->path, client->session,
 		   client->seat->seat_name);
 
 	seat_device->ref_cnt--;
 	if (seat_device->ref_cnt > 0) {
-		return 0;
+		return;
 	}
 
 	linked_list_remove(&seat_device->link);
@@ -486,7 +484,6 @@ int seat_close_device(struct client *client, struct seat_device *seat_device) {
 	}
 	free(seat_device->path);
 	free(seat_device);
-	return 0;
 }
 
 /*

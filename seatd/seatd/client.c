@@ -275,10 +275,7 @@ static int handle_close_device(struct client *client, int device_id) {
 		goto fail;
 	}
 
-	if (seat_close_device(client, device) == -1) {
-		log_errorf("Could not close device: %s", strerror(errno));
-		goto fail;
-	}
+	seat_close_device(client, device);
 
 	struct proto_header header = {
 		.opcode = SERVER_DEVICE_CLOSED,
