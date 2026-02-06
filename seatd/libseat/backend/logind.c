@@ -77,10 +77,7 @@ static int send_ping(struct backend_logind *backend) {
 	int ret = sd_bus_call_method_async(backend->bus, NULL, "org.freedesktop.login1",
 					   "/org/freedesktop/login1", "org.freedesktop.DBus.Peer",
 					   "Ping", ping_handler, backend, "");
-	if (ret < 0) {
-		return ret;
-	}
-	return 0;
+	return ret < 0 ? ret : 0;
 }
 
 static void check_pending_events(struct backend_logind *backend) {
