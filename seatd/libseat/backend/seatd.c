@@ -108,8 +108,10 @@ static void set_error(struct backend_seatd *backend) {
 		return;
 	}
 
+	int stored_errno = errno;
 	backend->error = true;
 	cleanup(backend);
+	errno = stored_errno;
 }
 
 static inline int conn_put(struct backend_seatd *backend, const void *data, const size_t data_len) {
