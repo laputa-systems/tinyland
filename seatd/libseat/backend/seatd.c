@@ -386,31 +386,35 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 	backend->base.impl = &seatd_impl;
 	linked_list_init(&backend->pending_events);
 
+	int res = 0;
 	struct proto_header header = {
 		.opcode = CLIENT_OPEN_SEAT,
 		.size = 0,
 	};
 	if (conn_put(backend, &header, sizeof header) == -1 || read_until_response(backend) == -1) {
+		res = -errno;
 		goto backend_error;
 	}
 
 	struct proto_server_seat_opened rmsg;
 	size_t size = read_header(backend, SERVER_SEAT_OPENED, sizeof rmsg, true);
 	if (size == SIZE_MAX || conn_get(backend, &rmsg, sizeof rmsg) == -1) {
+		res = -errno;
 		goto backend_error;
 	}
 	if (rmsg.seat_name_len != size - sizeof rmsg) {
 		log_errorf("Invalid message: seat_name_len does not match remaining message size (%d != %zd)",
 			   rmsg.seat_name_len, size);
-		errno = EBADMSG;
+		res = -EBADMSG;
 		goto backend_error;
 	}
 	if (rmsg.seat_name_len > MAX_SEAT_LEN) {
 		log_errorf("Invalid message: seat_name too long (%d)", rmsg.seat_name_len);
-		errno = EBADMSG;
+		res = -EBADMSG;
 		goto backend_error;
 	}
 	if (conn_get(backend, backend->seat_name, rmsg.seat_name_len) == -1) {
+		res = -errno;
 		goto backend_error;
 	}
 	// handle old seatd gracefully (seat_name without null byte)
@@ -422,7 +426,7 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 	if (rmsg.seat_name_len == 0 ||
 	    strnlen(backend->seat_name, rmsg.seat_name_len) != (uint16_t)(rmsg.seat_name_len - 1)) {
 		log_error("Invalid message: seat_name not null terminated");
-		errno = EBADMSG;
+		res = -EBADMSG;
 		goto backend_error;
 	}
 
@@ -431,6 +435,7 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 
 backend_error:
 	destroy(backend);
+	errno = -res;
 	return NULL;
 }
 
@@ -447,7 +452,7 @@ static int close_seat(struct libseat *base) {
 	int res = 0;
 	struct backend_seatd *backend = backend_seatd_from_libseat_backend(base);
 	if (backend->error) {
-		res = -1;
+		res = -ENOTCONN;
 		goto done;
 	}
 
@@ -456,17 +461,21 @@ static int close_seat(struct libseat *base) {
 		.size = 0,
 	};
 	if (conn_put(backend, &header, sizeof header) == -1 || read_until_response(backend) == -1) {
-		res = -1;
+		res = -errno;
 	}
 
 	if (read_header(backend, SERVER_SEAT_CLOSED, 0, false) == SIZE_MAX) {
-		res = -1;
+		res = -errno;
 	}
 
 done:
 	execute_events(backend);
 	destroy(backend);
-	return res;
+	if (res < 0) {
+		errno = -res;
+		return -1;
+	}
+	return 0;
 }
 
 static const char *seat_name(struct libseat *base) {
@@ -536,12 +545,17 @@ static int open_device(struct libseat *base, const char *path, int *fd) {
 	struct proto_server_device_opened rmsg;
 	if (read_header(backend, SERVER_DEVICE_OPENED, sizeof rmsg, false) == SIZE_MAX ||
 	    conn_get(backend, &rmsg, sizeof rmsg) == -1 || conn_get_fd(backend, fd)) {
-		res = -1;
+		res = -errno;
+		assert(res < 0);
 	} else {
 		res = rmsg.device_id;
 	}
 
 	check_pending_events(backend);
+	if (res < 0) {
+		errno = -res;
+		return -1;
+	}
 	return res;
 }
 
@@ -570,11 +584,15 @@ static int close_device(struct libseat *base, int device_id) {
 
 	int res = 0;
 	if (read_header(backend, SERVER_DEVICE_CLOSED, 0, false) == SIZE_MAX) {
-		res = -1;
+		res = -errno;
 	}
 
 	check_pending_events(backend);
-	return res;
+	if (res < 0) {
+		errno = -res;
+		return -1;
+	}
+	return 0;
 }
 
 static int switch_session(struct libseat *base, int session) {
@@ -602,11 +620,15 @@ static int switch_session(struct libseat *base, int session) {
 
 	int res = 0;
 	if (read_header(backend, SERVER_SESSION_SWITCHED, 0, false) == SIZE_MAX) {
-		res = -1;
+		res = -errno;
 	}
 
 	check_pending_events(backend);
-	return res;
+	if (res < 0) {
+		errno = -res;
+		return -1;
+	}
+	return 0;
 }
 
 static int disable_seat(struct libseat *base) {
@@ -625,11 +647,15 @@ static int disable_seat(struct libseat *base) {
 
 	int res = 0;
 	if (read_header(backend, SERVER_SEAT_DISABLED, 0, false) == SIZE_MAX) {
-		res = -1;
+		res = -errno;
 	}
 
 	check_pending_events(backend);
-	return res;
+	if (res < 0) {
+		errno = -res;
+		return -1;
+	}
+	return 0;
 }
 
 const struct seat_impl seatd_impl = {
