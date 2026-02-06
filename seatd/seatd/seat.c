@@ -412,6 +412,7 @@ struct seat_device *seat_open_device(struct client *client, const char *path) {
 		log_errorf("Allocation failed: %s", strerror(errno));
 		close(fd);
 		free(device);
+		errno = ENOMEM;
 		return NULL;
 	}
 
