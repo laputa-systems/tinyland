@@ -435,7 +435,6 @@ static int handle_properties_changed(sd_bus_message *msg, void *userdata, sd_bus
 			goto error;
 		}
 		if (strcmp(s, "Active") == 0) {
-			int ret;
 			const char *field = "Active";
 			ret = sd_bus_message_enter_container(msg, 'v', "b");
 			if (ret < 0) {
