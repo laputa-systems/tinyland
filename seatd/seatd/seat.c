@@ -555,7 +555,7 @@ int seat_open_client(struct seat *seat, struct client *client) {
 
 	if (seat->vt_bound && vt_open(client->session) == -1) {
 		log_error("Could not open VT for client");
-		goto error;
+		return -1;
 	}
 
 	for (struct linked_list *elem = client->devices.next; elem != &client->devices;
@@ -566,21 +566,23 @@ int seat_open_client(struct seat *seat, struct client *client) {
 		}
 	}
 
-	client->state = CLIENT_ACTIVE;
-	seat->active_client = client;
 	if (client_send_enable_seat(client) == -1) {
 		log_error("Could not send enable signal to client");
-		goto error;
+		for (struct linked_list *elem = client->devices.next; elem != &client->devices;
+		     elem = elem->next) {
+			struct seat_device *device = (struct seat_device *)elem;
+			seat_deactivate_device(device);
+		}
+		if (seat->vt_bound) {
+			vt_close(client->session);
+		}
+		return -1;
 	}
 
+	client->state = CLIENT_ACTIVE;
+	seat->active_client = client;
 	log_infof("Opened client %d on %s", client->session, seat->seat_name);
 	return 0;
-
-error:
-	if (seat->vt_bound) {
-		vt_close(seat->cur_vt);
-	}
-	return -1;
 }
 
 /*
