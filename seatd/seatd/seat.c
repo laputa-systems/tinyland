@@ -141,7 +141,7 @@ static int vt_ack(struct seat *seat, bool release) {
  * 3. Otherwise, the first client on the seat's list of clients, if any.
  *
  * Be careful not to call seat_activate immediately after closing a client, as
- * this can lead to it immediatley re-opening. The client should be removed as
+ * this can lead to it immediately re-opening. The client should be removed as
  * a candidate before seat_activate is called.
  */
 static int seat_activate(struct seat *seat) {
@@ -182,7 +182,7 @@ done:
 }
 
 /*
- * seat_add_client assigns a sesssion ID to the client and adds it to the seat,
+ * seat_add_client assigns a session ID to the client and adds it to the seat,
  * if allowed. The client does not open the seat, remaining closed until
  * `seat_open_client` is called.
  *
@@ -331,7 +331,7 @@ struct seat_device *seat_open_device(struct client *client, const char *path) {
 	log_debugf("Opening device %s for client %d on %s", path, client->session, seat->seat_name);
 
 	if (client->state != CLIENT_ACTIVE) {
-		log_error("Could open device: client is not active");
+		log_error("Could not open device: client is not active");
 		errno = EPERM;
 		return NULL;
 	}
@@ -654,7 +654,7 @@ int seat_ack_disable_client(struct client *client) {
 
 /*
  * seat_set_next_session queues a new client to be opened based on its session
- * ID. It can only b eperformed by an active client, and only if a switch has
+ * ID. It can only be performed by an active client, and only if a switch has
  * not already been requested. If the seat is VT-bound, a VT switch is
  * performed and the VT ack/release mechanism takes care of the rest to avoid
  * conflicts between the two mechanisms.
