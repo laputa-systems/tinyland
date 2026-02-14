@@ -395,7 +395,7 @@ static int handle_pause_device(sd_bus_message *msg, void *userdata, sd_bus_error
 		set_active(session, false);
 		ret = sd_bus_call_method(session->bus, "org.freedesktop.login1", session->path,
 					 "org.freedesktop.login1.Session", "PauseDeviceComplete",
-					 ret_error, &msg, "uu", major, minor);
+					 ret_error, NULL, "uu", major, minor);
 		if (ret < 0) {
 			log_errorf("Could not send PauseDeviceComplete signal: %s",
 				   ret_error->message);
