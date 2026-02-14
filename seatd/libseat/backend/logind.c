@@ -561,6 +561,9 @@ static int manager_get_session_path(struct backend_logind *session, char **sessi
 	}
 	free(*session_path);
 	*session_path = strdup(path);
+	if (*session_path == NULL) {
+		ret = -ENOMEM;
+	}
 
 out:
 	sd_bus_error_free(&error);
@@ -590,6 +593,9 @@ static int manager_get_seat_path(struct backend_logind *session, char **seat_pat
 	}
 	free(*seat_path);
 	*seat_path = strdup(path);
+	if (*seat_path == NULL) {
+		ret = -ENOMEM;
+	}
 
 out:
 	sd_bus_error_free(&error);
@@ -611,6 +617,10 @@ static int get_display_session(char **session_id) {
 			goto error;
 		}
 		*session_id = strdup(xdg_session_id);
+		if (*session_id == NULL) {
+			ret = -ENOMEM;
+			goto error;
+		}
 		goto success;
 	}
 
