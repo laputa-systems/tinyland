@@ -351,14 +351,13 @@ struct seat_device *seat_open_device(struct client *client, const char *path) {
 
 	int device_id = 1;
 	size_t device_count = 0;
-	struct seat_device *device = NULL;
 	for (struct linked_list *elem = client->devices.next; elem != &client->devices;
 	     elem = elem->next) {
 		struct seat_device *old_device = (struct seat_device *)elem;
 
 		if (strcmp(old_device->path, sanitized_path) == 0) {
 			old_device->ref_cnt++;
-			return device;
+			return old_device;
 		}
 
 		if (old_device->device_id >= device_id) {
@@ -399,7 +398,7 @@ struct seat_device *seat_open_device(struct client *client, const char *path) {
 		abort();
 	}
 
-	device = calloc(1, sizeof(struct seat_device));
+	struct seat_device *device = calloc(1, sizeof(struct seat_device));
 	if (device == NULL) {
 		log_errorf("Allocation failed: %s", strerror(errno));
 		close(fd);
