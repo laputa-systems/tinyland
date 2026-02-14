@@ -36,7 +36,6 @@ struct seat {
 
 	bool vt_bound;
 	int cur_vt;
-	int session_cnt;
 };
 
 struct seat *seat_create(const char *name, bool vt_bound);

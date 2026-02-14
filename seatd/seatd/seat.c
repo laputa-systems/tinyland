@@ -229,7 +229,16 @@ int seat_add_client(struct seat *seat, struct client *client) {
 		}
 		client->session = seat->cur_vt;
 	} else {
-		client->session = seat->session_cnt++;
+		int next_session = 1;
+		for (struct linked_list *elem = seat->clients.next; elem != &seat->clients;
+		     elem = elem->next) {
+			struct client *c = (struct client *)elem;
+			if (c->session == next_session) {
+				next_session++;
+				elem = &seat->clients;
+			}
+		}
+		client->session = next_session;
 	}
 
 	client->seat = seat;
