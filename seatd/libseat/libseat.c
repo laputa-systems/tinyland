@@ -48,7 +48,7 @@ struct libseat *libseat_open_seat(const struct libseat_seat_listener *listener, 
 		while (iter->backend != NULL && strcmp(backend_type, iter->name) != 0) {
 			iter++;
 		}
-		if (iter == NULL || iter->backend == NULL) {
+		if (iter->backend == NULL) {
 			log_errorf("No backend matched name '%s'", backend_type);
 			errno = EINVAL;
 			return NULL;
