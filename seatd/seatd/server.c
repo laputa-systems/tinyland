@@ -158,7 +158,7 @@ int server_handle_connection(int fd, uint32_t mask, void *data) {
 
 	if (mask & EVENT_READABLE) {
 		int new_fd = accept(fd, NULL, NULL);
-		if (fd == -1) {
+		if (new_fd == -1) {
 			log_errorf("Could not accept client connection: %s", strerror(errno));
 			return 0;
 		}
