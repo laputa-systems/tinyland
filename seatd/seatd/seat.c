@@ -282,7 +282,7 @@ void seat_remove_client(struct client *client) {
 			// This client was current, but there were no clients
 			// waiting to take this VT, so clean it up.
 			log_debug("Closing active VT");
-			vt_close(seat->cur_vt);
+			vt_close(client->session);
 		} else if (!was_current && client->state != CLIENT_CLOSED) {
 			// This client was not current, but as the client was
 			// running, we need to clean up the VT.
