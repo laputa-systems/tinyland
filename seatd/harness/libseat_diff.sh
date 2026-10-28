@@ -1,23 +1,14 @@
 #!/bin/sh
-# R3/R7: libseat differential. Runs the same unmodified C libseat scenario
-# (examples/simpletest, seatd backend only) against the C oracle daemon and
-# the Rust port, then diffs the normalized client-visible transcripts.
 set -eu
 cd "$(dirname "$0")/.."
 
 ORACLE_SOCK="$PWD/.work/tmp/oracle.sock"
 RUST_SOCK="$PWD/.work/tmp/libseat-diff-rust.sock"
 
-if [ ! -x .work/tmp/oracle/seatd ] || [ ! -x .work/tmp/oracle/simpletest ]; then
-	uvx meson setup -Dlibseat-logind=disabled -Dlibseat-seatd=enabled \
-		-Dlibseat-builtin=disabled -Dserver=enabled -Dexamples=enabled \
-		-Dman-pages=disabled -Ddefaultpath="$ORACLE_SOCK" \
-		.work/tmp/oracle . > /dev/null
-	ninja -C .work/tmp/oracle > /dev/null
+if [ ! -x .work/tmp/oracle/seatd ] || [ ! -x .work/tmp/client-oracle/simpletest ]; then
+	sh harness/build_oracle.sh
 fi
-if [ ! -x target/debug/seatd ]; then
-	cargo build --offline
-fi
+cargo build --offline --locked
 
 run_case() {
 	name="$1"
@@ -44,15 +35,15 @@ run_case() {
 	fi
 	set +e
 	env SEATD_SOCK="$sock" LIBSEAT_BACKEND=seatd \
-		LD_LIBRARY_PATH="$PWD/.work/tmp/oracle" \
-		timeout 20 .work/tmp/oracle/simpletest /dev/null \
+		LD_LIBRARY_PATH="$PWD/.work/tmp/client-oracle" \
+		timeout 20 .work/tmp/client-oracle/simpletest /dev/null \
 		< /dev/null > ".work/tmp/libseat-diff-$name.raw" 2>&1
 	code=$?
 	set -e
 	echo "exit:$code" >> ".work/tmp/libseat-diff-$name.raw"
 	kill -TERM "$dpid" 2> /dev/null || true
 	wait "$dpid" 2> /dev/null || true
-	sed -E 's/0x[0-9a-f]+/0xPTR/g' ".work/tmp/libseat-diff-$name.raw" \
+	sed -E 's/0x[0-9a-f]+/0xPTR/g; s/^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} /TIME /' ".work/tmp/libseat-diff-$name.raw" \
 		> ".work/tmp/libseat-diff-$name.txt"
 }
 
