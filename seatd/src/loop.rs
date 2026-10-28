@@ -1,20 +1,14 @@
 use crate::admit;
 use crate::conn::Conn;
-use crate::{log_debug, log_error, log_info};
+use crate::effect::RealEffect;
+use crate::session::{self, Client, ClientSlot, Seat};
+use crate::wire::Header;
+use crate::{log_error, log_info};
 use rustix::fd::OwnedFd;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 const WATCHED: [libc::c_int; 4] = [libc::SIGUSR1, libc::SIGUSR2, libc::SIGINT, libc::SIGTERM];
-
-#[allow(dead_code)]
-struct ClientSlot {
-    conn: Conn,
-    pid: libc::pid_t,
-    uid: libc::uid_t,
-    gid: libc::gid_t,
-    dead: bool,
-}
 
 pub struct Server {
     pub running: bool,
@@ -23,6 +17,8 @@ pub struct Server {
     old_mask: libc::sigset_t,
     pollfds: Vec<libc::pollfd>,
     clients: Vec<ClientSlot>,
+    seats: Vec<Seat>,
+    fx: RealEffect,
     dirty: bool,
 }
 
@@ -54,6 +50,12 @@ impl Server {
             }
             (sig_fd, old)
         };
+        let vt_bound = session::vt_bound_from_env();
+        if vt_bound {
+            log_info!("Created VT-bound seat seat0");
+        } else {
+            log_info!("Created seat seat0");
+        }
         Ok(Server {
             running: true,
             listen_fd: None,
@@ -61,6 +63,8 @@ impl Server {
             old_mask: old,
             pollfds: Vec::new(),
             clients: Vec::new(),
+            seats: vec![Seat::new("seat0", vt_bound)],
+            fx: RealEffect,
             dirty: true,
         })
     }
@@ -116,10 +120,10 @@ impl Server {
                     self.running = false;
                 }
                 libc::SIGUSR1 => {
-                    log_debug!("VT release request ignored: no seat yet");
+                    session::seat_vt_release(&mut self.seats[0], &mut self.clients, &mut self.fx);
                 }
                 libc::SIGUSR2 => {
-                    log_debug!("VT acquire ignored: no seat yet");
+                    session::seat_vt_activate(&mut self.seats[0], &mut self.clients, &mut self.fx);
                 }
                 _ => {}
             }
@@ -132,14 +136,54 @@ impl Server {
             Some((fd, creds)) => {
                 self.clients.push(ClientSlot {
                     conn: Conn::new(fd),
-                    pid: creds.pid,
-                    uid: creds.uid,
-                    gid: creds.gid,
+                    client: Client::fresh(creds.pid, creds.uid, creds.gid),
                     dead: false,
                 });
                 self.dirty = true;
             }
             None => {}
+        }
+    }
+
+    fn destroy_client(&mut self, idx: usize) {
+        if self.clients[idx].client.seat.is_some() {
+            session::seat_remove_client(
+                &mut self.seats[0],
+                &mut self.clients,
+                idx,
+                &mut self.fx,
+            );
+        }
+        self.clients[idx].dead = true;
+        self.clients[idx].conn.close_fds();
+        self.dirty = true;
+    }
+
+    fn dispatch_frames(&mut self, idx: usize) {
+        loop {
+            let mut raw = [0u8; 4];
+            if self.clients[idx].conn.get(&mut raw).is_err() {
+                break;
+            }
+            let hdr = Header::decode(&raw);
+            if self.clients[idx].conn.pending() < hdr.size as usize {
+                self.clients[idx].conn.restore(4);
+                break;
+            }
+            match session::handle_opcode(
+                &mut self.seats[0],
+                &mut self.clients,
+                idx,
+                hdr.opcode,
+                hdr.size as usize,
+                &mut self.fx,
+            ) {
+                session::Outcome::Done => {}
+                session::Outcome::Destroy => {
+                    self.destroy_client(idx);
+                    break;
+                }
+            }
         }
     }
 
@@ -168,7 +212,8 @@ impl Server {
                 client.dead = true;
             }
             Ok(_) => {
-                // Frame dispatch arrives in R3; bytes accumulate until then.
+                self.dirty = true;
+                self.dispatch_frames(idx);
             }
             Err(e) if e == libc::EAGAIN => {}
             Err(e) => {
@@ -183,7 +228,6 @@ impl Server {
         let before = self.clients.len();
         self.clients.retain(|c| !c.dead);
         if self.clients.len() != before {
-            log_info!("Client disconnected");
             self.dirty = true;
         }
     }
@@ -238,12 +282,12 @@ impl Server {
             }
             if revents & libc::POLLERR != 0 {
                 log_error!("Connection error");
-                self.clients[i].dead = true;
+                self.destroy_client(i);
                 continue;
             }
             if revents & libc::POLLHUP != 0 {
                 log_info!("Client disconnected");
-                self.clients[i].dead = true;
+                self.destroy_client(i);
                 continue;
             }
             if revents & libc::POLLOUT != 0 {
@@ -267,6 +311,18 @@ impl Server {
     }
 
     pub fn finish(mut self) {
+        let mut i = 0;
+        while i < self.clients.len() {
+            if self.clients[i].client.seat.is_some() {
+                session::seat_remove_client(
+                    &mut self.seats[0],
+                    &mut self.clients,
+                    i,
+                    &mut self.fx,
+                );
+            }
+            i += 1;
+        }
         unsafe {
             drop(self.listen_fd.take());
             drop(self.sig_fd.take());

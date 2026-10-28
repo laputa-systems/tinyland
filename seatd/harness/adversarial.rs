@@ -460,3 +460,100 @@ fn wire_partial_write_keeps_fd_exactly_once() {
         assert_eq!(fd_count, 1, "ancillary rights must not be resent on retry");
     }
 }
+
+use std::io::Write as _Write;
+use std::os::unix::net::UnixStream;
+
+struct Raw {
+    s: UnixStream,
+}
+
+impl Raw {
+    fn connect(sock: &str) -> Raw {
+        let s = UnixStream::connect(sock).expect("connect");
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        s.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        Raw { s }
+    }
+
+    fn send(&mut self, opcode: u16, body: &[u8]) {
+        let mut f = Vec::with_capacity(4 + body.len());
+        f.extend_from_slice(&opcode.to_ne_bytes());
+        f.extend_from_slice(&(body.len() as u16).to_ne_bytes());
+        f.extend_from_slice(body);
+        self.s.write_all(&f).unwrap();
+    }
+
+    fn recv(&mut self) -> Option<(u16, Vec<u8>)> {
+        let mut hdr = [0u8; 4];
+        match self.s.read_exact(&mut hdr) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return None,
+            Err(e) => panic!("read {e}"),
+        }
+        let opcode = u16::from_ne_bytes([hdr[0], hdr[1]]);
+        let size = u16::from_ne_bytes([hdr[2], hdr[3]]) as usize;
+        let mut body = vec![0u8; size];
+        self.s.read_exact(&mut body).unwrap();
+        Some((opcode, body))
+    }
+
+    fn expect_eof(&mut self) {
+        let mut buf = [0u8; 16];
+        match self.s.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => panic!("{n} bytes after expected eof"),
+            Err(e) => panic!("read {e}"),
+        }
+    }
+}
+
+const S_OPEN: u16 = 0x8001;
+const S_CLOSED: u16 = 0x8002;
+const S_PONG: u16 = 0x8007;
+
+fn spawn_with_env(sock: &str, vtbound: Option<&str>) -> Daemon {
+    try_unlink(sock);
+    let mut cmd = Command::new(daemon_bin());
+    cmd.arg("-l")
+        .arg("silent")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(v) = vtbound {
+        cmd.env("SEATD_VTBOUND", v);
+    }
+    cmd.env("SEATD_SOCK", sock);
+    let child = cmd.spawn().expect("spawn");
+    for _ in 0..50 {
+        if std::path::Path::new(sock).exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(std::path::Path::new(sock).exists(), "daemon socket");
+    Daemon { child, sock: sock.to_string() }
+}
+
+#[test]
+fn proto_open_ping_close_unbound() {
+    let sock = ".work/tmp/proto-unbound.sock";
+    let _d = spawn_with_env(sock, Some("0"));
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    assert_eq!(c.recv().unwrap().0, 0x8006);
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, S_PONG);
+    c.send(2, &[]);
+    assert_eq!(c.recv().unwrap().0, S_CLOSED);
+}
+
+#[test]
+fn proto_vtbound_without_tty_fails_loudly() {
+    let sock = ".work/tmp/proto-vtbound.sock";
+    let _d = spawn_with_env(sock, None);
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    c.expect_eof();
+}
