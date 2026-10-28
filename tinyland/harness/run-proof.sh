@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 MODE="$1"
 FAULT="${2:-none}"
 case "$FAULT" in
-  none|atomic-unsupported|no-input|blank|missing-marker|early-crash) ;;
+  none|atomic-unsupported|no-input|blank|missing-marker|frozen|early-crash) ;;
   *) echo "unsupported proof fault: $FAULT" >&2; exit 2 ;;
 esac
 NAME="$MODE"
