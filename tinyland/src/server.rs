@@ -441,12 +441,16 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32, shutdo
         }
         if state.pending_present {
             let pixels = state.compose();
-            if let Err(error) = output.present_pixels(&pixels, w, h) {
-                eprintln!("present failed: {error}");
-                return 1;
-            }
+            let time = match output.present_pixels(&pixels, w, h) {
+                Ok(time) => time,
+                Err(error) => {
+                    if shutdown.signal().is_some() { return 0; }
+                    eprintln!("present failed: {error}");
+                    return 1;
+                }
+            };
             state.pending_present = false;
-            state.presented(now_ms());
+            state.presented(time);
         }
         if let Err(e) = display.flush_clients() {
             eprintln!("flush failed: {e}");

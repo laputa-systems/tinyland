@@ -4,17 +4,12 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0–S5 complete on Linux x86_64 KVM. Final release proofs all exit 0:
-`make smoke` confirms `laputa` and magenta 0.000842; `make wayland-pixels`
-reports magenta 0.001289; `make drm-proof` reports teal avg_rgb 383.0.
-All screenshots are real 1280x800 atomic scanout. QMP quit reaps QEMU.
-`cargo test --locked`: 25 passed. Four negative proof cases pass.
-`make audit`: forbidden libraries absent, zero application unsafe blocks,
-2,694 Rust lines including tests, release executable 3,656,192 bytes.
-Repository completion review is P1/P2 clean for the supported proof scope.
-Red: none. Remaining environment coverage is listed below. No push performed.
-Build timings are unmeasured on the busy host; no timing gate is defined.
-Durable verification details and limits: `docs/verification.md`.
+Accepted: S0–S3 functional guest proof. S4/S5 reopened: legacy modeset
+parity, restricted fallback, package hashes, confirmed presentation, live guest
+negatives, and completion review remain required. Earlier status overstated
+completion. Existing real pixels/input and 25 unit tests are valid evidence.
+Method: finish each missing boundary with a focused check, then run the full
+acceptance commands and the repository completion review. No push.
 
 ## Charter
 

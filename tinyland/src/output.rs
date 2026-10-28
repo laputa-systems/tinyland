@@ -27,24 +27,81 @@ impl Card {
     }
 }
 
-pub struct DrmOutput {
-    card: Card,
+#[derive(Clone, Copy)]
+enum AtomicStage { Capability, Commit }
+
+fn atomic_unsupported(stage: AtomicStage, error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(38 | 95))
+        || matches!(stage, AtomicStage::Capability) && error.raw_os_error() == Some(22)
+}
+
+struct AtomicError {
+    operation: &'static str,
+    source: std::io::Error,
+}
+
+impl AtomicError {
+    fn new(operation: &'static str, source: std::io::Error) -> Self { Self { operation, source } }
+}
+
+impl std::fmt::Display for AtomicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.operation, self.source)
+    }
+}
+
+struct ScanoutBuffer {
+    card: std::sync::Arc<Card>,
     db: DumbBuffer,
     fb: framebuffer::Handle,
+}
+
+impl ScanoutBuffer {
+    fn new(card: std::sync::Arc<Card>, width: u32, height: u32) -> Result<Self, String> {
+        let db = card.create_dumb_buffer((width, height), DrmFourcc::Xrgb8888, 32)
+            .map_err(|error| format!("create dumb {width}x{height}: {error}"))?;
+        let fb = match card.add_framebuffer(&db, 24, 32) {
+            Ok(fb) => fb,
+            Err(error) => {
+                if let Err(cleanup) = card.destroy_dumb_buffer(db) { eprintln!("destroy dumb after add fb failure: {cleanup}"); }
+                return Err(format!("add fb: {error}"));
+            }
+        };
+        Ok(Self { card, db, fb })
+    }
+}
+
+impl Drop for ScanoutBuffer {
+    fn drop(&mut self) {
+        if let Err(error) = self.card.destroy_framebuffer(self.fb) { eprintln!("destroy framebuffer: {error}"); }
+        if let Err(error) = self.card.destroy_dumb_buffer(self.db) { eprintln!("destroy dumb buffer: {error}"); }
+    }
+}
+
+pub struct DrmOutput {
+    card: std::sync::Arc<Card>,
+    buffers: [ScanoutBuffer; 2],
+    front: usize,
+    crtc: drm::control::crtc::Handle,
     width: u32,
     height: u32,
-    stride: u32,
-    mode_path: String,
+    mode_path: &'static str,
 }
 
 impl DrmOutput {
     pub fn open(device: &Path, want_w: u32, want_h: u32) -> Result<Self, String> {
-        let card = Card::open(device).map_err(|e| format!("open {}: {e}", device.display()))?;
-        let _ = card.set_client_capability(drm::ClientCapability::UniversalPlanes, true);
-        let atomic_ok = card
-            .set_client_capability(drm::ClientCapability::Atomic, true)
-            .is_ok();
-        log::info!("drm atomic client cap granted={atomic_ok}");
+        let card = std::sync::Arc::new(Card::open(device).map_err(|e| format!("open {}: {e}", device.display()))?);
+        if let Err(error) = card.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
+            if !atomic_unsupported(AtomicStage::Capability, &error) { return Err(format!("universal planes: {error}")); }
+        }
+        let atomic_ok = match card.set_client_capability(drm::ClientCapability::Atomic, true) {
+            Ok(()) => true,
+            Err(error) if atomic_unsupported(AtomicStage::Capability, &error) => {
+                eprintln!("TINYLAND_ATOMIC_UNSUPPORTED capability: {error}");
+                false
+            }
+            Err(error) => return Err(format!("atomic capability: {error}")),
+        };
 
         let res = card
             .resource_handles()
@@ -81,24 +138,13 @@ impl DrmOutput {
             ));
         }
 
-        let fmt = DrmFourcc::Xrgb8888;
-        let db = card
-            .create_dumb_buffer((w, h), fmt, 32)
-            .map_err(|e| format!("create dumb {w}x{h}: {e}"))?;
-        let fb = card
-            .add_framebuffer(&db, 24, 32)
-            .map_err(|e| format!("add fb: {e}"))?;
-        let stride = db.pitch();
-        log::info!("drm dumb {w}x{h} stride={stride}");
-
+        let crtc = res.crtcs().first().copied().ok_or("no crtc")?;
+        let front = ScanoutBuffer::new(card.clone(), w, h)?;
+        let back = ScanoutBuffer::new(card.clone(), w, h)?;
+        eprintln!("TINYLAND_SCANOUT format=XRGB8888 buffers=2 size={w}x{h}");
         let mut out = DrmOutput {
-            card,
-            db,
-            fb,
-            width: w,
-            height: h,
-            stride,
-            mode_path: String::from("unset"),
+            card, buffers: [front, back], front: 0, crtc,
+            width: w, height: h, mode_path: "unset",
         };
         out.modeset(&mode, con.handle(), atomic_ok)?;
         Ok(out)
@@ -113,11 +159,14 @@ impl DrmOutput {
         if atomic_ok {
             match self.atomic_modeset(mode, con) {
                 Ok(()) => {
-                    self.mode_path = String::from("atomic");
+                    self.mode_path = "atomic";
                     log::info!("drm modeset path=atomic");
                     return Ok(());
                 }
-                Err(e) => log::warn!("drm atomic modeset failed ({e}); falling back to legacy"),
+                Err(error) if atomic_unsupported(AtomicStage::Commit, &error.source) => {
+                    eprintln!("TINYLAND_ATOMIC_UNSUPPORTED {error}");
+                }
+                Err(error) => return Err(format!("atomic modeset: {error}")),
             }
         }
         let res = self
@@ -126,9 +175,9 @@ impl DrmOutput {
             .map_err(|e| format!("resources: {e}"))?;
         let crtc_h = res.crtcs().first().copied().ok_or("no crtc")?;
         self.card
-            .set_crtc(crtc_h, Some(self.fb), (0, 0), &[con], Some(*mode))
+            .set_crtc(crtc_h, Some(self.buffers[self.front].fb), (0, 0), &[con], Some(*mode))
             .map_err(|e| format!("legacy set_crtc: {e}"))?;
-        self.mode_path = String::from("legacy");
+        self.mode_path = "legacy";
         log::info!("drm modeset path=legacy");
         Ok(())
     }
@@ -137,33 +186,33 @@ impl DrmOutput {
         &self,
         mode: &drm::control::Mode,
         con: connector::Handle,
-    ) -> Result<(), String> {
+    ) -> Result<(), AtomicError> {
         use drm::control::{atomic, property};
         let res = self
             .card
             .resource_handles()
-            .map_err(|e| format!("resources: {e}"))?;
-        let crtc_h = res.crtcs().first().copied().ok_or("no crtc")?;
-        let planes = self.card.plane_handles().map_err(|e| format!("planes: {e}"))?;
+            .map_err(|error| AtomicError::new("resources", error))?;
+        let crtc_h = res.crtcs().first().copied().ok_or_else(|| AtomicError::new("crtc", std::io::Error::other("no crtc")))?;
+        let planes = self.card.plane_handles().map_err(|error| AtomicError::new("planes", error))?;
         let mut primary: Option<drm::control::plane::Handle> = None;
         for p in &planes {
             let info = self
                 .card
                 .get_plane(*p)
-                .map_err(|e| format!("plane info: {e}"))?;
+                .map_err(|error| AtomicError::new("plane info", error))?;
             if !res.filter_crtcs(info.possible_crtcs()).contains(&crtc_h) {
                 continue;
             }
             let props = self
                 .card
                 .get_properties(*p)
-                .map_err(|e| format!("plane props: {e}"))?;
+                .map_err(|error| AtomicError::new("plane props", error))?;
             let mut is_primary = false;
             for (id, val) in props.iter() {
                 let pinfo = self
                     .card
                     .get_property(*id)
-                    .map_err(|e| format!("prop info: {e}"))?;
+                    .map_err(|error| AtomicError::new("prop info", error))?;
                 if pinfo.name().to_str().map(|x| x == "type").unwrap_or(false)
                     && *val == (drm::control::PlaneType::Primary as u64).into()
                 {
@@ -175,87 +224,87 @@ impl DrmOutput {
                 break;
             }
         }
-        let plane = primary.ok_or("no primary plane for crtc")?;
+        let plane = primary.ok_or_else(|| AtomicError::new("plane", std::io::Error::other("no primary plane for crtc")))?;
         let con_props = self
             .card
             .get_properties(con)
-            .map_err(|e| format!("con props: {e}"))?
-            .as_hashmap(&self.card)
-            .map_err(|e| format!("con props map: {e}"))?;
+            .map_err(|error| AtomicError::new("con props", error))?
+            .as_hashmap(self.card.as_ref())
+            .map_err(|error| AtomicError::new("con props map", error))?;
         let crtc_props = self
             .card
             .get_properties(crtc_h)
-            .map_err(|e| format!("crtc props: {e}"))?
-            .as_hashmap(&self.card)
-            .map_err(|e| format!("crtc props map: {e}"))?;
+            .map_err(|error| AtomicError::new("crtc props", error))?
+            .as_hashmap(self.card.as_ref())
+            .map_err(|error| AtomicError::new("crtc props map", error))?;
         let plane_props = self
             .card
             .get_properties(plane)
-            .map_err(|e| format!("plane props: {e}"))?
-            .as_hashmap(&self.card)
-            .map_err(|e| format!("plane props map: {e}"))?;
+            .map_err(|error| AtomicError::new("plane props", error))?
+            .as_hashmap(self.card.as_ref())
+            .map_err(|error| AtomicError::new("plane props map", error))?;
         let blob = self
             .card
             .create_property_blob(mode)
-            .map_err(|e| format!("blob: {e}"))?;
+            .map_err(|error| AtomicError::new("blob", error))?;
         let mut req = atomic::AtomicModeReq::new();
         req.add_property(
             con,
-            con_props["CRTC_ID"].handle(),
+            con_props.get("CRTC_ID").ok_or_else(|| AtomicError::new("atomic property CRTC_ID", std::io::Error::other("missing property")))?.handle(),
             property::Value::CRTC(Some(crtc_h)),
         );
-        req.add_property(crtc_h, crtc_props["MODE_ID"].handle(), blob);
+        req.add_property(crtc_h, crtc_props.get("MODE_ID").ok_or_else(|| AtomicError::new("atomic property MODE_ID", std::io::Error::other("missing property")))?.handle(), blob);
         req.add_property(
             crtc_h,
-            crtc_props["ACTIVE"].handle(),
+            crtc_props.get("ACTIVE").ok_or_else(|| AtomicError::new("atomic property ACTIVE", std::io::Error::other("missing property")))?.handle(),
             property::Value::Boolean(true),
         );
         req.add_property(
             plane,
-            plane_props["FB_ID"].handle(),
-            property::Value::Framebuffer(Some(self.fb)),
+            plane_props.get("FB_ID").ok_or_else(|| AtomicError::new("atomic property FB_ID", std::io::Error::other("missing property")))?.handle(),
+            property::Value::Framebuffer(Some(self.buffers[self.front].fb)),
         );
         req.add_property(
             plane,
-            plane_props["CRTC_ID"].handle(),
+            plane_props.get("CRTC_ID").ok_or_else(|| AtomicError::new("atomic property CRTC_ID", std::io::Error::other("missing property")))?.handle(),
             property::Value::CRTC(Some(crtc_h)),
         );
-        req.add_property(plane, plane_props["SRC_X"].handle(), property::Value::UnsignedRange(0));
-        req.add_property(plane, plane_props["SRC_Y"].handle(), property::Value::UnsignedRange(0));
+        req.add_property(plane, plane_props.get("SRC_X").ok_or_else(|| AtomicError::new("atomic property SRC_X", std::io::Error::other("missing property")))?.handle(), property::Value::UnsignedRange(0));
+        req.add_property(plane, plane_props.get("SRC_Y").ok_or_else(|| AtomicError::new("atomic property SRC_Y", std::io::Error::other("missing property")))?.handle(), property::Value::UnsignedRange(0));
         let (mw, mh) = mode.size();
         req.add_property(
             plane,
-            plane_props["SRC_W"].handle(),
+            plane_props.get("SRC_W").ok_or_else(|| AtomicError::new("atomic property SRC_W", std::io::Error::other("missing property")))?.handle(),
             property::Value::UnsignedRange((mw as u64) << 16),
         );
         req.add_property(
             plane,
-            plane_props["SRC_H"].handle(),
+            plane_props.get("SRC_H").ok_or_else(|| AtomicError::new("atomic property SRC_H", std::io::Error::other("missing property")))?.handle(),
             property::Value::UnsignedRange((mh as u64) << 16),
         );
         req.add_property(
             plane,
-            plane_props["CRTC_X"].handle(),
+            plane_props.get("CRTC_X").ok_or_else(|| AtomicError::new("atomic property CRTC_X", std::io::Error::other("missing property")))?.handle(),
             property::Value::SignedRange(0),
         );
         req.add_property(
             plane,
-            plane_props["CRTC_Y"].handle(),
+            plane_props.get("CRTC_Y").ok_or_else(|| AtomicError::new("atomic property CRTC_Y", std::io::Error::other("missing property")))?.handle(),
             property::Value::SignedRange(0),
         );
         req.add_property(
             plane,
-            plane_props["CRTC_W"].handle(),
+            plane_props.get("CRTC_W").ok_or_else(|| AtomicError::new("atomic property CRTC_W", std::io::Error::other("missing property")))?.handle(),
             property::Value::UnsignedRange(mw as u64),
         );
         req.add_property(
             plane,
-            plane_props["CRTC_H"].handle(),
+            plane_props.get("CRTC_H").ok_or_else(|| AtomicError::new("atomic property CRTC_H", std::io::Error::other("missing property")))?.handle(),
             property::Value::UnsignedRange(mh as u64),
         );
         self.card
             .atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req)
-            .map_err(|e| format!("atomic commit: {e}"))?;
+            .map_err(|error| AtomicError::new("atomic commit", error))?;
         Ok(())
     }
 
@@ -267,59 +316,48 @@ impl DrmOutput {
         &self.mode_path
     }
 
-    pub fn fill_solid(&mut self, r: u8, g: u8, b: u8) -> Result<(), String> {
-        let stride = self.stride as usize;
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let mut map = self
-            .card
-            .map_dumb_buffer(&mut self.db)
-            .map_err(|e| format!("map: {e}"))?;
-        for y in 0..h {
-            for x in 0..w {
-                let o = y * stride + x * 4;
-                map[o] = b;
-                map[o + 1] = g;
-                map[o + 2] = r;
-                map[o + 3] = 0xFF;
+    pub fn fill_solid(&mut self, r: u8, g: u8, b: u8) -> Result<u32, String> {
+        let mut pixels = vec![0; self.width as usize * self.height as usize * 4];
+        for pixel in pixels.chunks_exact_mut(4) { pixel.copy_from_slice(&[b, g, r, 255]); }
+        self.present_pixels(&pixels, self.width, self.height)
+    }
+
+    pub fn present_pixels(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<u32, String> {
+        if (width, height) != self.size() || pixels.len() != width as usize * height as usize * 4 {
+            return Err("presentation must cover the complete output".into());
+        }
+        let back = 1 - self.front;
+        let buffer = &mut self.buffers[back];
+        let stride = buffer.db.pitch() as usize;
+        let row_bytes = width as usize * 4;
+        let mut map = self.card.map_dumb_buffer(&mut buffer.db).map_err(|error| format!("map scanout: {error}"))?;
+        for y in 0..height as usize {
+            map[y * stride..y * stride + row_bytes].copy_from_slice(&pixels[y * row_bytes..(y + 1) * row_bytes]);
+        }
+        drop(map);
+        let rect = drm::control::ClipRect::new(0, 0, width as u16, height as u16);
+        self.card.dirty_framebuffer(buffer.fb, &[rect]).map_err(|error| format!("dirty framebuffer: {error}"))?;
+        self.card.page_flip(self.crtc, buffer.fb, drm::control::PageFlipFlags::EVENT, None)
+            .map_err(|error| format!("queue page flip: {error}"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let timeout = deadline.checked_duration_since(std::time::Instant::now()).ok_or("page flip timed out")?;
+            let timeout = rustix::time::Timespec::try_from(timeout).map_err(|error| format!("page flip timeout: {error}"))?;
+            let mut fds = [rustix::event::PollFd::new(self.card.as_ref(), rustix::event::PollFlags::IN)];
+            rustix::event::poll(&mut fds, Some(&timeout)).map_err(|error| format!("page flip poll: {error}"))?;
+            if !fds[0].revents().contains(rustix::event::PollFlags::IN) {
+                return Err("page flip timed out or device disconnected".into());
+            }
+            let events = self.card.receive_events().map_err(|error| format!("page flip events: {error}"))?;
+            for event in events {
+                if let drm::control::Event::PageFlip(event) = event {
+                    if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
+                    self.front = back;
+                    eprintln!("TINYLAND_PRESENTED sequence={} time_ms={} path={}", event.frame, event.duration.as_millis(), self.mode_path);
+                    return Ok(event.duration.as_millis() as u32);
+                }
             }
         }
-        drop(map);
-        self.dirty()
-    }
-
-    pub fn present_pixels(&mut self, pixels: &[u8], pw: u32, ph: u32) -> Result<(), String> {
-        let stride = self.stride as usize;
-        let w = (pw.min(self.width)) as usize;
-        let h = (ph.min(self.height)) as usize;
-        let src_stride = pw as usize * 4;
-        let mut map = self
-            .card
-            .map_dumb_buffer(&mut self.db)
-            .map_err(|e| format!("map: {e}"))?;
-        for y in 0..h {
-            let src_o = y * src_stride;
-            let dst_o = y * stride;
-            map[dst_o..dst_o + w * 4].copy_from_slice(&pixels[src_o..src_o + w * 4]);
-        }
-        drop(map);
-        self.dirty()
-    }
-
-    fn dirty(&self) -> Result<(), String> {
-        let rect = drm::control::ClipRect::new(0, 0, self.width as u16, self.height as u16);
-        match self.card.dirty_framebuffer(self.fb, &[rect]) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
-            Err(e) => Err(format!("dirty fb: {e}")),
-        }
-    }
-}
-
-impl Drop for DrmOutput {
-    fn drop(&mut self) {
-        let _ = self.card.destroy_framebuffer(self.fb);
-        let _ = self.card.destroy_dumb_buffer(self.db);
     }
 }
 
@@ -341,5 +379,22 @@ pub fn drm_proof(device: &Path, width: u32, height: u32, shutdown: &crate::shutd
             eprintln!("drm-proof failed: {e}");
             1
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_unsupported_atomic_failures_allow_legacy_fallback() {
+        for errno in [38, 95] {
+            assert!(atomic_unsupported(AtomicStage::Capability, &std::io::Error::from_raw_os_error(errno)));
+            assert!(atomic_unsupported(AtomicStage::Commit, &std::io::Error::from_raw_os_error(errno)));
+        }
+        assert!(atomic_unsupported(AtomicStage::Capability, &std::io::Error::from_raw_os_error(22)));
+        for errno in [1, 5, 12, 13, 19, 22] {
+            assert!(!atomic_unsupported(AtomicStage::Commit, &std::io::Error::from_raw_os_error(errno)));
+        }
+        assert!(!atomic_unsupported(AtomicStage::Capability, &std::io::Error::from_raw_os_error(13)));
     }
 }
