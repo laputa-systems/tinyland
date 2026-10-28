@@ -704,6 +704,14 @@ pub fn run(
     command: &[std::ffi::OsString],
     shutdown: &crate::shutdown::Shutdown,
 ) -> i32 {
+    let runtime_dir = match validate_runtime_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("runtime dir: {error}");
+            return 1;
+        }
+    };
+
     let mut output = match DrmOutput::open(device, width, height) {
         Ok(o) => o,
         Err(e) => {
@@ -747,9 +755,6 @@ pub fn run(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or(socket_name_str.clone());
     eprintln!("TINYLAND_SOCKET {sock_name:?}");
-    eprintln!("TINYLAND_COMPOSITOR_READY");
-
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
 
     let keyboard = match Keyboard::new() {
         Ok(keyboard) => keyboard,
@@ -765,15 +770,33 @@ pub fn run(
         Ok(app) => app,
         Err(error) => { eprintln!("foot spawn failed: {error}"); return 1; }
     };
+    eprintln!("TINYLAND_COMPOSITOR_READY socket={sock_name} size={w}x{h} path={}", output.mode_path());
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
-    let poll_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
+    let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
         if shutdown.signal().is_some() { return 0; }
+        let poll_timeout = match output.flip_deadline() {
+            Some(deadline) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    base_timeout
+                } else {
+                    let remaining = deadline - now;
+                    if remaining.as_nanos() < 500_000_000 {
+                        rustix::time::Timespec::try_from(remaining).unwrap_or(base_timeout)
+                    } else {
+                        base_timeout
+                    }
+                }
+            }
+            None => base_timeout,
+        };
         let mut fds = vec![
             rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
             rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
+            rustix::event::PollFd::new(&output, rustix::event::PollFlags::IN),
         ];
         for device in &devices {
             fds.push(rustix::event::PollFd::new(device, rustix::event::PollFlags::IN));
@@ -789,6 +812,20 @@ pub fn run(
             }
         }
         drop(fds);
+        if output.has_pending_flip() {
+            match output.poll_flip() {
+                Ok(Some(time)) => {
+                    state.pending_present = false;
+                    state.presented(time);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if shutdown.signal().is_some() { return 0; }
+                    eprintln!("present failed: {error}");
+                    return 1;
+                }
+            }
+        }
         for device in &mut devices {
             match input::read_keys(device) {
                 Ok(keys) => for (code, down) in keys { state.key(code, down); },
@@ -796,6 +833,10 @@ pub fn run(
             }
         }
         if let Err(error) = app.reap() { eprintln!("{error}"); return 1; }
+        if app.exited() {
+            eprintln!("TINYLAND_SESSION_END primary client exited");
+            return 0;
+        }
         loop {
             match socket.accept() {
                 Ok(Some(stream)) => {
@@ -814,18 +855,13 @@ pub fn run(
             eprintln!("dispatch failed: {e}");
             return 1;
         }
-        if state.pending_present {
+        if state.pending_present && !output.has_pending_flip() {
             let pixels = state.compose();
-            let time = match output.present_pixels(&pixels, w, h) {
-                Ok(time) => time,
-                Err(error) => {
-                    if shutdown.signal().is_some() { return 0; }
-                    eprintln!("present failed: {error}");
-                    return 1;
-                }
-            };
-            state.pending_present = false;
-            state.presented(time);
+            if let Err(error) = output.queue_present(&pixels, w, h) {
+                if shutdown.signal().is_some() { return 0; }
+                eprintln!("present failed: {error}");
+                return 1;
+            }
         }
         if let Err(e) = display.flush_clients() {
             eprintln!("flush failed: {e}");
@@ -834,9 +870,38 @@ pub fn run(
     }
 }
 
+fn validate_runtime_dir() -> Result<String, String> {
+    let dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| "XDG_RUNTIME_DIR is not set".to_string())?;
+    let path = std::path::Path::new(&dir);
+    if !path.is_absolute() {
+        return Err("XDG_RUNTIME_DIR is not absolute".into());
+    }
+    let metadata = std::fs::metadata(path).map_err(|e| format!("stat XDG_RUNTIME_DIR: {e}"))?;
+    if !metadata.is_dir() {
+        return Err("XDG_RUNTIME_DIR is not a directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = rustix::process::getuid().as_raw();
+        if metadata.uid() != euid {
+            return Err(format!("XDG_RUNTIME_DIR is not owned by uid {euid}"));
+        }
+        let mode = metadata.mode() & 0o777;
+        if mode != 0o700 {
+            eprintln!("TINYLAND_RUNTIME_DIR_PERMS mode={mode:o} expected=700");
+        }
+    }
+    Ok(dir)
+}
+
 struct App(Option<std::process::Child>);
 
 impl App {
+    fn exited(&self) -> bool {
+        self.0.is_none()
+    }
+
     fn reap(&mut self) -> Result<(), String> {
         if let Some(child) = &mut self.0 {
             if let Some(status) = child.try_wait().map_err(|e| format!("foot wait: {e}"))? {
