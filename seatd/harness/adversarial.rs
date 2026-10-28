@@ -503,6 +503,7 @@ impl Raw {
         match self.s.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => panic!("{n} bytes after expected eof"),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
             Err(e) => panic!("read {e}"),
         }
     }
@@ -556,4 +557,84 @@ fn proto_vtbound_without_tty_fails_loudly() {
     let mut c = Raw::connect(sock);
     c.send(1, &[]);
     c.expect_eof();
+}
+
+const S_ERROR: u16 = 0xffff;
+
+fn open_unbound_client(sock: &str) -> (Daemon, Raw) {
+    let d = spawn_with_env(sock, Some("0"));
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    assert_eq!(c.recv().unwrap().0, 0x8006);
+    (d, c)
+}
+
+#[test]
+fn device_unsupported_paths_are_errors_not_death() {
+    let sock = ".work/tmp/dev-unsupported.sock";
+    let (_d, mut c) = open_unbound_client(sock);
+    // NOTE: valid-prefix paths that resolve to real host devices are N2
+    // material and never touched here.
+    for path in [
+        "/dev/null",
+        "/dev/zero",
+        "/dev/tty",
+        "/dev/dri/card99",
+        "/dev/input/event99",
+        "/dev/hidraw99",
+        "/dev/../dev/null",
+        "/dev/input/../null",
+        "",
+    ] {
+        let mut req = ((path.len() + 1) as u16).to_ne_bytes().to_vec();
+        req.extend_from_slice(path.as_bytes());
+        req.push(0);
+        c.send(3, &req);
+        let (op, body) = c.recv().unwrap();
+        assert_eq!(op, S_ERROR, "path {path:?}");
+        let code = i32::from_ne_bytes(body[..4].try_into().unwrap());
+        assert_eq!(code, libc::ENOENT, "path {path:?}");
+    }
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, S_PONG);
+}
+
+#[test]
+fn device_overlong_path_is_protocol_error() {
+    let sock = ".work/tmp/dev-overlong.sock";
+    let (_d, mut c) = open_unbound_client(sock);
+    let long = "a".repeat(300);
+    let mut req = ((long.len() + 1) as u16).to_ne_bytes().to_vec();
+    req.extend_from_slice(long.as_bytes());
+    req.push(0);
+    c.send(3, &req);
+    c.expect_eof();
+}
+
+#[test]
+fn device_ops_without_seat_destroy() {
+    let sock = ".work/tmp/dev-noseat.sock";
+    let _d = spawn_with_env(sock, Some("0"));
+    let mut c = Raw::connect(sock);
+    let mut req = 10u16.to_ne_bytes().to_vec();
+    req.extend_from_slice(b"/dev/null\0");
+    c.send(3, &req);
+    c.expect_eof();
+    let mut c2 = Raw::connect(sock);
+    c2.send(4, &1i32.to_ne_bytes());
+    c2.expect_eof();
+}
+
+#[test]
+fn device_close_then_stale_id_is_ebadf() {
+    let sock = ".work/tmp/dev-stale.sock";
+    let (_d, mut c) = open_unbound_client(sock);
+    c.send(4, &1i32.to_ne_bytes());
+    let (op, body) = c.recv().unwrap();
+    assert_eq!(op, S_ERROR);
+    assert_eq!(i32::from_ne_bytes(body[..4].try_into().unwrap()), libc::EBADF);
+    c.send(4, &1i32.to_ne_bytes());
+    let (op, _) = c.recv().unwrap();
+    assert_eq!(op, S_ERROR);
 }

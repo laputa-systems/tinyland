@@ -1,8 +1,8 @@
 use crate::conn::Conn;
-use crate::effect::{canonicalize, classify_linux, Effect};
+use crate::device;
+use crate::effect::Effect;
 use crate::wire::*;
 use rustix::fd::OwnedFd;
-use std::os::unix::io::{AsRawFd, FromRawFd};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClientState {
@@ -89,7 +89,7 @@ pub fn vt_bound_from_env() -> bool {
     }
 }
 
-fn errno_last() -> i32 {
+pub(crate) fn errno_last() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL)
 }
 
@@ -195,150 +195,6 @@ fn seat_add_client_assign(
     Ok(())
 }
 
-fn seat_find_device(slots: &Vec<ClientSlot>, idx: usize, device_id: i32) -> Result<usize, i32> {
-    if device_id == 0 {
-        return Err(libc::EINVAL);
-    }
-    for (i, dev) in slots[idx].client.devices.iter().enumerate() {
-        if dev.device_id == device_id {
-            return Ok(i);
-        }
-    }
-    Err(libc::ENOENT)
-}
-
-fn seat_deactivate_device(
-    slots: &mut Vec<ClientSlot>,
-    idx: usize,
-    dev: usize,
-    fx: &mut dyn Effect,
-) -> Result<(), i32> {
-    let active = slots[idx].client.devices[dev].active;
-    if !active {
-        return Ok(());
-    }
-    let (fd, dev_type) = {
-        let d = &slots[idx].client.devices[dev];
-        (d.fd.as_ref().unwrap().as_raw_fd(), d.dev_type)
-    };
-    let r = fx.deactivate_device(fd, dev_type);
-    if r.is_ok() {
-        slots[idx].client.devices[dev].active = false;
-    }
-    r
-}
-
-fn seat_close_device(slots: &mut Vec<ClientSlot>, idx: usize, dev: usize, fx: &mut dyn Effect) {
-    let dev_rc = slots[idx].client.devices[dev].ref_cnt;
-    if dev_rc > 1 {
-        slots[idx].client.devices[dev].ref_cnt -= 1;
-        return;
-    }
-    let saved = errno_last();
-    let mut dev = slots[idx].client.devices.remove(dev);
-    if dev.fd.is_some() {
-        let raw = dev.fd.as_ref().unwrap().as_raw_fd();
-        let _ = fx.deactivate_device(raw, dev.dev_type);
-        dev.fd.take();
-    }
-    unsafe {
-        *libc::__errno_location() = saved;
-    }
-}
-
-fn seat_activate_device(
-    slots: &mut Vec<ClientSlot>,
-    idx: usize,
-    dev: usize,
-    fx: &mut dyn Effect,
-) -> Result<(), i32> {
-    if slots[idx].client.devices[dev].active {
-        return Ok(());
-    }
-    let (fd, dev_type) = {
-        let d = &slots[idx].client.devices[dev];
-        (d.fd.as_ref().unwrap().as_raw_fd(), d.dev_type)
-    };
-    fx.activate_device(fd, dev_type)?;
-    slots[idx].client.devices[dev].active = true;
-    Ok(())
-}
-
-fn resolve_device(path: &str) -> Result<(String, DeviceType), i32> {
-    let sanitized = canonicalize(path)?;
-    let dev_type = classify_linux(&sanitized).ok_or(libc::ENOENT)?;
-    Ok((sanitized, dev_type))
-}
-
-fn seat_open_device_inner(
-    seat: &Seat,
-    slots: &mut Vec<ClientSlot>,
-    idx: usize,
-    path: &str,
-    fx: &mut dyn Effect,
-) -> Result<(i32, OwnedFd), i32> {
-    if slots[idx].client.state != ClientState::Active {
-        return Err(libc::EPERM);
-    }
-    let (sanitized, dev_type) = resolve_device(path)?;
-    seat_open_device_resolved(seat, slots, idx, &sanitized, dev_type, fx)
-}
-
-fn seat_open_device_resolved(
-    seat: &Seat,
-    slots: &mut Vec<ClientSlot>,
-    idx: usize,
-    sanitized: &str,
-    dev_type: DeviceType,
-    fx: &mut dyn Effect,
-) -> Result<(i32, OwnedFd), i32> {
-    if slots[idx].client.state != ClientState::Active {
-        return Err(libc::EPERM);
-    }
-    assert_eq!(seat.active_client, Some(idx));
-    let mut device_id = 1i32;
-    let mut count = 0usize;
-    for dev in slots[idx].client.devices.iter_mut() {
-        if dev.path == sanitized {
-            dev.ref_cnt += 1;
-            let dup = unsafe { libc::dup(dev.fd.as_ref().unwrap().as_raw_fd()) };
-            if dup < 0 {
-                dev.ref_cnt -= 1;
-                return Err(errno_last());
-            }
-            return Ok((dev.device_id, unsafe { OwnedFd::from_raw_fd(dup) }));
-        }
-        if dev.device_id >= device_id {
-            device_id = dev.device_id + 1;
-        }
-        count += 1;
-    }
-    if count >= MAX_SEAT_DEVICES {
-        return Err(libc::EMFILE);
-    }
-    let fd = fx.open_device(&sanitized, dev_type)?;
-    slots[idx].client.devices.push(SeatDevice {
-        device_id,
-        fd: Some(fd),
-        ref_cnt: 1,
-        active: true,
-        path: sanitized.to_string(),
-        dev_type,
-    });
-    let dup = unsafe {
-        libc::dup(
-            slots[idx].client.devices.last().unwrap().fd.as_ref().unwrap().as_raw_fd(),
-        )
-    };
-    if dup < 0 {
-        let e = errno_last();
-        let n = slots[idx].client.devices.len() - 1;
-        seat_close_device(slots, idx, n, fx);
-        return Err(e);
-    }
-    Ok((device_id, unsafe { OwnedFd::from_raw_fd(dup) }))
-}
-
 fn seat_open_client(
     seat: &mut Seat,
     slots: &mut Vec<ClientSlot>,
@@ -359,13 +215,13 @@ fn seat_open_client(
         }
     }
     for dev in 0..slots[idx].client.devices.len() {
-        if seat_activate_device(slots, idx, dev, fx).is_err() {
+        if device::activate_device(slots, idx, dev, fx).is_err() {
             crate::log_error!("Could not activate device, continuing");
         }
     }
     if let Err(e) = send_enable(&mut slots[idx].conn) {
         for dev in 0..slots[idx].client.devices.len() {
-            let _ = seat_deactivate_device(slots, idx, dev, fx);
+            let _ = device::deactivate_device(slots, idx, dev, fx);
         }
         if seat.vt_bound {
             let _ = fx.vt_close(session);
@@ -420,7 +276,7 @@ pub fn seat_remove_client(
     }
     seat.clients.retain(|c| *c != idx);
     while !slots[idx].client.devices.is_empty() {
-        seat_close_device(slots, idx, 0, fx);
+        device::close_device(slots, idx, 0, fx);
     }
     let was_current = seat.active_client == Some(idx);
     if was_current {
@@ -451,7 +307,7 @@ fn seat_disable_client(
     }
     assert_eq!(seat.active_client, Some(idx));
     for dev in 0..slots[idx].client.devices.len() {
-        if seat_deactivate_device(slots, idx, dev, fx).is_err() {
+        if device::deactivate_device(slots, idx, dev, fx).is_err() {
             crate::log_error!("Could not deactivate device, continuing");
         }
     }
@@ -624,7 +480,7 @@ fn handle_open_device(
         Err(_) => return Err(-1),
     };
     let _ = seat;
-    match seat_open_device_inner(&*seat, slots, idx, &path_str, fx) {
+    match device::open_device(seat.active_client, slots, idx, &path_str, fx) {
         Ok((device_id, dupfd)) => {
             if slots[idx].conn.put_fd(dupfd).is_err() {
                 return Err(-1);
@@ -670,13 +526,13 @@ fn handle_close_device(
         return Err(-1);
     }
     let device_id = i32::from_ne_bytes([msg[0], msg[1], msg[2], msg[3]]);
-    match seat_find_device(slots, idx, device_id) {
+    match device::find_device(slots, idx, device_id) {
         Err(_) => {
             let _ = send_error(&mut slots[idx].conn, libc::EBADF);
             Ok(())
         }
         Ok(dev) => {
-            seat_close_device(slots, idx, dev, fx);
+            device::close_device(slots, idx, dev, fx);
             send_simple(&mut slots[idx].conn, SERVER_DEVICE_CLOSED).map_err(|_| -1)?;
             Ok(())
         }
@@ -787,6 +643,7 @@ pub fn handle_opcode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::io::FromRawFd;
     use crate::effect::NullEffect;
 
     fn pair_conns() -> (Conn, Conn) {
@@ -1026,17 +883,17 @@ mod tests {
         slots[0].client.seat = Some(0);
         seat.clients.push(0);
         seat.active_client = Some(0);
-        let (id1, _f1) = seat_open_device_resolved(&seat, &mut slots, 0, "/dev/input/event0", DeviceType::Evdev, &mut fx).unwrap();
-        let (id2, _f2) = seat_open_device_resolved(&seat, &mut slots, 0, "/dev/input/event0", DeviceType::Evdev, &mut fx).unwrap();
+        let (id1, _f1) = device::open_device_resolved(seat.active_client, &mut slots, 0, "/dev/input/event0", DeviceType::Evdev, &mut fx).unwrap();
+        let (id2, _f2) = device::open_device_resolved(seat.active_client, &mut slots, 0, "/dev/input/event0", DeviceType::Evdev, &mut fx).unwrap();
         assert_eq!((id1, id2), (1, 1));
         assert_eq!(slots[0].client.devices.len(), 1);
         assert_eq!(slots[0].client.devices[0].ref_cnt, 2);
-        assert!(seat_find_device(&slots, 0, 2).is_err());
-        assert!(seat_find_device(&slots, 1, 1).is_err());
-        assert!(seat_find_device(&slots, 0, 1).is_ok());
-        seat_close_device(&mut slots, 0, 0, &mut fx);
+        assert!(device::find_device(&slots, 0, 2).is_err());
+        assert!(device::find_device(&slots, 1, 1).is_err());
+        assert!(device::find_device(&slots, 0, 1).is_ok());
+        device::close_device(&mut slots, 0, 0, &mut fx);
         assert_eq!(slots[0].client.devices[0].ref_cnt, 1);
-        seat_close_device(&mut slots, 0, 0, &mut fx);
+        device::close_device(&mut slots, 0, 0, &mut fx);
         assert!(slots[0].client.devices.is_empty());
     }
 
@@ -1050,9 +907,9 @@ mod tests {
         seat.active_client = Some(a);
         for i in 0..MAX_SEAT_DEVICES {
             let p = format!("/dev/input/event{i}");
-            seat_open_device_resolved(&seat, &mut slots, a, &p, DeviceType::Evdev, &mut fx).unwrap();
+            device::open_device_resolved(seat.active_client, &mut slots, a, &p, DeviceType::Evdev, &mut fx).unwrap();
         }
-        let r = seat_open_device_resolved(&seat, &mut slots, a, "/dev/input/event999", DeviceType::Evdev, &mut fx);
+        let r = device::open_device_resolved(seat.active_client, &mut slots, a, "/dev/input/event999", DeviceType::Evdev, &mut fx);
         assert_eq!(r.unwrap_err(), libc::EMFILE);
     }
 
