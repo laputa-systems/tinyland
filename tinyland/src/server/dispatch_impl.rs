@@ -6,9 +6,8 @@ use crate::surface::SurfaceData;
 use std::os::unix::io::OwnedFd;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
-    wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_region, wl_seat,
-    wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device_manager, wl_data_device, wl_data_source, wl_data_offer, wl_keyboard, wl_output, wl_region, wl_seat,
+    wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 
@@ -156,12 +155,13 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
         let id = resource.id();
         if let Some(s) = state.surfaces.remove(&id) {
             if let Some(parent) = s.parent {
-                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.children.retain(|child| child != &id); }
+                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &id);
+                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &id); } }
             }
             for seat in &mut state.seats {
                 if seat.keyboard_focus.as_ref() == Some(&id) { seat.keyboard_focus = None; }
             }
-            for child in s.children {
+            for child in s.stacking {
                 if let Some(c) = state.surfaces.get_mut(&child) {
                     c.parent = None;
                 }
@@ -209,7 +209,13 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                 let sub = data_init.init(id, ());
                 let sub_id = sub.id();
                 let mut ancestor = Some(parent_id.clone());
+                let mut depth = 0;
                 while let Some(id) = ancestor {
+                    depth += 1;
+                    if depth >= 64 {
+                        _resource.post_error(wl_subcompositor::Error::BadSurface as u32, "subsurface nesting exceeds 64 levels");
+                        return;
+                    }
                     if id == surf_id {
                         _resource.post_error(wl_subcompositor::Error::BadSurface as u32, "subsurface parent cycle");
                         return;
@@ -233,7 +239,8 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                     s.subsurface_sync = true;
                 }
                 if let Some(p) = state.surfaces.get_mut(&parent_id) {
-                    p.children.push(surf_id.clone());
+                    p.stacking.push(surf_id.clone());
+                    if let Some(order) = &mut p.pending_stacking { order.push(surf_id.clone()); }
                 }
                 state.subsurfaces.insert(sub_id, surf_id);
             }
@@ -249,6 +256,19 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
         _data: &(),
     ) {
     }
+}
+
+fn restack(state: &mut State, resource: &wl_subsurface::WlSubsurface,
+    id: &wayland_server::backend::ObjectId, sibling: &wayland_server::backend::ObjectId, above: bool) {
+    let parent = state.surfaces.get(id).and_then(|surface| surface.parent.clone());
+    let valid = parent.as_ref().and_then(|parent| state.surfaces.get(parent))
+        .is_some_and(|parent| id != sibling && parent.stacking.contains(sibling));
+    if !valid { resource.post_error(wl_subsurface::Error::BadSurface as u32, "restack target is not a sibling or parent"); return; }
+    let parent = state.surfaces.get_mut(&parent.unwrap()).unwrap();
+    let order = parent.pending_stacking.get_or_insert_with(|| parent.stacking.clone());
+    order.retain(|child| child != id);
+    let position = order.iter().position(|child| child == sibling).unwrap() + usize::from(above);
+    order.insert(position, id.clone());
 }
 
 impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
@@ -276,14 +296,9 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                     s.subsurface_sync = true;
                 }
             }
-            wl_subsurface::Request::SetDesync => {
-                if let Some(s) = state.surfaces.get_mut(&surf_id) {
-                    s.subsurface_sync = false;
-                }
-                state.apply_commit(&surf_id);
-            }
-            wl_subsurface::Request::PlaceAbove { .. } => {}
-            wl_subsurface::Request::PlaceBelow { .. } => {}
+            wl_subsurface::Request::SetDesync => state.desynchronize(&surf_id),
+            wl_subsurface::Request::PlaceAbove { sibling } => restack(state, resource, &surf_id, &sibling.id(), true),
+            wl_subsurface::Request::PlaceBelow { sibling } => restack(state, resource, &surf_id, &sibling.id(), false),
             wl_subsurface::Request::Destroy => {}
             _ => {}
         }
@@ -301,7 +316,8 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                 surface.parent.take()
             });
             if let Some(parent) = parent {
-                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.children.retain(|child| child != &surf_id); }
+                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &surf_id);
+                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &surf_id); } }
             }
             state.pending_present = true;
         }
@@ -484,8 +500,7 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for State {
         );
         let (w, h) = state.out_size;
         out.mode(wl_output::Mode::Current | wl_output::Mode::Preferred, w as i32, h as i32, 60000);
-        out.done();
-        out.scale(1);
+        if out.version() >= 2 { out.scale(1); out.done(); }
         state.outputs.push((client.id(), out));
     }
 }
@@ -528,7 +543,7 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
     ) {
         let seat = data_init.init(resource, ());
         seat.capabilities(wl_seat::Capability::Keyboard);
-        seat.name("seat0".to_string());
+        if seat.version() >= 2 { seat.name("seat0".to_string()); }
         state.seats.push(SeatData::new(seat));
         let _ = client;
     }
@@ -545,29 +560,14 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            wl_seat::Request::GetPointer { id } => {
-                let ptr = data_init.init(id, ());
-                if let Some(seat) = state.seats.iter_mut().find(|seat| seat.resource == *resource) {
-                    seat.pointers.push(ptr.clone());
-                }
-                if let Some(focus) = state
-                    .toplevels
-                    .values()
-                    .find(|t| t.mapped)
-                    .map(|t| t.surface.clone())
-                {
-                    let serial = state.next_serial();
-                    if let Some(s) = state.surfaces.get(&focus) {
-                        ptr.enter(serial, &s.resource, 0.0, 0.0);
-                        ptr.frame();
-                    }
-                }
+            wl_seat::Request::GetPointer { .. } | wl_seat::Request::GetTouch { .. } => {
+                resource.post_error(wl_seat::Error::MissingCapability as u32, "seat has keyboard capability only");
             }
             wl_seat::Request::GetKeyboard { id } => {
                 let kb = data_init.init(id, ());
                 use std::os::fd::AsFd;
                 kb.keymap(wl_keyboard::KeymapFormat::XkbV1, state.keyboard.keymap.as_fd(), state.keyboard.keymap_size);
-                kb.repeat_info(25, 600);
+                if kb.version() >= 4 { kb.repeat_info(25, 600); }
                 if let Some(seat) = state.seats.iter_mut().find(|seat| seat.resource == *resource) {
                     seat.keyboards.push(kb);
                 }
@@ -575,9 +575,6 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                     let serial = state.next_serial();
                     state.send_keyboard_enter(&focus, serial);
                 }
-            }
-            wl_seat::Request::GetTouch { id } => {
-                let _touch: wl_touch::WlTouch = data_init.init(id, ());
             }
             wl_seat::Request::Release => {}
             _ => {}
@@ -589,57 +586,6 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         _state: &mut Self,
         _client: wayland_server::backend::ClientId,
         _resource: &wl_seat::WlSeat,
-        _data: &(),
-    ) {
-    }
-}
-
-impl Dispatch<wl_pointer::WlPointer, ()> for State {
-    fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &wl_pointer::WlPointer,
-        request: wl_pointer::Request,
-        _data: &(),
-        _dh: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            wl_pointer::Request::SetCursor { .. } => {}
-            wl_pointer::Request::Release => {}
-            _ => {}
-        }
-    }
-
-    fn destroyed(
-        state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        resource: &wl_pointer::WlPointer,
-        _data: &(),
-    ) {
-        let id = resource.id();
-        for seat in &mut state.seats {
-            seat.pointers.retain(|p| p.id() != id);
-        }
-    }
-}
-
-impl Dispatch<wl_touch::WlTouch, ()> for State {
-    fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &wl_touch::WlTouch,
-        _request: wl_touch::Request,
-        _data: &(),
-        _dh: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-    }
-
-    fn destroyed(
-        _state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        _resource: &wl_touch::WlTouch,
         _data: &(),
     ) {
     }
@@ -674,152 +620,114 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
     }
 }
 
+impl State {
+    pub(super) fn send_selection(&mut self) {
+        let devices: Vec<_> = self.selection.devices.values().cloned().collect();
+        for device in devices {
+            let Some(client) = device.client() else { continue; };
+            let focused = self.seats.iter().any(|seat| seat.resource.client().as_ref() == Some(&client) && seat.keyboard_focus.is_some());
+            if !focused { continue; }
+            let source = self.selection.selection.as_ref().and_then(|id| self.selection.sources.get(id));
+            if let Some(source) = source {
+                let offer = match client.create_resource::<wl_data_offer::WlDataOffer, (), State>(&self.dh, device.version(), ()) {
+                    Ok(offer) => offer,
+                    Err(error) => { eprintln!("clipboard offer creation: {error}"); continue; }
+                };
+                device.data_offer(&offer);
+                for mime in &source.mime_types { offer.offer(mime.clone()); }
+                device.selection(Some(&offer));
+                self.selection.offers.insert(offer.id(), source.resource.clone());
+            } else {
+                device.selection(None);
+            }
+        }
+    }
+}
+
 impl GlobalDispatch<wl_data_device_manager::WlDataDeviceManager, ()> for State {
-    fn bind(
-        _state: &mut Self,
-        _dh: &DisplayHandle,
-        _client: &Client,
-        resource: New<wl_data_device_manager::WlDataDeviceManager>,
-        _global_data: &(),
-        data_init: &mut DataInit<'_, Self>,
-    ) {
+    fn bind(_state: &mut Self, _dh: &DisplayHandle, _client: &Client,
+        resource: New<wl_data_device_manager::WlDataDeviceManager>, _data: &(), data_init: &mut DataInit<'_, Self>) {
         data_init.init(resource, ());
     }
 }
 
 impl Dispatch<wl_data_device_manager::WlDataDeviceManager, ()> for State {
-    fn request(
-        state: &mut Self,
-        client: &Client,
-        _resource: &wl_data_device_manager::WlDataDeviceManager,
-        request: wl_data_device_manager::Request,
-        _data: &(),
-        dh: &DisplayHandle,
-        data_init: &mut DataInit<'_, Self>,
-    ) {
+    fn request(state: &mut Self, _client: &Client, _resource: &wl_data_device_manager::WlDataDeviceManager,
+        request: wl_data_device_manager::Request, _data: &(), _dh: &DisplayHandle, data_init: &mut DataInit<'_, Self>) {
         match request {
             wl_data_device_manager::Request::CreateDataSource { id } => {
-                let src = data_init.init(id, ());
-                state.selection.sources.insert(
-                    src.id(),
-                    crate::selection::DataSourceData {
-                        resource: Some(src),
-                        mime_types: Vec::new(),
-                        dnd_actions: 0,
-                    },
-                );
+                let source = data_init.init(id, ());
+                state.selection.sources.insert(source.id(), crate::selection::DataSourceData { resource: source, mime_types: Vec::new() });
             }
-            wl_data_device_manager::Request::GetDataDevice { id, seat } => {
-                let _ = seat;
-                let dev = data_init.init(id, ());
-                let offer_version = 1u32;
-                let _ = (client, dh, offer_version);
-                state.selection.devices.insert(
-                    dev.id(),
-                    crate::selection::DataDeviceData {
-                        resource: dev,
-                        client_offers: Vec::new(),
-                    },
-                );
+            wl_data_device_manager::Request::GetDataDevice { id, .. } => {
+                let device = data_init.init(id, ());
+                state.selection.devices.insert(device.id(), device);
+                state.send_selection();
             }
             _ => {}
         }
-    }
-
-    fn destroyed(
-        _state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        _resource: &wl_data_device_manager::WlDataDeviceManager,
-        _data: &(),
-    ) {
     }
 }
 
 impl Dispatch<wl_data_source::WlDataSource, ()> for State {
-    fn request(
-        state: &mut Self,
-        _client: &Client,
-        resource: &wl_data_source::WlDataSource,
-        request: wl_data_source::Request,
-        _data: &(),
-        _dh: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            wl_data_source::Request::Offer { mime_type } => {
-                if let Some(s) = state.selection.sources.get_mut(&resource.id()) {
-                    if s.mime_types.len() < 64 && mime_type.len() < 256 {
-                        s.mime_types.push(mime_type);
-                    }
-                }
-            }
-            wl_data_source::Request::Destroy => {}
-            _ => {}
+    fn request(state: &mut Self, _client: &Client, resource: &wl_data_source::WlDataSource,
+        request: wl_data_source::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
+        if let wl_data_source::Request::Offer { mime_type } = request {
+            if let Some(source) = state.selection.sources.get_mut(&resource.id()) { source.mime_types.push(mime_type); }
         }
     }
 
-    fn destroyed(
-        state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        resource: &wl_data_source::WlDataSource,
-        _data: &(),
-    ) {
+    fn destroyed(state: &mut Self, _client: wayland_server::backend::ClientId,
+        resource: &wl_data_source::WlDataSource, _data: &()) {
         state.selection.sources.remove(&resource.id());
         if state.selection.selection.as_ref() == Some(&resource.id()) {
             state.selection.selection = None;
+            state.send_selection();
         }
     }
 }
 
 impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
-    fn request(
-        state: &mut Self,
-        _client: &Client,
-        _resource: &wl_data_device::WlDataDevice,
-        request: wl_data_device::Request,
-        _data: &(),
-        _dh: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
+    fn request(state: &mut Self, client: &Client, resource: &wl_data_device::WlDataDevice,
+        request: wl_data_device::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
         match request {
-            wl_data_device::Request::SetSelection { source, .. } => {
-                state.selection.selection = source.map(|s| s.id());
+            wl_data_device::Request::SetSelection { source, serial } => {
+                let focused = state.seats.iter().any(|seat| seat.resource.client().as_ref() == Some(client) && seat.keyboard_focus.is_some());
+                if !focused || serial > state.serial { return; }
+                let next = source.map(|source| source.id());
+                if next == state.selection.selection { return; }
+                if let Some(old) = state.selection.selection.take().and_then(|id| state.selection.sources.get(&id)) { old.resource.cancelled(); }
+                state.selection.selection = next;
+                state.send_selection();
             }
-            wl_data_device::Request::StartDrag { .. } => {}
-            wl_data_device::Request::Release => {}
+            wl_data_device::Request::StartDrag { source, .. } => {
+                if let Some(source) = source { source.cancelled(); }
+                resource.leave();
+            }
             _ => {}
         }
     }
 
-    fn destroyed(
-        state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        resource: &wl_data_device::WlDataDevice,
-        _data: &(),
-    ) {
-        state.selection.devices.remove(&resource.id());
-    }
+    fn destroyed(state: &mut Self, _client: wayland_server::backend::ClientId,
+        resource: &wl_data_device::WlDataDevice, _data: &()) { state.selection.devices.remove(&resource.id()); }
 }
 
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
-    fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &wl_data_offer::WlDataOffer,
-        _request: wl_data_offer::Request,
-        _data: &(),
-        _dh: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
+    fn request(state: &mut Self, _client: &Client, resource: &wl_data_offer::WlDataOffer,
+        request: wl_data_offer::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
+        let Some(source) = state.selection.offers.get(&resource.id()).filter(|source| source.is_alive()) else { return; };
+        match request {
+            wl_data_offer::Request::Accept { mime_type, .. } => source.target(mime_type),
+            wl_data_offer::Request::Receive { mime_type, fd } => {
+                use std::os::fd::AsFd;
+                source.send(mime_type, fd.as_fd());
+            }
+            _ => {}
+        }
     }
 
-    fn destroyed(
-        _state: &mut Self,
-        _client: wayland_server::backend::ClientId,
-        _resource: &wl_data_offer::WlDataOffer,
-        _data: &(),
-    ) {
-    }
+    fn destroyed(state: &mut Self, _client: wayland_server::backend::ClientId,
+        resource: &wl_data_offer::WlDataOffer, _data: &()) { state.selection.offers.remove(&resource.id()); }
 }
 
 impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for State {
@@ -878,7 +786,7 @@ pub fn handle_get_xdg_surface(
     }
     let xsurf = data_init.init(id, ());
     let xsurf_id = xsurf.id();
-    state.xdg_surfaces.insert(xsurf_id, XdgSurfaceData::new(xsurf, surf_id.clone()));
+    state.xdg_surfaces.insert(xsurf_id, XdgSurfaceData::new(surf_id.clone()));
     if let Some(s) = state.surfaces.get_mut(&surf_id) {
         s.has_role = true;
     }
@@ -938,7 +846,6 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
                 };
                 let _ = parent;
                 let popup = data_init.init(id, ());
-                state.popups.insert(popup.id());
                 if let Some(x) = state.xdg_surfaces.get_mut(&xsurf_id) {
                     x.has_popup = true;
                 }
@@ -1000,6 +907,8 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         let id = resource.id();
         if let Some(x) = state.xdg_surfaces.remove(&id) {
             state.toplevels.retain(|_, t| t.surface != x.surface);
+            state.clear_focus(&x.surface);
+            state.pending_present = true;
         }
     }
 }
@@ -1045,45 +954,15 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for State {
 
 impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
     fn request(
-        state: &mut Self,
+        _state: &mut Self,
         _client: &Client,
-        resource: &xdg_toplevel::XdgToplevel,
+        _resource: &xdg_toplevel::XdgToplevel,
         request: xdg_toplevel::Request,
         _data: &(),
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let id = resource.id();
         match request {
-            xdg_toplevel::Request::SetTitle { title } => {
-                if let Some(t) = state.toplevels.get_mut(&id) {
-                    t.title = title;
-                }
-            }
-            xdg_toplevel::Request::SetAppId { app_id } => {
-                if let Some(t) = state.toplevels.get_mut(&id) {
-                    t.app_id = app_id;
-                }
-            }
-            xdg_toplevel::Request::SetMaximized => {}
-            xdg_toplevel::Request::UnsetMaximized => {}
-            xdg_toplevel::Request::SetFullscreen { .. } => {
-                if let Some(t) = state.toplevels.get_mut(&id) {
-                    t.fullscreen = true;
-                }
-            }
-            xdg_toplevel::Request::UnsetFullscreen => {
-                if let Some(t) = state.toplevels.get_mut(&id) {
-                    t.fullscreen = true;
-                }
-            }
-            xdg_toplevel::Request::SetMinimized => {}
-            xdg_toplevel::Request::SetMaxSize { .. } => {}
-            xdg_toplevel::Request::SetMinSize { .. } => {}
-            xdg_toplevel::Request::Move { .. } => {}
-            xdg_toplevel::Request::Resize { .. } => {}
-            xdg_toplevel::Request::ShowWindowMenu { .. } => {}
-            xdg_toplevel::Request::SetParent { .. } => {}
             xdg_toplevel::Request::Destroy => {}
             _ => {}
         }
@@ -1095,7 +974,10 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         resource: &xdg_toplevel::XdgToplevel,
         _data: &(),
     ) {
-        state.toplevels.remove(&resource.id());
+        if let Some(top) = state.toplevels.remove(&resource.id()) {
+            state.clear_focus(&top.surface);
+            state.pending_present = true;
+        }
     }
 }
 

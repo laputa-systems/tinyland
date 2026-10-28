@@ -1,7 +1,7 @@
 mod input;
+mod selection;
 mod shutdown;
 mod output;
-mod selection;
 mod server;
 mod shell;
 mod shm;

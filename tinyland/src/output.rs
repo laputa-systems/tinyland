@@ -66,10 +66,6 @@ impl DrmOutput {
             .modes()
             .first()
             .copied()
-            .or_else(|| {
-                use drm::control::Mode;
-                None::<Mode>
-            })
             .ok_or_else(|| {
                 format!(
                     "connector {:?} has no modes; requested {want_w}x{want_h}",
@@ -78,9 +74,6 @@ impl DrmOutput {
             })?;
         let (mw, mh) = mode.size();
         log::info!("drm connector {:?} mode {mw}x{mh}", con.handle());
-        // Scanout requires the framebuffer to match the mode size exactly
-        // (virtio-gpu rejects mismatched sizes with ENOSPC). Requested size
-        // is only a lower bound hint; modes smaller than requested fail here.
         let (w, h): (u32, u32) = (mw.into(), mh.into());
         if w < want_w || h < want_h {
             return Err(format!(
@@ -89,7 +82,7 @@ impl DrmOutput {
         }
 
         let fmt = DrmFourcc::Xrgb8888;
-        let mut db = card
+        let db = card
             .create_dumb_buffer((w, h), fmt, 32)
             .map_err(|e| format!("create dumb {w}x{h}: {e}"))?;
         let fb = card
@@ -348,34 +341,5 @@ pub fn drm_proof(device: &Path, width: u32, height: u32, shutdown: &crate::shutd
             eprintln!("drm-proof failed: {e}");
             1
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn solid_fill_layout_xrgb() {
-        let w = 2u32;
-        let h = 1u32;
-        let stride = w as usize * 4;
-        let mut buf = vec![0u8; stride * h as usize];
-        let (r, g, b) = (0x1Au8, 0x99u8, 0xCCu8);
-        for x in 0..w as usize {
-            let o = x * 4;
-            buf[o] = b;
-            buf[o + 1] = g;
-            buf[o + 2] = r;
-            buf[o + 3] = 0xFF;
-        }
-        assert_eq!(buf, vec![0xCC, 0x99, 0x1A, 0xFF, 0xCC, 0x99, 0x1A, 0xFF]);
-    }
-
-    #[test]
-    fn oversize_source_is_clipped() {
-        let dst_w = 2u32;
-        let src_w = 4u32;
-        assert!(src_w > dst_w);
     }
 }

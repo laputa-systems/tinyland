@@ -4,7 +4,7 @@ use crate::selection::SelectionState;
 use crate::shell::{ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
 use crate::surface::{SurfaceData, SurfaceUpdate};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::unix::io::AsFd;
 use std::sync::Arc;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
@@ -32,14 +32,13 @@ pub struct State {
     surfaces: HashMap<ObjectId, SurfaceData>,
     toplevels: HashMap<ObjectId, ToplevelData>,
     xdg_surfaces: HashMap<ObjectId, XdgSurfaceData>,
-    popups: HashSet<ObjectId>,
     subsurfaces: HashMap<ObjectId, ObjectId>,
     pools: HashMap<ObjectId, ShmPoolData>,
     buffers: HashMap<ObjectId, (wl_buffer::WlBuffer, ShmBufferData)>,
     seats: Vec<SeatData>,
     outputs: Vec<(ClientId, wl_output::WlOutput)>,
-    selection: SelectionState,
     regions: HashMap<ObjectId, Vec<(i32, i32, i32, i32)>>,
+    selection: SelectionState,
     pending_present: bool,
     mapped_logged: bool,
 }
@@ -54,14 +53,13 @@ impl State {
         surfaces: HashMap::new(),
         toplevels: HashMap::new(),
         xdg_surfaces: HashMap::new(),
-        popups: HashSet::new(),
         subsurfaces: HashMap::new(),
         pools: HashMap::new(),
         buffers: HashMap::new(),
         seats: Vec::new(),
         outputs: Vec::new(),
-        selection: SelectionState::default(),
         regions: HashMap::new(),
+        selection: SelectionState::default(),
         pending_present: false,
         mapped_logged: false,
         }
@@ -138,9 +136,22 @@ impl State {
         self.pending_present = true;
     }
 
+    fn desynchronize(&mut self, id: &ObjectId) {
+        let Some(surface) = self.surfaces.get_mut(id) else { return; };
+        surface.subsurface_sync = false;
+        if self.synchronized(id) { return; }
+        if let Some(update) = self.surfaces.get_mut(id).unwrap().cached.take() {
+            self.surfaces.get_mut(id).unwrap().apply(update);
+            self.flush_children(id);
+            self.pending_present = true;
+        }
+    }
+
     fn flush_children(&mut self, parent: &ObjectId) {
-        let children = self.surfaces[parent].children.clone();
-        for id in children {
+        let surface = self.surfaces.get_mut(parent).unwrap();
+        if let Some(order) = surface.pending_stacking.take() { surface.stacking = order; }
+        let children = surface.stacking.clone();
+        for id in children.into_iter().filter(|id| id != parent) {
             if let Some(child) = self.surfaces.get_mut(&id) {
                 if let Some(position) = child.pending_pos.take() { child.subsurface_pos = position; }
                 if let Some(update) = child.cached.take() { child.apply(update); }
@@ -154,12 +165,6 @@ impl State {
             .iter()
             .find(|(_, t)| &t.surface == surf_id)
             .map(|(id, _)| id.clone())
-    }
-
-    fn is_mapped_toplevel(&self, surf_id: &ObjectId) -> bool {
-        self.toplevels
-            .values()
-            .any(|t| &t.surface == surf_id && t.mapped)
     }
 
     fn try_map(&mut self, surf_id: &ObjectId) {
@@ -193,8 +198,8 @@ impl State {
                 }
             }
         }
-        self.send_pointer_enter(surf_id, serial);
         self.send_keyboard_enter(surf_id, serial);
+        self.send_selection();
         self.pending_present = true;
         if !self.mapped_logged {
             self.mapped_logged = true;
@@ -204,19 +209,6 @@ impl State {
 
     fn client_of_surface(&mut self, surf_id: &ObjectId) -> Option<ClientId> {
         self.dh.get_client(surf_id.clone()).map(|c| c.id()).ok()
-    }
-
-    fn send_pointer_enter(&mut self, surf_id: &ObjectId, serial: u32) {
-        let resource = match self.surfaces.get(surf_id) {
-            Some(s) => s.resource.clone(),
-            None => return,
-        };
-        for seat in &mut self.seats {
-            for ptr in &seat.pointers {
-                ptr.enter(serial, &resource, 0.0, 0.0);
-                ptr.frame();
-            }
-        }
     }
 
     fn clear_focus(&mut self, id: &ObjectId) {
@@ -272,8 +264,9 @@ impl State {
         let mut stack = vec![top.surface.clone()];
         while let Some(id) = stack.pop() {
             if let Some(surface) = self.surfaces.get_mut(&id) {
+                if surface.pixels.is_none() { continue; }
                 for callback in surface.callbacks.drain(..) { callback.done(time); }
-                stack.extend(surface.children.clone());
+                stack.extend(surface.stacking.iter().filter(|child| **child != id).cloned());
             }
         }
     }
@@ -282,11 +275,13 @@ impl State {
         let Some(surface) = self.surfaces.get(surf_id) else { return; };
         let x = ox.saturating_add(surface.subsurface_pos.0);
         let y = oy.saturating_add(surface.subsurface_pos.1);
-        if let Some(pixels) = &surface.pixels {
-            blit_rows(fb, self.out_size.0, self.out_size.1, &pixels.bytes,
-                pixels.width, pixels.height, x, y, pixels.format);
+        let Some(pixels) = &surface.pixels else { return; };
+        for id in &surface.stacking {
+            if id == surf_id {
+                blit_rows(fb, self.out_size.0, self.out_size.1, &pixels.bytes,
+                    pixels.width, pixels.height, x, y, pixels.format);
+            } else { self.blit_surface(id, x, y, fb); }
         }
-        for child in &surface.children { self.blit_surface(child, x, y, fb); }
     }
 }
 

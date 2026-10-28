@@ -1,5 +1,5 @@
 use crate::shm::SurfacePixels;
-use wayland_server::backend::ObjectId;
+use wayland_server::{backend::ObjectId, Resource};
 use wayland_server::protocol::{wl_callback, wl_surface};
 
 #[derive(Debug, Default)]
@@ -29,7 +29,8 @@ pub struct SurfaceData {
     pub pixels: Option<SurfacePixels>,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub parent: Option<ObjectId>,
-    pub children: Vec<ObjectId>,
+    pub stacking: Vec<ObjectId>,
+    pub pending_stacking: Option<Vec<ObjectId>>,
     pub subsurface_pos: (i32, i32),
     pub pending_pos: Option<(i32, i32)>,
     pub subsurface_sync: bool,
@@ -39,9 +40,10 @@ pub struct SurfaceData {
 
 impl SurfaceData {
     pub fn new(resource: wl_surface::WlSurface) -> Self {
+        let id = resource.id();
         Self {
             resource, pending: PendingState::default(), cached: None, pixels: None,
-            callbacks: Vec::new(), parent: None, children: Vec::new(),
+            callbacks: Vec::new(), parent: None, stacking: vec![id], pending_stacking: None,
             subsurface_pos: (0, 0), pending_pos: None, subsurface_sync: true,
             has_role: false, is_popup: false,
         }

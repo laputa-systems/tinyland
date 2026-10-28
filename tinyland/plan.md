@@ -4,13 +4,17 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0–S4. Real guest smoke and negative screenshot/text/crash checks
-pass. Protocol tests cover retained buffers, pool growth/truncation, synchronized
-children, serial rejection, callback presentation, destruction, cycles, and
-positioner errors. Feature/link audit passes with zero application unsafe blocks.
-Red: none. Next: S5 remove dead code and complete repository review + final proofs.
-Steering: serial, bounded S4 complete. Finish remaining cleanup and review without
-expanding the feature set. Timing claims remain unmeasured on the busy host.
+Accepted: S0–S5 complete on Linux x86_64 KVM. Final release proofs all exit 0:
+`make smoke` confirms `laputa` and magenta 0.000842; `make wayland-pixels`
+reports magenta 0.001289; `make drm-proof` reports teal avg_rgb 383.0.
+All screenshots are real 1280x800 atomic scanout. QMP quit reaps QEMU.
+`cargo test --locked`: 25 passed. Four negative proof cases pass.
+`make audit`: forbidden libraries absent, zero application unsafe blocks,
+2,694 Rust lines including tests, release executable 3,656,192 bytes.
+Repository completion review is P1/P2 clean for the supported proof scope.
+Red: none. Remaining environment coverage is listed below. No push performed.
+Build timings are unmeasured on the busy host; no timing gate is defined.
+Durable verification details and limits: `docs/verification.md`.
 
 ## Charter
 
@@ -54,7 +58,7 @@ Delegated (executor decides, smallest reversible assumption, log it):
 
 - Tree: `plan.md` + `rust-toolchain.toml` only, zero commits. Known red: none yet; executor re-records before S1.
 - Verified 2026-10-28: cage exists and builds on wlroots+xkbcommon (behavioral ref only); `wayland-server` 0.31.14 default backend is Rust; `drm` 0.15.0 bypasses libdrm; laputa repo exists with `boot/ docs/ guest/ system/` dirs; active toolchain `nightly-2026-09-15`; QEMU 11.1.2; `/dev/kvm` + `/dev/dri/card0` present; `foot` absent on host (guest-only).
-- Verified for S3: foot 1.17.2 source requires compositor 4, subcompositor 1, shm 1, xdg shell 1, seat 5; positional command is supported. Laputa reference harness and QMP failure semantics were read before input implementation.
+- Verified for S3: foot 1.17.2 source requires compositor 4, subcompositor 1, shm 1, xdg shell 1, seat 5, and data device manager 3; positional command is supported. Laputa reference harness and QMP failure semantics were read before input implementation.
 - Loop timings: `cargo --version` 0.023s; `git status` 0.001s. `cargo check/test`, QEMU boot unmeasured (no code). Time them in S0. Host load ~16.5 on 32 cores at preflight; if `perf-gate-ready -s` reports busy, perf numbers are deferred, never gating.
 
 ## Sequence
@@ -78,9 +82,10 @@ All items serial on the integrated tree. Each ends with its acceptance + narrowe
 
 ## Needs environment
 
-- macOS aarch64 HVF smoke: `make smoke` on Apple Silicon host. P0 does not gate on it.
-- Linux aarch64 KVM smoke: `make smoke ARCH=aarch64` on KVM host.
-- If executor lacks `/dev/kvm`: owner runs `make smoke` on KVM host and pastes result; campaign completes locally without it.
+Non-gating, unimplemented: macOS aarch64 HVF and Linux aarch64 KVM harness
+ports and proofs. Both need architecture-specific guest images and QEMU
+arguments plus appropriate hosts. The current harness supports Linux x86_64
+KVM only; an `ARCH` assignment does not select another guest.
 
 ## Execution boundary and non-goals
 
@@ -92,5 +97,5 @@ Contract changes: toolchain pinned to `nightly-2026-09-15` (user direction, not 
 ## Reference
 
 - Cage (`cage-kiosk/cage`): single-fullscreen policy + lifecycle reference; wlroots-based, not a dependency.
-- Laputa harness to read before S3: `system/qemu.xsh`, `guest/qemu-dwl-foot-proof.xsh`, `boot/qmp-proof.py`, `docs/QEMU.md`, `profiles/qemu-dwl-foot.xsh`. Preserve QMP/screenshot/input/timeout/failure semantics; adapt, do not import image machinery.
+- External reference: Laputa in the sibling laputa-systems repository. Its QEMU construction, guest proof, QMP helper, QEMU documentation, and foot profile informed input and timeout semantics. No image machinery was imported.
 - `wayland-server` 0.31.14 + `wayland-protocols` generated defs; `drm` 0.15.0 + `rustix`; `libxkbcommon` isolated to input. Foot source pinned by executor for global-version truth.

@@ -29,8 +29,12 @@ impl Fixture {
     }
 
     fn request(&mut self, object: &impl Resource, opcode: u16, args: &[u32]) -> Vec<u8> {
+        self.request_id(object.id().protocol_id(), opcode, args)
+    }
+
+    fn request_id(&mut self, id: u32, opcode: u16, args: &[u32]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(object.id().protocol_id().to_ne_bytes());
+        bytes.extend(id.to_ne_bytes());
         bytes.extend((((8 + args.len() * 4) as u32) << 16 | opcode as u32).to_ne_bytes());
         for arg in args { bytes.extend(arg.to_ne_bytes()); }
         self.socket.write_all(&bytes).unwrap();
@@ -59,7 +63,7 @@ impl Fixture {
     fn toplevel(&mut self, surface: &wl_surface::WlSurface) -> wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface {
         use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
         let xdg = self.client.create_resource::<xdg_surface::XdgSurface, (), State>(&self.state.dh, 1, ()).unwrap();
-        self.state.xdg_surfaces.insert(xdg.id(), XdgSurfaceData::new(xdg.clone(), surface.id()));
+        self.state.xdg_surfaces.insert(xdg.id(), XdgSurfaceData::new(surface.id()));
         let top = self.client.create_resource::<xdg_toplevel::XdgToplevel, (), State>(&self.state.dh, 1, ()).unwrap();
         let mut data = ToplevelData::new(top.clone(), xdg.clone(), surface.id());
         data.last_configure = 7;
@@ -73,7 +77,7 @@ fn synchronized_child_waits_for_parent_and_preserves_uncommitted_state() {
     let mut f = Fixture::new();
     let parent = f.surface();
     let child = f.surface();
-    f.state.surfaces.get_mut(&parent.id()).unwrap().children.push(child.id());
+    f.state.surfaces.get_mut(&parent.id()).unwrap().stacking.push(child.id());
     f.state.surfaces.get_mut(&child.id()).unwrap().parent = Some(parent.id());
     let buffer = f.buffer(&[1; 8]);
     f.request(&child, 1, &[buffer.id().protocol_id(), 0, 0]);
@@ -154,7 +158,7 @@ fn destroying_child_detaches_parent_and_clears_keyboard_focus() {
     let mut f = Fixture::new();
     let parent = f.surface();
     let child = f.surface();
-    f.state.surfaces.get_mut(&parent.id()).unwrap().children.push(child.id());
+    f.state.surfaces.get_mut(&parent.id()).unwrap().stacking.push(child.id());
     f.state.surfaces.get_mut(&child.id()).unwrap().parent = Some(parent.id());
     let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
     let mut seat = SeatData::new(seat);
@@ -162,7 +166,7 @@ fn destroying_child_detaches_parent_and_clears_keyboard_focus() {
     f.state.seats.push(seat);
     f.request(&child, 0, &[]);
     assert!(!f.state.surfaces.contains_key(&child.id()));
-    assert!(f.state.surfaces[&parent.id()].children.is_empty());
+    assert_eq!(f.state.surfaces[&parent.id()].stacking, [parent.id()]);
     assert!(f.state.seats[0].keyboard_focus.is_none());
 }
 
@@ -219,4 +223,114 @@ fn app_owner_kills_and_reaps_child_on_early_return() {
     let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
     drop(App(Some(child)));
     assert!(matches!(rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()), Err(rustix::io::Errno::CHILD)));
+}
+
+#[test]
+fn desync_applies_cached_commit_without_consuming_pending_attachment() {
+    use wayland_server::protocol::{wl_subcompositor, wl_subsurface};
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, child.id().protocol_id(), parent.id().protocol_id()]);
+    let subsurface = f.state.subsurfaces.keys().next().unwrap().clone();
+    let subsurface = wl_subsurface::WlSubsurface::from_id(&f.state.dh, subsurface).unwrap();
+    let committed = f.buffer(&[1; 8]);
+    f.request(&child, 1, &[committed.id().protocol_id(), 0, 0]);
+    f.request(&child, 6, &[]);
+    let uncommitted = f.buffer(&[2; 8]);
+    f.request(&child, 1, &[uncommitted.id().protocol_id(), 0, 0]);
+    f.request(&subsurface, 5, &[]);
+    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [1; 8]);
+    assert!(f.state.surfaces[&child.id()].pending.buffer.is_some());
+}
+
+#[test]
+fn clipboard_offers_follow_focus_and_source_destruction_clears_selection() {
+    use wayland_server::protocol::{wl_data_device, wl_data_source};
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat));
+    let source = f.client.create_resource::<wl_data_source::WlDataSource, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.sources.insert(source.id(), crate::selection::DataSourceData {
+        resource: source.clone(), mime_types: vec!["text/plain".into()],
+    });
+    let device = f.client.create_resource::<wl_data_device::WlDataDevice, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.devices.insert(device.id(), device.clone());
+    f.request(&device, 1, &[source.id().protocol_id(), 0]);
+    assert!(f.state.selection.selection.is_none());
+    f.state.seats[0].keyboard_focus = Some(surface.id());
+    let response = f.request(&device, 1, &[source.id().protocol_id(), 0]);
+    assert!(String::from_utf8_lossy(&response).contains("text/plain"));
+    assert_eq!(f.state.selection.offers.len(), 1);
+    let response = f.request(&source, 1, &[]);
+    assert!(f.state.selection.selection.is_none());
+    assert_eq!(&response[response.len() - 4..], &0u32.to_ne_bytes());
+}
+
+#[test]
+fn subsurface_restacking_waits_for_parent_commit() {
+    use wayland_server::protocol::{wl_subcompositor, wl_subsurface};
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    let xdg = f.toplevel(&parent);
+    f.request(&xdg, 4, &[7]);
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, child.id().protocol_id(), parent.id().protocol_id()]);
+    let id = f.state.subsurfaces.keys().next().unwrap().clone();
+    let sub = wl_subsurface::WlSubsurface::from_id(&f.state.dh, id).unwrap();
+    let lower = f.buffer(&[10; 8]);
+    let upper = f.buffer(&[20; 8]);
+    f.request(&parent, 1, &[lower.id().protocol_id(), 0, 0]);
+    f.request(&child, 1, &[upper.id().protocol_id(), 0, 0]);
+    f.request(&child, 6, &[]);
+    f.request(&parent, 6, &[]);
+    assert_eq!(f.state.compose()[0], 20);
+    f.request(&sub, 3, &[parent.id().protocol_id()]);
+    assert_eq!(f.state.compose()[0], 20);
+    f.request(&parent, 6, &[]);
+    assert_eq!(f.state.compose()[0], 10);
+}
+
+#[test]
+fn output_bound_at_version_one_receives_only_version_one_events() {
+    let mut f = Fixture::new();
+    f.state.dh.create_global::<State, wl_output::WlOutput, ()>(2, ());
+    let globals = f.request_id(1, 1, &[2]);
+    let name = u32::from_ne_bytes(globals[8..12].try_into().unwrap());
+    let mut bind = vec![name, 10];
+    for bytes in b"wl_output\0\0\0".chunks_exact(4) { bind.push(u32::from_ne_bytes(bytes.try_into().unwrap())); }
+    bind.extend([1, 3]);
+    let response = f.request_id(2, 0, &bind);
+    let mut events = Vec::new();
+    let mut offset = 0;
+    while offset < response.len() {
+        let header = u32::from_ne_bytes(response[offset + 4..offset + 8].try_into().unwrap());
+        events.push(header & 0xffff);
+        offset += (header >> 16) as usize;
+    }
+    assert_eq!(events, [0, 1]);
+}
+
+#[test]
+fn destroying_toplevel_unmaps_pixels_and_clears_keyboard_focus() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    let top = f.state.toplevels.values().next().unwrap().resource.clone();
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat));
+    f.request(&xdg, 4, &[7]);
+    let buffer = f.buffer(&[9; 8]);
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    assert!(f.state.seats[0].keyboard_focus.is_some());
+    assert_eq!(f.state.compose()[0], 9);
+    f.state.pending_present = false;
+    f.request(&top, 0, &[]);
+    assert!(f.state.seats[0].keyboard_focus.is_none());
+    assert!(f.state.pending_present);
+    assert_eq!(f.state.compose(), [0; 8]);
 }

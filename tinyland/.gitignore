@@ -1,5 +1,3 @@
-.work/
 target/
-harness/.work/
-*.log
+harness/*.log
 *.png

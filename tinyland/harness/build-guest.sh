@@ -2,11 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ALPINE_VERSION="${ALPINE_VERSION:-3.20.3}"
+ALPINE_VERSION="3.20.3"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ARCH="x86_64"
 DL=".work/dl"
-ROOT=".work/guest-root"
+ROOT="$PWD/.work/guest-root"
 IMG=".work/guest.img"
 
 TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
@@ -20,11 +20,10 @@ if [ ! -f "$DL/$TARBALL" ]; then
 fi
 echo "$SHA256  $DL/$TARBALL" | sha256sum -c -
 
-if [ ! -f "$ROOT/.tinyland-seed" ]; then
+if [ ! -f "$ROOT/etc/alpine-release" ]; then
   rm -rf "$ROOT"
   mkdir -p "$ROOT"
   tar -xzf "$DL/$TARBALL" -C "$ROOT"
-  touch "$ROOT/.tinyland-seed"
 fi
 
 cat > "$ROOT/etc/apk/repositories" <<EOF
@@ -32,28 +31,23 @@ ${ALPINE_MIRROR}/v3.20/main
 ${ALPINE_MIRROR}/v3.20/community
 EOF
 
-echo "installing guest packages"
-if [ ! -f "$ROOT/.tinyland-pkgs-3.20.3" ]; then
-  apk --root "$ROOT" --update-cache --initdb --arch "$ARCH" --allow-untrusted --usermode \
-    add busybox linux-virt foot libxkbcommon font-terminus 2>&1 | tail -n 5
-  touch "$ROOT/.tinyland-pkgs-3.20.3"
-else
-  echo "(packages cached)"
+echo "installing pinned guest packages"
+mapfile -t PACKAGES < guest/packages
+if ! apk --root "$ROOT" --keys-dir "$ROOT/etc/apk/keys" --no-network --initdb --arch "$ARCH" --usermode add "${PACKAGES[@]}"; then
+  apk --root "$ROOT" --keys-dir "$ROOT/etc/apk/keys" --update-cache --initdb --arch "$ARCH" --usermode add "${PACKAGES[@]}"
 fi
 
-apk --root "$ROOT" --arch "$ARCH" --allow-untrusted --usermode add libxkbcommon-static=1.7.0-r0
-
 echo "building tinyland (musl)"
-cargo build --locked --target x86_64-unknown-linux-musl 2>&1 | tail -n 3
-BIN="target/x86_64-unknown-linux-musl/debug/tinyland"
+cargo build --locked --release --target x86_64-unknown-linux-musl 2>&1 | tail -n 3
+BIN="target/x86_64-unknown-linux-musl/release/tinyland"
 mkdir -p "$ROOT/usr/local/bin"
 cp "$BIN" "$ROOT/usr/local/bin/tinyland"
 
 cat > "$ROOT/init" <<'INIT_EOF'
 #!/bin/sh
-mount -o remount,rw / 2>/dev/null || true
+mount -o remount,rw /
 mkdir -p /dev/pts /dev/shm /tmp
-mount -t devpts none /dev/pts 2>/dev/null || true
+mount -t devpts none /dev/pts
 export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
 modprobe evdev
 mdev -s
@@ -94,7 +88,7 @@ MODE="${1:-smoke}"
 if [ "$MODE" = "wayland-pixels" ]; then
   printf '\033[48;5;201m WAYLAND_PIXELS_MARKER \033[0m\n'
   echo "WAYLAND_PIXELS_MAPPED" > /dev/console
-  sleep 20
+  sleep 120
   exit 0
 fi
 printf '\033[48;5;201m LAPUTA_MARKER \033[0m\n'
@@ -103,7 +97,7 @@ if read -r line; then
   echo "GUEST_GOT_LINE: $line" > /dev/console
   if [ "$line" = "laputa" ]; then
     echo "GUEST_TEXT_OK" > /dev/console
-    sleep 20
+    sleep 120
     exit 0
   else
     echo "GUEST_TEXT_MISMATCH" > /dev/console
@@ -123,14 +117,6 @@ fi
 if [ -f "$ROOT/boot/initramfs-virt" ]; then
   cp "$ROOT"/boot/initramfs-virt .work/initramfs-virt
 fi
-
-echo "recording installed versions"
-if [ -f "$ROOT/lib/apk/db/installed" ]; then
-  rg -a "^(P:|V:)" "$ROOT/lib/apk/db/installed" | sort > .work/guest-packages.txt || true
-  rg -a "^P:" "$ROOT/lib/apk/db/installed" | sort >> .work/guest-packages.txt || true
-fi
-FOOT_VER="$(rg -a -A1 '^P:foot$' "$ROOT/lib/apk/db/installed" | rg -a '^V:' | head -n 1 || true)"
-echo "guest foot: $FOOT_VER"
 
 echo "building disk image"
 rm -f "$IMG"

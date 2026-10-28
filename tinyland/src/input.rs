@@ -1,20 +1,19 @@
 use evdev::{Device, EventType, KeyCode};
 use std::fs::File;
 use std::io::Write;
-use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat};
+use wayland_server::protocol::{wl_keyboard, wl_seat};
 use xkbcommon::xkb;
 
 #[derive(Debug)]
 pub struct SeatData {
     pub resource: wl_seat::WlSeat,
-    pub pointers: Vec<wl_pointer::WlPointer>,
     pub keyboards: Vec<wl_keyboard::WlKeyboard>,
     pub keyboard_focus: Option<wayland_server::backend::ObjectId>,
 }
 
 impl SeatData {
     pub fn new(resource: wl_seat::WlSeat) -> Self {
-        Self { resource, pointers: Vec::new(), keyboards: Vec::new(), keyboard_focus: None }
+        Self { resource, keyboards: Vec::new(), keyboard_focus: None }
     }
 }
 

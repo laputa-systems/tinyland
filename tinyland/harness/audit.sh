@@ -6,7 +6,7 @@ cargo tree --locked -e features > .work/tmp/features.txt
 if rg -i 'smithay|wlroots|libdrm|mesa|gbm|egl|wayland-backend feature "server_system"|wayland-sys feature "server"' .work/tmp/features.txt; then
   echo 'FAIL: forbidden compositor dependency'; exit 1
 fi
-BINARY=target/x86_64-unknown-linux-musl/debug/tinyland
+BINARY=target/x86_64-unknown-linux-musl/release/tinyland
 readelf -d "$BINARY" > .work/tmp/linker.txt
 if rg -i 'NEEDED.*(wayland|drm|mesa|gbm|egl|pixman|systemd)' .work/tmp/linker.txt; then
   echo 'FAIL: forbidden linked library'; exit 1

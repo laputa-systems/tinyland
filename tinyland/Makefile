@@ -1,6 +1,4 @@
-SMOKE_TIMEOUT ?= 180
 QEMU ?= qemu-system-x86_64
-ARCH ?= x86_64
 
 .PHONY: smoke drm-proof wayland-pixels check test audit
 
