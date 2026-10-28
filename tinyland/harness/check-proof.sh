@@ -8,6 +8,7 @@ if rg -qi 'TINYLAND_EXIT|TINYLAND_CHILD_EXIT|protocol.?error|foot spawn failed|G
   exit 1
 fi
 rg -q 'TINYLAND_SURFACE_MAPPED' "$CONSOLE" || { echo 'FAIL: surface never mapped'; exit 1; }
+rg -q 'TINYLAND_PRESENTED' "$CONSOLE" || { echo 'FAIL: no confirmed presentation'; exit 1; }
 if [ "$MODE" = smoke ]; then
   rg -q '^GUEST_TEXT_OK' "$CONSOLE" || { echo 'FAIL: input not confirmed'; exit 1; }
 fi

@@ -1,125 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-ALPINE_VERSION="3.20.3"
-ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
-ARCH="x86_64"
-DL=".work/dl"
 ROOT="$PWD/.work/guest-root"
-IMG=".work/guest.img"
-
-TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
-URL="${ALPINE_MIRROR}/v3.20/releases/${ARCH}/${TARBALL}"
-SHA256="d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
-
-mkdir -p "$DL" .work
-if [ ! -f "$DL/$TARBALL" ]; then
-  echo "downloading $URL"
-  wget -O "$DL/$TARBALL" "$URL"
-fi
-echo "$SHA256  $DL/$TARBALL" | sha256sum -c -
-
-if [ ! -f "$ROOT/etc/alpine-release" ]; then
-  rm -rf "$ROOT"
-  mkdir -p "$ROOT"
-  tar -xzf "$DL/$TARBALL" -C "$ROOT"
-fi
-
-cat > "$ROOT/etc/apk/repositories" <<EOF
-${ALPINE_MIRROR}/v3.20/main
-${ALPINE_MIRROR}/v3.20/community
-EOF
-
-echo "installing pinned guest packages"
-mapfile -t PACKAGES < guest/packages
-if ! apk --root "$ROOT" --keys-dir "$ROOT/etc/apk/keys" --no-network --initdb --arch "$ARCH" --usermode add "${PACKAGES[@]}"; then
-  apk --root "$ROOT" --keys-dir "$ROOT/etc/apk/keys" --update-cache --initdb --arch "$ARCH" --usermode add "${PACKAGES[@]}"
-fi
-
-echo "building tinyland (musl)"
+bash harness/prepare-guest.sh "$ROOT"
+export TMPDIR="$PWD/.work/tmp"
+echo 'building tinyland (musl)'
 cargo build --locked --release --target x86_64-unknown-linux-musl 2>&1 | tail -n 3
-BIN="target/x86_64-unknown-linux-musl/release/tinyland"
 mkdir -p "$ROOT/usr/local/bin"
-cp "$BIN" "$ROOT/usr/local/bin/tinyland"
-
-cat > "$ROOT/init" <<'INIT_EOF'
-#!/bin/sh
-mount -o remount,rw /
-mkdir -p /dev/pts /dev/shm /tmp
-mount -t devpts none /dev/pts
-export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
-modprobe evdev
-mdev -s
-export XDG_RUNTIME_DIR=/tmp
-MODE="${TINYLAND_MODE:-drm-proof}"
-echo "TINYLAND_BOOT mode=$MODE" > /dev/console
-if [ "$MODE" = "drm-proof" ]; then
-  /usr/local/bin/tinyland --drm-proof --width 1024 --height 768 > /tmp/drm.log 2>&1 &
-  TPID=$!
-  sleep 4
-  echo "TINYLAND_READY" > /dev/console
-  cat /tmp/drm.log > /dev/console
-  mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-  echo "=== /proc/fb ===" > /dev/console
-  cat /proc/fb > /dev/console 2>&1 || true
-  echo "=== dri state ===" > /dev/console
-  cat /sys/kernel/debug/dri/0/state > /dev/console 2>&1 | head -n 60 || true
-  echo "=== dri framebuffer ===" > /dev/console
-  cat /sys/kernel/debug/dri/0/framebuffer > /dev/console 2>&1 | head -n 20 || true
-  sleep 60
-  wait $TPID
-  echo "TINYLAND_DONE rc=$?" > /dev/console
-elif [ "$MODE" = "wayland-pixels" ] || [ "$MODE" = "smoke" ]; then
-  ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) 2>&1 | tee /dev/ttyS1 > /dev/console &
-  CPID=$!
-  sleep 120
-  wait "$CPID"
-fi
-echo "TINYLAND_POWERING_OFF" > /dev/console
-sleep 1
-poweroff -f
-INIT_EOF
-chmod +x "$ROOT/init"
-
-cat > "$ROOT/usr/local/bin/guest-test" <<'GUEST_EOF'
-#!/bin/sh
-MODE="${1:-smoke}"
-if [ "$MODE" = "wayland-pixels" ]; then
-  printf '\033[48;5;201m WAYLAND_PIXELS_MARKER \033[0m\n'
-  echo "WAYLAND_PIXELS_MAPPED" > /dev/console
-  sleep 120
-  exit 0
-fi
-printf '\033[48;5;201m LAPUTA_MARKER \033[0m\n'
-echo "GUEST_PROMPT_READY" > /dev/console
-if read -r line; then
-  echo "GUEST_GOT_LINE: $line" > /dev/console
-  if [ "$line" = "laputa" ]; then
-    echo "GUEST_TEXT_OK" > /dev/console
-    sleep 120
-    exit 0
-  else
-    echo "GUEST_TEXT_MISMATCH" > /dev/console
-    exit 1
-  fi
-else
-  echo "GUEST_READ_FAILED" > /dev/console
-  exit 1
-fi
-GUEST_EOF
-chmod +x "$ROOT/usr/local/bin/guest-test"
-
-mkdir -p "$ROOT/etc" "$ROOT/boot"
-if [ -f "$ROOT/boot/vmlinuz-virt" ]; then
-  cp "$ROOT/boot/vmlinuz-virt" .work/vmlinuz-virt
-fi
-if [ -f "$ROOT/boot/initramfs-virt" ]; then
-  cp "$ROOT"/boot/initramfs-virt .work/initramfs-virt
-fi
-
-echo "building disk image"
-rm -f "$IMG"
-truncate -s 1G "$IMG"
-mkfs.ext4 -q -d "$ROOT" "$IMG"
-echo "BUILD_GUEST_OK"
+cp target/x86_64-unknown-linux-musl/release/tinyland "$ROOT/usr/local/bin/tinyland"
+cp guest/init "$ROOT/init"
+cp guest/test-app "$ROOT/usr/local/bin/guest-test"
+chmod +x "$ROOT/init" "$ROOT/usr/local/bin/guest-test"
+cp "$ROOT/boot/vmlinuz-virt" .work/vmlinuz-virt
+cp "$ROOT/boot/initramfs-virt" .work/initramfs-virt
+echo 'building disk image'
+truncate -s 0 .work/guest.img
+truncate -s 1G .work/guest.img
+mkfs.ext4 -q -d "$ROOT" .work/guest.img
+echo BUILD_GUEST_OK

@@ -1,12 +1,14 @@
 QEMU ?= qemu-system-x86_64
 
-.PHONY: smoke drm-proof wayland-pixels check test audit
+.PHONY: smoke drm-proof wayland-pixels check test audit drm-parity negative
 
 check:
 	cargo check --locked
 
 test:
 	cargo test --locked
+	python3 -B harness/test-qmp.py
+	python3 -B harness/test-guest-lock.py
 
 drm-proof:
 	bash harness/drm-proof.sh
@@ -19,3 +21,9 @@ smoke:
 
 audit:
 	bash harness/audit.sh
+
+drm-parity:
+	bash harness/drm-parity.sh
+
+negative:
+	bash harness/negative-runtime.sh
