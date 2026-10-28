@@ -41,6 +41,8 @@ pub struct State {
     selection: SelectionState,
     pending_present: bool,
     mapped_logged: bool,
+    active_toplevel: Option<ObjectId>,
+    toplevel_order: Vec<ObjectId>,
 }
 
 impl State {
@@ -62,6 +64,8 @@ impl State {
         selection: SelectionState::default(),
         pending_present: false,
         mapped_logged: false,
+        active_toplevel: None,
+        toplevel_order: Vec::new(),
         }
     }
 
@@ -128,6 +132,7 @@ impl State {
                     top.mapped = false;
                     top.last_configure = 0;
                     top.acked_configure = 0;
+                    self.toplevel_order.retain(|order| order != &top_id);
                     self.clear_focus(surf_id);
                 }
             }
@@ -189,7 +194,6 @@ impl State {
             }
             t.mapped = true;
         }
-        let serial = self.next_serial();
         let client_id = self.client_of_surface(surf_id);
         if let Some(s) = self.surfaces.get(surf_id) {
             for (cid, out) in &self.outputs {
@@ -198,8 +202,7 @@ impl State {
                 }
             }
         }
-        self.send_keyboard_enter(surf_id, serial);
-        self.send_selection();
+        self.set_active(top_id);
         self.pending_present = true;
         if !self.mapped_logged {
             self.mapped_logged = true;
@@ -207,40 +210,120 @@ impl State {
         }
     }
 
-    fn client_of_surface(&mut self, surf_id: &ObjectId) -> Option<ClientId> {
+    fn client_of_surface(&self, surf_id: &ObjectId) -> Option<ClientId> {
         self.dh.get_client(surf_id.clone()).map(|c| c.id()).ok()
     }
 
-    fn clear_focus(&mut self, id: &ObjectId) {
+    fn active_surface(&self) -> Option<ObjectId> {
+        self.active_toplevel
+            .as_ref()
+            .and_then(|top| self.toplevels.get(top))
+            .map(|top| top.surface.clone())
+    }
+
+    fn set_active(&mut self, top_id: ObjectId) {
+        if self.active_toplevel.as_ref() == Some(&top_id) {
+            return;
+        }
+        let old_surface = self.active_surface();
+        let serial = self.next_serial();
+        if let Some(old) = old_surface {
+            for seat in &mut self.seats {
+                if seat.keyboard_focus.as_ref() == Some(&old) {
+                    if let Some(surface) = self.surfaces.get(&old) {
+                        for keyboard in &seat.keyboards {
+                            keyboard.leave(serial, &surface.resource);
+                        }
+                    }
+                    seat.keyboard_focus = None;
+                }
+            }
+        }
+        self.active_toplevel = Some(top_id.clone());
+        self.toplevel_order.retain(|id| id != &top_id);
+        self.toplevel_order.push(top_id.clone());
+        let Some(new_surface) = self.active_surface() else { return };
+        let Some(surface) = self.surfaces.get(&new_surface) else { return };
+        let new_client = surface.resource.client();
+        let [depressed, latched, locked, group] = self.keyboard.modifiers();
+        for seat in &mut self.seats {
+            if seat.resource.client() != new_client {
+                continue;
+            }
+            seat.keyboard_focus = Some(new_surface.clone());
+            for keyboard in &seat.keyboards {
+                keyboard.enter(serial, &surface.resource, Vec::new());
+                keyboard.modifiers(serial, depressed, latched, locked, group);
+            }
+        }
+        self.send_selection();
+    }
+
+    fn deactivate_surface(&mut self, surf_id: &ObjectId) {
         let serial = self.next_serial();
         for seat in &mut self.seats {
-            if seat.keyboard_focus.as_ref() == Some(id) {
-                if let Some(surface) = self.surfaces.get(id) {
-                    for keyboard in &seat.keyboards { keyboard.leave(serial, &surface.resource); }
+            if seat.keyboard_focus.as_ref() == Some(surf_id) {
+                if let Some(surface) = self.surfaces.get(surf_id) {
+                    for keyboard in &seat.keyboards {
+                        keyboard.leave(serial, &surface.resource);
+                    }
                 }
                 seat.keyboard_focus = None;
             }
         }
+        let is_active = self.active_surface().as_ref() == Some(surf_id);
+        if !is_active {
+            return;
+        }
+        if let Some(top) = self
+            .toplevels
+            .iter()
+            .find(|(_, t)| &t.surface == surf_id)
+            .map(|(id, _)| id.clone())
+        {
+            self.toplevel_order.retain(|id| id != &top);
+            self.active_toplevel = None;
+        } else {
+            self.active_toplevel = None;
+        }
+        let next = self
+            .toplevel_order
+            .iter()
+            .rev()
+            .find(|id| {
+                self.toplevels
+                    .get(*id)
+                    .is_some_and(|top| top.mapped)
+            })
+            .cloned()
+            .or_else(|| {
+                let mut mapped: Vec<ObjectId> = self
+                    .toplevels
+                    .iter()
+                    .filter(|(_, t)| t.mapped)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                mapped.sort_by_key(|id| id.protocol_id());
+                mapped.into_iter().next()
+            });
+        if let Some(next) = next {
+            self.set_active(next);
+        }
+        self.send_selection();
     }
 
-    fn send_keyboard_enter(&mut self, surf_id: &ObjectId, serial: u32) {
-        let surface = &self.surfaces[surf_id].resource;
-        let [depressed, latched, locked, group] = self.keyboard.modifiers();
-        for seat in &mut self.seats {
-            if seat.resource.client() != surface.client() { continue; }
-            seat.keyboard_focus = Some(surf_id.clone());
-            for keyboard in &seat.keyboards {
-                keyboard.enter(serial, surface, Vec::new());
-                keyboard.modifiers(serial, depressed, latched, locked, group);
-            }
-        }
+    fn clear_focus(&mut self, id: &ObjectId) {
+        self.deactivate_surface(id);
     }
 
     fn key(&mut self, code: u16, down: bool) {
         let serial = self.next_serial();
         let [depressed, latched, locked, group] = self.keyboard.update(code, down);
+        let Some(focused) = self.active_surface() else { return };
         for seat in &self.seats {
-            if seat.keyboard_focus.is_none() { continue; }
+            if seat.keyboard_focus.as_ref() != Some(&focused) {
+                continue;
+            }
             for keyboard in &seat.keyboards {
                 keyboard.key(serial, now_ms(), code as u32, if down {
                     wayland_server::protocol::wl_keyboard::KeyState::Pressed
@@ -253,15 +336,15 @@ impl State {
     fn compose(&self) -> Vec<u8> {
         let (w, h) = self.out_size;
         let mut fb = vec![0; w as usize * h as usize * 4];
-        if let Some(top) = self.toplevels.values().find(|top| top.mapped) {
-            self.blit_surface(&top.surface, 0, 0, &mut fb);
+        if let Some(surface) = self.active_surface() {
+            self.blit_surface(&surface, 0, 0, &mut fb);
         }
         fb
     }
 
     fn presented(&mut self, time: u32) {
-        let Some(top) = self.toplevels.values().find(|top| top.mapped) else { return; };
-        let mut stack = vec![top.surface.clone()];
+        let Some(surface) = self.active_surface() else { return };
+        let mut stack = vec![surface];
         while let Some(id) = stack.pop() {
             if let Some(surface) = self.surfaces.get_mut(&id) {
                 if surface.pixels.is_none() { continue; }

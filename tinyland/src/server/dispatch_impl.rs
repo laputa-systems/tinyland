@@ -10,6 +10,7 @@ use wayland_server::protocol::{
     wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
+use wayland_server::backend::ObjectId;
 
 impl GlobalDispatch<wl_compositor::WlCompositor, ()> for State {
     fn bind(
@@ -167,7 +168,19 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                 }
             }
         }
+        let removed_toplevels: Vec<ObjectId> = state
+            .toplevels
+            .iter()
+            .filter(|(_, t)| t.surface == id)
+            .map(|(top_id, _)| top_id.clone())
+            .collect();
         state.toplevels.retain(|_, t| t.surface != id);
+        for top_id in removed_toplevels {
+            state.toplevel_order.retain(|order| order != &top_id);
+        }
+        if state.active_surface().as_ref() == Some(&id) {
+            state.deactivate_surface(&id);
+        }
         state.pending_present = true;
     }
 }
@@ -578,12 +591,28 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                 use std::os::fd::AsFd;
                 kb.keymap(wl_keyboard::KeymapFormat::XkbV1, state.keyboard.keymap.as_fd(), state.keyboard.keymap_size);
                 if kb.version() >= 4 { kb.repeat_info(25, 600); }
-                if let Some(seat) = state.seats.iter_mut().find(|seat| seat.resource == *resource) {
-                    seat.keyboards.push(kb);
-                }
-                if let Some(focus) = state.toplevels.values().find(|top| top.mapped).map(|top| top.surface.clone()) {
-                    let serial = state.next_serial();
-                    state.send_keyboard_enter(&focus, serial);
+                let seat_index = state.seats.iter().position(|seat| seat.resource == *resource);
+                if let Some(index) = seat_index {
+                    state.seats[index].keyboards.push(kb);
+                    if let Some(focused) = state.active_surface() {
+                        let focused_client = state
+                            .surfaces
+                            .get(&focused)
+                            .and_then(|surface| surface.resource.client());
+                        let seat_client = state.seats[index].resource.client();
+                        if seat_client == focused_client {
+                            let serial = state.next_serial();
+                            state.seats[index].keyboard_focus = Some(focused.clone());
+                            if let Some(surface) = state.surfaces.get(&focused) {
+                                let [depressed, latched, locked, group] =
+                                    state.keyboard.modifiers();
+                                for keyboard in &state.seats[index].keyboards {
+                                    keyboard.enter(serial, &surface.resource, Vec::new());
+                                    keyboard.modifiers(serial, depressed, latched, locked, group);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             wl_seat::Request::Release => {}
@@ -632,11 +661,16 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
 
 impl State {
     pub(super) fn send_selection(&mut self) {
+        let focused_client = self
+            .active_surface()
+            .and_then(|surface| self.surfaces.get(&surface))
+            .and_then(|surface| surface.resource.client());
         let devices: Vec<_> = self.selection.devices.values().cloned().collect();
         for device in devices {
             let Some(client) = device.client() else { continue; };
-            let focused = self.seats.iter().any(|seat| seat.resource.client().as_ref() == Some(&client) && seat.keyboard_focus.is_some());
-            if !focused { continue; }
+            if Some(client.clone()) != focused_client {
+                continue;
+            }
             let source = self.selection.selection.as_ref().and_then(|id| self.selection.sources.get(id));
             if let Some(source) = source {
                 let offer = match client.create_resource::<wl_data_offer::WlDataOffer, (), State>(&self.dh, device.version(), ()) {
@@ -702,8 +736,13 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
         request: wl_data_device::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
         match request {
             wl_data_device::Request::SetSelection { source, serial } => {
-                let focused = state.seats.iter().any(|seat| seat.resource.client().as_ref() == Some(client) && seat.keyboard_focus.is_some());
-                if !focused || serial > state.serial { return; }
+                let focused_matches = state
+                    .active_surface()
+                    .and_then(|surface| state.surfaces.get(&surface))
+                    .and_then(|surface| surface.resource.client())
+                    .as_ref()
+                    == Some(client);
+                if !focused_matches || serial > state.serial { return; }
                 let next = source.map(|source| source.id());
                 if next == state.selection.selection { return; }
                 if let Some(old) = state.selection.selection.take().and_then(|id| state.selection.sources.get(&id)) { old.resource.cancelled(); }
@@ -916,7 +955,16 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     ) {
         let id = resource.id();
         if let Some(x) = state.xdg_surfaces.remove(&id) {
+            let removed: Vec<ObjectId> = state
+                .toplevels
+                .iter()
+                .filter(|(_, t)| t.surface == x.surface)
+                .map(|(top_id, _)| top_id.clone())
+                .collect();
             state.toplevels.retain(|_, t| t.surface != x.surface);
+            for top_id in removed {
+                state.toplevel_order.retain(|order| order != &top_id);
+            }
             state.clear_focus(&x.surface);
             state.pending_present = true;
         }
@@ -985,6 +1033,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         _data: &(),
     ) {
         if let Some(top) = state.toplevels.remove(&resource.id()) {
+            state.toplevel_order.retain(|order| order != &resource.id());
             state.clear_focus(&top.surface);
             state.pending_present = true;
         }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::shm::SurfacePixels;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use wayland_server::{Client, Resource};
@@ -250,6 +251,8 @@ fn clipboard_offers_follow_focus_and_source_destruction_clears_selection() {
     use wayland_server::protocol::{wl_data_device, wl_data_source};
     let mut f = Fixture::new();
     let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    let top_id = f.state.toplevels.iter().find(|(_, t)| t.surface == surface.id()).map(|(id, _)| id.clone()).unwrap();
     let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
     f.state.seats.push(SeatData::new(seat));
     let source = f.client.create_resource::<wl_data_source::WlDataSource, (), State>(&f.state.dh, 3, ()).unwrap();
@@ -260,7 +263,9 @@ fn clipboard_offers_follow_focus_and_source_destruction_clears_selection() {
     f.state.selection.devices.insert(device.id(), device.clone());
     f.request(&device, 1, &[source.id().protocol_id(), 0]);
     assert!(f.state.selection.selection.is_none());
-    f.state.seats[0].keyboard_focus = Some(surface.id());
+    let _ = xdg;
+    f.state.toplevels.get_mut(&top_id).unwrap().mapped = true;
+    f.state.set_active(top_id);
     let response = f.request(&device, 1, &[source.id().protocol_id(), 0]);
     assert!(String::from_utf8_lossy(&response).contains("text/plain"));
     assert_eq!(f.state.selection.offers.len(), 1);
@@ -351,4 +356,164 @@ fn reparenting_an_existing_subtree_cannot_bypass_the_depth_limit() {
         }
         root = parent;
     }
+}
+
+fn drain_socket(socket: &mut UnixStream) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match socket.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("drain socket: {error}"),
+        }
+    }
+    out
+}
+
+fn contains_opcode(data: &[u8], opcode: u16) -> bool {
+    let mut offset = 0;
+    while offset + 8 <= data.len() {
+        let size = (u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap()) >> 16) as usize;
+        let found = u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as u16 & 0xffff == opcode;
+        if found {
+            return true;
+        }
+        if size < 8 || offset + size > data.len() {
+            break;
+        }
+        offset += size;
+    }
+    false
+}
+
+#[test]
+fn logical_focus_is_single_active_toplevel_across_two_clients() {
+    use std::sync::Arc;
+    use wayland_server::protocol::{wl_data_device, wl_data_source, wl_keyboard, wl_seat};
+    let mut f = Fixture::new();
+    let (mut socket2, server2) = UnixStream::pair().unwrap();
+    socket2.set_nonblocking(true).unwrap();
+    let client2 = f.state.dh.insert_client(server2, Arc::new(UdsClientData)).unwrap();
+
+    let surface_a = f.surface();
+    let surface_b = client2.create_resource::<wl_surface::WlSurface, (), State>(&f.state.dh, 4, ()).unwrap();
+    f.state.surfaces.insert(surface_b.id(), SurfaceData::new(surface_b.clone()));
+
+    let xdg_a = f.toplevel(&surface_a);
+    let _ = xdg_a;
+    let top_a = f.state.toplevels.iter().find(|(_, t)| t.surface == surface_a.id()).map(|(id, _)| id.clone()).unwrap();
+    let xdg_b = client2.create_resource::<wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.state.xdg_surfaces.insert(xdg_b.id(), XdgSurfaceData::new(surface_b.id()));
+    let top_b_res = client2.create_resource::<wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel, (), State>(&f.state.dh, 1, ()).unwrap();
+    let mut data_b = ToplevelData::new(top_b_res.clone(), xdg_b.clone(), surface_b.id());
+    data_b.last_configure = 7;
+    data_b.acked_configure = 7;
+    let top_b = top_b_res.id();
+    f.state.toplevels.insert(top_b.clone(), data_b);
+    f.state.toplevels.get_mut(&top_a).unwrap().acked_configure = 7;
+
+    let seat_a = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat_a));
+    let seat_b = client2.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat_b));
+    let kb_a = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats[0].keyboards.push(kb_a);
+    let kb_b = client2.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats[1].keyboards.push(kb_b);
+
+    f.state.surfaces.get_mut(&surface_a.id()).unwrap().pixels = Some(SurfacePixels {
+        bytes: vec![11; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
+    });
+    f.state.surfaces.get_mut(&surface_b.id()).unwrap().pixels = Some(SurfacePixels {
+        bytes: vec![22; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
+    });
+
+    f.state.toplevels.get_mut(&top_a).unwrap().mapped = true;
+    f.state.set_active(top_a.clone());
+    f.display.flush_clients().unwrap();
+    let _ = drain_socket(&mut f.socket);
+    let _ = drain_socket(&mut socket2);
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(surface_a.id()));
+    assert!(f.state.seats[1].keyboard_focus.is_none());
+    assert_eq!(f.state.compose()[0], 11);
+
+    f.state.toplevels.get_mut(&top_b).unwrap().mapped = true;
+    f.state.set_active(top_b.clone());
+    f.display.flush_clients().unwrap();
+    let got_a = drain_socket(&mut f.socket);
+    let got_b = drain_socket(&mut socket2);
+    assert!(f.state.seats[0].keyboard_focus.is_none());
+    assert_eq!(f.state.seats[1].keyboard_focus, Some(surface_b.id()));
+    assert_eq!(f.state.compose()[0], 22);
+    assert!(contains_opcode(&got_a, 2), "old client should receive leave");
+    assert!(contains_opcode(&got_b, 1), "new client should receive enter");
+
+    let _ = drain_socket(&mut f.socket);
+    let _ = drain_socket(&mut socket2);
+    f.state.key(30, true);
+    f.display.flush_clients().unwrap();
+    let keys_a = drain_socket(&mut f.socket);
+    let keys_b = drain_socket(&mut socket2);
+    assert!(keys_a.is_empty(), "unfocused client must not receive keys");
+    assert!(contains_opcode(&keys_b, 3), "focused client must receive key");
+    f.state.key(30, false);
+
+    let source_a = f.client.create_resource::<wl_data_source::WlDataSource, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.sources.insert(source_a.id(), crate::selection::DataSourceData {
+        resource: source_a.clone(), mime_types: vec!["text/plain".into()],
+    });
+    let device_a = f.client.create_resource::<wl_data_device::WlDataDevice, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.devices.insert(device_a.id(), device_a.clone());
+    let source_b = client2.create_resource::<wl_data_source::WlDataSource, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.sources.insert(source_b.id(), crate::selection::DataSourceData {
+        resource: source_b.clone(), mime_types: vec!["text/plain".into()],
+    });
+    let device_b = client2.create_resource::<wl_data_device::WlDataDevice, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.devices.insert(device_b.id(), device_b.clone());
+    let serial = f.state.serial;
+    let response = f.request(&device_a, 1, &[source_a.id().protocol_id(), serial]);
+    assert!(f.state.selection.selection.is_none(), "unfocused client must not set selection");
+    assert!(!String::from_utf8_lossy(&response).contains("text/plain"));
+    f.state.selection.selection = Some(source_b.id());
+    f.state.send_selection();
+    f.display.flush_clients().unwrap();
+    let clip_a = drain_socket(&mut f.socket);
+    let clip_b = drain_socket(&mut socket2);
+    assert!(!String::from_utf8_lossy(&clip_a).contains("text/plain"), "unfocused client must not receive offer");
+    assert!(String::from_utf8_lossy(&clip_b).contains("text/plain"), "focused client receives offer");
+}
+
+#[test]
+fn two_toplevels_from_same_client_share_one_active_surface() {
+    use wayland_server::protocol::{wl_keyboard, wl_seat};
+    let mut f = Fixture::new();
+    let first = f.surface();
+    let second = f.surface();
+    let _ = f.toplevel(&first);
+    let _ = f.toplevel(&second);
+    let top_first = f.state.toplevels.iter().find(|(_, t)| t.surface == first.id()).map(|(id, _)| id.clone()).unwrap();
+    let top_second = f.state.toplevels.iter().find(|(_, t)| t.surface == second.id()).map(|(id, _)| id.clone()).unwrap();
+    f.state.toplevels.get_mut(&top_first).unwrap().acked_configure = 7;
+    f.state.toplevels.get_mut(&top_second).unwrap().acked_configure = 7;
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat));
+    let kb = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats[0].keyboards.push(kb);
+    f.state.surfaces.get_mut(&first.id()).unwrap().pixels = Some(SurfacePixels {
+        bytes: vec![33; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
+    });
+    f.state.surfaces.get_mut(&second.id()).unwrap().pixels = Some(SurfacePixels {
+        bytes: vec![44; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
+    });
+    f.state.toplevels.get_mut(&top_first).unwrap().mapped = true;
+    f.state.set_active(top_first.clone());
+    assert_eq!(f.state.compose()[0], 33);
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(first.id()));
+    f.state.toplevels.get_mut(&top_second).unwrap().mapped = true;
+    f.state.set_active(top_second.clone());
+    assert_eq!(f.state.compose()[0], 44);
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(second.id()));
+    assert_eq!(f.state.active_surface(), Some(second.id()));
 }
