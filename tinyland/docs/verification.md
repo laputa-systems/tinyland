@@ -26,9 +26,11 @@ Both paths share the `page_flip` presentation in `src/output.rs`.
 `guest/init` forces the legacy path with strace ENOSYS injection.
 
 The compositor keeps two scanout buffers, writes the back buffer, requests
-a flip event, and waits up to two seconds for the matching kernel
-completion before reusing the front buffer and firing frame callbacks.
-`TINYLAND_PRESENTED` marks completion. Client shm is copied at commit in
+a flip event, and completes it in the shared poll loop within two seconds
+for the matching kernel event before reusing the front buffer and firing
+frame callbacks. Display, socket, DRM, and input are polled together, so
+seat disable, shutdown, and device failure stay responsive during flip
+wait. `TINYLAND_PRESENTED` marks completion. Client shm is copied at commit in
 `src/server.rs`, then the buffer is released, so scanout never depends on
 client-writable memory.
 
@@ -37,7 +39,8 @@ An uncertain send exits 75 and is never retried; an explicit rejection is
 a separate failure.
 
 `harness/check-proof.sh` requires mapping, confirmed presentation, input
-confirmation for smoke, and no protocol error or early exit.
+confirmation for smoke, and no protocol error, child exit, session end, or
+early exit.
 `harness/check-screenshot.py` requires 5% nonblack (`R+G+B > 24`) and
 0.01% magenta (`R > 180, B > 180, G < 120`) with no crop; `drm-proof`
 requires 30% nonblack instead. Proofs write console, compositor, QEMU,
@@ -54,6 +57,11 @@ linked libraries, and any `unsafe` in `src/`.
 Seat is keyboard-only with a US keymap (`src/input.rs`); globals and
 version handling are owned by `src/server.rs`. HUP, INT, TERM, and QUIT
 shut down the loop and reap foot (`src/shutdown.rs`, `src/main.rs`).
+Normal sessions validate user-owned `XDG_RUNTIME_DIR`, emit
+`TINYLAND_COMPOSITOR_READY` after socket, keyboard, discovery, and spawn,
+and end with `TINYLAND_SESSION_END` when the primary client exits. Proof
+fallback without `-- COMMAND...` remains harness-only. Laputa boundaries,
+seat seams, and replacement gates are in `docs/laputa-integration.md`.
 
 On a fresh checkout run `bash harness/build-guest.sh` first: it prepares
 the native library and XKB data that `.cargo/config.toml` points at.

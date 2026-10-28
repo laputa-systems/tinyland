@@ -53,7 +53,7 @@ trap 'exit 143' TERM
   -no-reboot > ".work/qemu-$NAME.log" 2>&1 &
 QEMU_PID=$!
 fail_if_dead() {
-  if ! kill -0 "$QEMU_PID" 2>/dev/null || rg -qi 'TINYLAND_EXIT|TINYLAND_CHILD_EXIT|protocol.?error|foot spawn failed|GUEST_TEXT_MISMATCH|GUEST_READ_FAILED' "$CONSOLE" 2>/dev/null; then
+  if ! kill -0 "$QEMU_PID" 2>/dev/null || rg -qi 'TINYLAND_EXIT|TINYLAND_CHILD_EXIT|TINYLAND_SESSION_END|protocol.?error|foot spawn failed|GUEST_TEXT_MISMATCH|GUEST_READ_FAILED' "$CONSOLE" 2>/dev/null; then
     tail -n 30 "$CONSOLE" 2>/dev/null || true
     echo 'FAIL: guest exited before proof' >&2
     exit 1

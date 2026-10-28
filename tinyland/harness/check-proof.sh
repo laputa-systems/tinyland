@@ -3,7 +3,7 @@ set -euo pipefail
 MODE="$1"
 CONSOLE="$2"
 SCREENSHOT="$3"
-if rg -qi 'TINYLAND_EXIT|TINYLAND_CHILD_EXIT|protocol.?error|foot spawn failed|GUEST_TEXT_MISMATCH|GUEST_READ_FAILED' "$CONSOLE"; then
+if rg -qi 'TINYLAND_EXIT|TINYLAND_CHILD_EXIT|TINYLAND_SESSION_END|protocol.?error|foot spawn failed|GUEST_TEXT_MISMATCH|GUEST_READ_FAILED' "$CONSOLE"; then
   echo 'FAIL: guest or compositor exited or rejected protocol'
   exit 1
 fi
