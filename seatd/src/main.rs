@@ -1,8 +1,7 @@
-mod cli;
-mod log;
-mod r#loop;
-
-use r#loop::Server;
+use seatd::cli;
+use seatd::log;
+use seatd::r#loop::Server;
+use seatd::{log_error, log_info};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
