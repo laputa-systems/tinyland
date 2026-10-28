@@ -20,10 +20,6 @@ impl Drop for Daemon {
     }
 }
 
-fn oracle_bin() -> String {
-    ".work/tmp/oracle/seatd".to_string()
-}
-
 fn rust_bin() -> String {
     env!("CARGO_BIN_EXE_seatd").to_string()
 }
@@ -314,28 +310,18 @@ fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
 }
 
 fn check_pair() {
-    assert!(std::path::Path::new(&oracle_bin()).exists(),
-        "missing C oracle; rebuild with harness/libseat_diff.sh");
     let rust_sock = ".work/tmp/diff-rust.sock";
-    let oracle_sock = ".work/tmp/oracle.sock";
     let rust = spawn(&rust_bin(), rust_sock);
     let rust_t = run_scripts(rust_sock);
     drop(rust);
-    let oracle = spawn(&oracle_bin(), oracle_sock);
-    let oracle_t = run_scripts(oracle_sock);
-    drop(oracle);
-    assert_eq!(format!("{oracle_t:#?}\n"), include_str!("protocol.golden"));
-    assert_eq!(rust_t.len(), oracle_t.len());
+    assert_eq!(format!("{rust_t:#?}\n"), include_str!("protocol.golden"));
     assert_eq!(rust_t[0].len(), 6, "D1 must carry six messages");
     assert!(rust_t[1].iter().any(|m| m.opcode == SERVER_ERROR));
     assert!(rust_t[2].len() >= 7, "D3 switch flow must carry events");
-    for (i, (r, o)) in rust_t.iter().zip(oracle_t.iter()).enumerate() {
-        assert_eq!(r, o, "script {i} transcript differs");
-    }
 }
 
 #[test]
-fn differential_transcripts_match_oracle() {
+fn transcripts_match_golden() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     check_pair();
 }
@@ -367,14 +353,9 @@ fn automatic_handoff(sock: &str) -> usize {
 }
 
 #[test]
-fn differential_automatic_handoff_matches_oracle() {
+fn automatic_handoff_newest_waiter_wins() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let oracle_sock = ".work/tmp/oracle.sock";
-    let oracle = spawn(&oracle_bin(), oracle_sock);
-    let expected = automatic_handoff(oracle_sock);
-    assert_eq!(expected, 2);
-    drop(oracle);
     let rust_sock = ".work/tmp/diff-handoff.sock";
     let _rust = spawn(&rust_bin(), rust_sock);
-    assert_eq!(automatic_handoff(rust_sock), expected);
+    assert_eq!(automatic_handoff(rust_sock), 2);
 }

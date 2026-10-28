@@ -24,7 +24,7 @@ rm -rf "$work/root"
 mkdir -p "$work/root"
 cp -a --reflink=auto "$source_root/." "$work/root/"
 cp "$daemon" "$work/root/usr/local/bin/seatd"
-cc -std=c11 -static -D_XOPEN_SOURCE=700 -DLIBSEAT=1 -DSEATD_ENABLED=1 '-DSEATD_DEFAULTPATH="/run/seatd.sock"' -Ioracle/include harness/vm-probe.c oracle/common/connection.c oracle/common/linked_list.c oracle/common/log.c oracle/libseat/backend/seatd.c oracle/libseat/backend/noop.c oracle/libseat/libseat.c -o "$work/root/usr/local/bin/vm-probe"
+cc -std=c11 -static -D_XOPEN_SOURCE=700 harness/vm-probe.c -o "$work/root/usr/local/bin/vm-probe"
 cp harness/vm-guest-test.sh "$work/root/usr/local/bin/vm-guest-test"
 cat > "$work/root/init" <<'GUEST'
 #!/bin/sh

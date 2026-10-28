@@ -31,10 +31,6 @@ fn rust_bin() -> String {
     env!("CARGO_BIN_EXE_seatd").to_string()
 }
 
-fn oracle_bin() -> String {
-    ".work/tmp/oracle/seatd".to_string()
-}
-
 fn unlink(path: &str) {
     unsafe {
         let c = std::ffi::CString::new(path).unwrap();
@@ -54,27 +50,6 @@ fn spawn_rust(sock: &str) -> Daemon {
         .env("SEATD_SOCK", sock)
         .spawn()
         .expect("spawn rust seatd") };
-    for _ in 0..50 {
-        if std::path::Path::new(sock).exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(std::path::Path::new(sock).exists());
-    child
-}
-
-fn spawn_oracle(sock: &str) -> Daemon {
-    unlink(sock);
-    let child = Daemon { child: Command::new(oracle_bin())
-        .arg("-l")
-        .arg("silent")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env("SEATD_VTBOUND", "0")
-        .spawn()
-        .expect("spawn oracle seatd") };
     for _ in 0..50 {
         if std::path::Path::new(sock).exists() {
             break;
@@ -296,26 +271,18 @@ fn proc_times(pid: u32) -> (u64, u64, u64) {
 
 #[test]
 #[ignore = "requires an idle host; bracket with perf-gate-ready and perf-gate-ready -1"]
-fn storm_idle_parity_with_oracle() {
+fn storm_idle_stays_quiet() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if !std::path::Path::new(&oracle_bin()).exists() {
-        panic!("missing C oracle; rebuild with harness/libseat_diff.sh");
-    }
     let rsock = ".work/tmp/storm-idle-rust.sock";
-    let osock = ".work/tmp/oracle.sock";
+    unlink(rsock);
     let r = spawn_rust(rsock);
-    let o = spawn_oracle(osock);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let (ru0, rs0, rv0) = proc_times(r.id());
-    let (ou0, os0, ov0) = proc_times(o.id());
     std::thread::sleep(std::time::Duration::from_secs(5));
     let (ru1, rs1, rv1) = proc_times(r.id());
-    let (ou1, os1, ov1) = proc_times(o.id());
     let r_cpu = (ru1 - ru0) + (rs1 - rs0);
-    let o_cpu = (ou1 - ou0) + (os1 - os0);
     let r_vol = rv1 - rv0;
-    let o_vol = ov1 - ov0;
-    println!("storm_idle: rust cpu={r_cpu} ticks vol={r_vol} | oracle cpu={o_cpu} ticks vol={o_vol}");
-    assert!(r_vol <= 2 * o_vol + 10, "egregious wakeup regression");
-    assert!(r_cpu <= 2 * o_cpu + 10, "egregious idle cpu regression");
+    println!("storm_idle: rust cpu={r_cpu} ticks vol={r_vol}");
+    assert_eq!(r_cpu, 0, "idle cpu ticks above zero");
+    assert!(r_vol <= 10, "egregious idle wakeups");
 }

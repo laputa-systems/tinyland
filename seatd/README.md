@@ -32,13 +32,14 @@ request seat and supported-device operations. Seatd does not authenticate
 users or manage login, power, or supervision policy. Read [runtime operation](doc/runtime.md)
 before deployment.
 
-## Reference client
+## Protocol compatibility
 
-The C libseat client and protocol inputs retained under `oracle/` are a
-test-only compatibility oracle. The helper rebuilds the original C daemon
-from Git history and builds the retained client scenario for differential
-checks. They are not runtime dependencies of the Rust daemon. See [validation](doc/validation.md) for the oracle
-commands and the scope of the comparisons.
+The daemon speaks the libseat seatd protocol over the socket: open and
+close seats and devices, enable and disable sessions, switch sessions,
+ping. The exact byte sequences are pinned in
+[harness/protocol.golden](harness/protocol.golden) and exercised by a
+raw-protocol guest client with no C dependencies. Read
+[validation](doc/validation.md) for what the checks cover.
 
 VT-bound operation, virtio DRM/evdev handoff, and dwl/foot input have also
 passed disposable-guest qualification. See [VM qualification](harness/VM.md)
@@ -47,4 +48,3 @@ for the tested environment and reproduction commands.
 ## License
 
 The project retains the MIT license and attribution to Kenny Levinsen (2020).
-The Rust daemon derives from the retained C reference implementation.

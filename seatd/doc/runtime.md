@@ -76,7 +76,7 @@ limited to 256 bytes, including the terminating NUL byte.
 
 ## Revocation failure semantics
 
-Device revocation uses the same rule as the C reference: a failed
+Device revocation follows the fail-open handoff rule: a failed
 revoke is logged and the session transition continues, so a disable
 notification does not prove the old client's descriptors stopped
 working. The daemon never clears the device's active flag on a failed

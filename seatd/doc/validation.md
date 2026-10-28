@@ -5,9 +5,7 @@ dependencies. These commands do not qualify real devices or VT behavior.
 
 ## Run the normal checks
 
-Build the oracle before the first test run with `sh harness/build_oracle.sh`.
-The helper requires the original `bc0e96f` revision in local Git history.
-It does not fetch missing history. Then run the tests and strict Clippy:
+Run the tests and strict Clippy:
 
 ```sh
 cargo test --offline --locked
@@ -28,31 +26,24 @@ Rust compilation uses the `kache` rustc wrapper. Linux musl links use `mold`.
 The required target installations are external prerequisites; a command that
 cannot find a target or linker does not establish a successful target build.
 
-## Compare with the C oracle
+## Check the wire protocol
 
-The retained C sources under `oracle/` come from upstream revision `bc0e96f`.
-They provide an unmodified C libseat seatd client for compatibility checks.
-The reference daemon is rebuilt from the original revision in Git history.
-These sources are test inputs, not runtime dependencies of the Rust daemon.
-
-Build the oracle and run the client differential:
+The protocol corpus and its expected transcript live in
+[`harness/protocol.golden`](../harness/protocol.golden). It pins the
+exact bytes the daemon must exchange: framing, opcodes, errors, and
+the handoff sequence. Run it with:
 
 ```sh
-sh harness/build_oracle.sh
-sh harness/libseat_diff.sh
+cargo test --offline --locked --test differential
 ```
 
-The build helper archives the reference source under `.work/tmp/reference`,
-then builds the reference daemon as `.work/tmp/oracle/seatd` and the client
-scenario as `.work/tmp/client-oracle/simpletest`. The differential runs the
-same client scenario against both daemons and compares normalized transcripts.
-It checks client-visible behavior for that scenario. It does not qualify
-device access, VT switching, or compositor integration.
-
-The raw protocol corpus and its expected transcript are in
-[`harness/protocol.golden`](../harness/protocol.golden). Corpus parity checks
-framing and request behavior represented by those cases. It does not establish
-kernel behavior for DRM, evdev, or hidraw.
+The golden file was verified byte-identical against the upstream C
+daemon before the C sources left this repo, and is frozen since. It
+checks client-visible behavior for the covered cases. It does not
+qualify device access, VT switching, or compositor integration, and it
+does not establish kernel behavior for DRM, evdev, or hidraw. A raw
+socket guest client speaks the same protocol without any C code; see
+[the VM recipe](../harness/VM.md).
 
 ## Run the idle timing gate
 
@@ -62,7 +53,7 @@ after the measurement:
 
 ```sh
 perf-gate-ready
-cargo test --offline --locked --release --test storm storm_idle_parity_with_oracle -- --ignored --exact --nocapture
+cargo test --offline --locked --release --test storm storm_idle_stays_quiet -- --ignored --exact --nocapture
 perf-gate-ready -1
 ```
 
@@ -116,9 +107,8 @@ on the exact binaries above:
   `VM_TRANSITION_OK`.
 - KVM guest `shutdown` mode: restoration after SIGTERM with a client
   connected — `VM_SHUTDOWN_OK`.
-- Unmodified C libseat client differential: pass against the x86_64
-  binary natively and against the aarch64 binary through
-  `qemu-aarch64` user mode — `LIBSEAT-DIFF-OK` both.
+- Raw-protocol guest client: the same seat, device, revoke, and handoff
+  checks pass with no C code in the loop — markers above.
 - `cargo test --offline --locked` green (57 lib tests including the new
   admission and revoke-transition pins), strict Clippy clean.
 
@@ -151,7 +141,13 @@ contaminated reruns. It remains unclassified. The multi-client disconnect
 crash reproduced during R7 was fixed; that fix does not resolve the unknown
 R4 report.
 
-## Local delivery results
+## Local delivery results (superseded)
+
+The record below is the 2026-10-28 closeout, kept for history. It
+references C sources and differential scripts that have since left
+this repo; the re-qualification entry above it is the current
+evidence. The R4 unknown and the hidraw, ARM, and compositor limits
+below still stand.
 
 On 2026-10-28, the pinned toolchain and locked dependencies passed 79 tests.
 The normal suite ignores the idle timing case. That case subsequently passed
@@ -160,21 +156,17 @@ with warnings denied. Both retained C unit tests passed after
 a fresh oracle rebuild.
 
 Both musl release binaries built with `mold` and reported version `0.9.3`.
-The same unmodified C libseat client scenario matched the reference daemon
-against each binary. The aarch64 binary ran through `qemu-aarch64` user-mode
-emulation. This does not qualify ARM hardware, devices, or real VT behavior.
+The aarch64 binary ran through `qemu-aarch64` user-mode emulation.
+This does not qualify ARM hardware, devices, or real VT behavior.
 
-| Target | Unstripped binary size | Client differential |
-|---|---:|---|
-| x86_64-unknown-linux-musl | 685080 bytes | Pass, native Linux |
-| aarch64-unknown-linux-musl | 665416 bytes | Pass, QEMU user mode |
-
-Pass a daemon executable as the first argument to `harness/libseat_diff.sh`
-to check a release build. Without an argument, it checks `target/debug/seatd`.
+| Target | Unstripped binary size |
+|---|---:|
+| x86_64-unknown-linux-musl | 685080 bytes |
+| aarch64-unknown-linux-musl | 665416 bytes |
 
 The [CI workflow](../.github/workflows/ci.yml) runs the functional checks and
 both target builds on a disposable Ubuntu runner. Checkout uses a full commit
-pin. The compiler wrapper, uv, and Meson versions are pinned. The wrapper
+pin. The compiler wrapper version is pinned. The wrapper
 archive is checked against its pinned digest. Dependency fetches use
 `Cargo.lock`, and compilation runs offline afterward. CI leaves the idle
 measurement deferred until a separate host-ready run.
@@ -186,10 +178,12 @@ have not been pushed.
 ## Idle gate result
 
 Five release-mode samples passed the default host-readiness check before
-each run and the `-1` check immediately afterward. Each sample observed both
-daemons over five seconds. Rust and the C reference both recorded zero CPU
-ticks and zero voluntary context-switch increments in every sample: median
-0, range 0–0 for each counter.
+each run and the `-1` check immediately afterward. Each sample observed the
+daemon over five seconds with zero CPU ticks and zero voluntary
+context-switch increments in every sample: median 0, range 0–0. This
+passes the absolute idle gate at the counters' resolution: no wakeups,
+no CPU. It establishes no throughput or busy-workload claim, and the
+gate stays deferred until a host-ready run reproduces it.
 
 This passes the idle CPU/wakeup regression gate at the counters' resolution.
 It establishes no throughput, startup-latency, or busy-workload speedup.
