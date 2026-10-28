@@ -334,3 +334,21 @@ fn destroying_toplevel_unmaps_pixels_and_clears_keyboard_focus() {
     assert!(f.state.pending_present);
     assert_eq!(f.state.compose(), [0; 8]);
 }
+
+#[test]
+fn reparenting_an_existing_subtree_cannot_bypass_the_depth_limit() {
+    use wayland_server::protocol::wl_subcompositor;
+    let mut f = Fixture::new();
+    let mut root = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    for depth in 2..=65 {
+        let parent = f.surface();
+        let response = f.request(&sub, 1, &[depth, root.id().protocol_id(), parent.id().protocol_id()]);
+        if depth == 65 {
+            assert!(String::from_utf8_lossy(&response).contains("subsurface nesting exceeds 64 levels"));
+        } else {
+            assert!(response.is_empty(), "valid depth {depth} was rejected");
+        }
+        root = parent;
+    }
+}

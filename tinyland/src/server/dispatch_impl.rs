@@ -222,6 +222,16 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                     }
                     ancestor = state.surfaces.get(&id).and_then(|surface| surface.parent.clone());
                 }
+                let mut subtree = vec![(surf_id.clone(), depth + 1)];
+                while let Some((id, depth)) = subtree.pop() {
+                    if depth > 64 {
+                        _resource.post_error(wl_subcompositor::Error::BadSurface as u32, "subsurface nesting exceeds 64 levels");
+                        return;
+                    }
+                    if let Some(surface) = state.surfaces.get(&id) {
+                        subtree.extend(surface.stacking.iter().filter(|child| **child != id).map(|child| (child.clone(), depth + 1)));
+                    }
+                }
                 let valid = match (state.surfaces.get(&surf_id), state.surfaces.get(&parent_id)) {
                     (Some(s), Some(p)) => !s.has_role && !p.is_popup,
                     _ => false,
