@@ -160,22 +160,29 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                 state.apply_commit(&id);
             }
             wl_surface::Request::SetBufferTransform { transform } => {
-                if transform
-                    != wayland_server::WEnum::Value(wl_output::Transform::Normal)
-                {
-                    resource.post_error(
-                        wl_surface::Error::InvalidTransform as u32,
-                        "only normal transform supported",
-                    );
+                match transform {
+                    wayland_server::WEnum::Value(wl_output::Transform::Normal) => {}
+                    wayland_server::WEnum::Value(_) => {
+                        eprintln!("TINYLAND_TRANSFORM_IGNORED only normal transform rendered");
+                    }
+                    wayland_server::WEnum::Unknown(_) => {
+                        resource.post_error(
+                            wl_surface::Error::InvalidTransform as u32,
+                            "unknown buffer transform",
+                        );
+                    }
                 }
             }
             wl_surface::Request::SetBufferScale { scale } => {
-                if scale != 1 {
+                if scale <= 0 {
                     resource.post_error(
                         wl_surface::Error::InvalidScale as u32,
-                        "only scale 1 supported",
+                        "buffer scale must be positive",
                     );
                     return;
+                }
+                if scale != 1 {
+                    eprintln!("TINYLAND_SCALE_IGNORED only scale 1 rendered");
                 }
             }
             wl_surface::Request::Offset { x, y } => {

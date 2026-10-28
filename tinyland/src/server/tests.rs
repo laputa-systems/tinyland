@@ -632,3 +632,19 @@ fn callback_bound_disconnects_offender_only() {
     let response = f.request(&surface, 3, &[2 + crate::server::MAX_CALLBACKS_PER_SURFACE as u32]);
     assert!(String::from_utf8_lossy(&response).contains("too many outstanding frame callbacks"));
 }
+
+#[test]
+fn scale_and_transform_subset_is_accepted_but_ignored() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    assert!(f.request(&surface, 8, &[2]).is_empty());
+    assert!(f.request(&surface, 7, &[1]).is_empty());
+    let mut g = Fixture::new();
+    let bad_scale = g.surface();
+    let response = g.request(&bad_scale, 8, &[0]);
+    assert!(String::from_utf8_lossy(&response).contains("buffer scale must be positive"));
+    let mut h = Fixture::new();
+    let bad_transform = h.surface();
+    let response = h.request(&bad_transform, 7, &[999]);
+    assert!(String::from_utf8_lossy(&response).contains("unknown buffer transform"));
+}
