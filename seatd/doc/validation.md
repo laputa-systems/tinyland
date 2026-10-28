@@ -94,6 +94,38 @@ Miri refuses to execute, SCM_RIGHTS transfer, `EINTR`/`EAGAIN` retry,
 kernel boundary are proven only by the real socketpair tests in the
 normal suite and the disposable-guest qualification below.
 
+## Re-qualification after the socket and lifecycle repairs
+
+On 2026-10-28 at `62da737`, the repaired release binaries re-passed
+the guest and client proofs. Build recipe: pinned nightly, locked
+offline deps, `RUSTFLAGS="-Clinker=mold -Clinker-flavor=ld"` on top of
+the container's `~/.cargo` kache wrapper (local deviation from the CI
+recipe, which sets only the env flags; hashes below are for the local
+recipe and are recorded as tested, not as canonical release hashes):
+
+| Target | Size | SHA-256 |
+|---|---:|---|
+| x86_64-unknown-linux-musl | 692376 | `339e726d9e4607fc00c8acf974a706bb2d19e2938a98b57b4de13a844c88cfae` |
+| aarch64-unknown-linux-musl | 671952 | `810e72a4670450355898428bd0965503224ebfab6ba31c7dad1ecf10d4826c00` |
+
+Both are static (`DT_NEEDED` count 0), x86_64 static-pie. Evidence run
+on the exact binaries above:
+
+- KVM guest `transition` mode: release, acquire, device revocation and
+  reopening, DRM master handoff, restoration after closing the seat —
+  `VM_TRANSITION_OK`.
+- KVM guest `shutdown` mode: restoration after SIGTERM with a client
+  connected — `VM_SHUTDOWN_OK`.
+- Unmodified C libseat client differential: pass against the x86_64
+  binary natively and against the aarch64 binary through
+  `qemu-aarch64` user mode — `LIBSEAT-DIFF-OK` both.
+- `cargo test --offline --locked` green (57 lib tests including the new
+  admission and revoke-transition pins), strict Clippy clean.
+
+Compositor mode was not re-run (needs the Laputa package mirror, absent
+here); N3 dwl/foot proof remains the earlier recorded run. Physical
+devices, hidraw revoke, and ARM hardware stay out of scope as before.
+
 ## Qualification limits
 
 N1–N3 passed on 2026-10-28 in an x86_64 KVM guest running Alpine
