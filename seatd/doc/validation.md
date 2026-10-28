@@ -71,6 +71,29 @@ gate is deferred until both checks pass. A deferred gate is not a pass, and
 VT-disabled timing does not establish VT behavior. Do not report performance
 parity until the valid measurement is available.
 
+## Miri scope
+
+Miri validates the pure buffer and codec logic only. Run it with the
+pinned toolchain after installing the component once
+(`rustup component add --toolchain nightly-2026-09-15 miri`):
+
+```sh
+cargo +nightly-2026-09-15 miri test --locked --offline --lib -- --exact \
+  conn::tests::ring_wraparound_preserves_order \
+  conn::tests::ring_counters_wrap_without_loss \
+  conn::tests::ring_restore_recovers_frame_header \
+  wire::tests::wire_opcode_values_match_c_header \
+  wire::tests::wire_header_round_trip_native_endian \
+  wire::tests::wire_header_explicit_bytes_not_struct_cast
+```
+
+All six pass under Miri. Everything else in `conn.rs` is kernel
+behavior Miri cannot validate: `recvmsg`/`sendmsg` are foreign calls
+Miri refuses to execute, SCM_RIGHTS transfer, `EINTR`/`EAGAIN` retry,
+`MSG_CTRUNC` handling, EOF semantics, and FD ownership across the
+kernel boundary are proven only by the real socketpair tests in the
+normal suite and the disposable-guest qualification below.
+
 ## Qualification limits
 
 N1–N3 passed on 2026-10-28 in an x86_64 KVM guest running Alpine

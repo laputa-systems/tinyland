@@ -396,4 +396,49 @@ mod tests {
         let _ = unlink_path(&path);
         let _ = std::fs::remove_file(format!("{path}.lock"));
     }
+
+    #[test]
+    fn crash_without_unlink_is_reclaimed_by_next_owner() {
+        let path = tmp_sock("crash");
+        let first = open_socket(&path, -1, -1).unwrap();
+        assert!(probe_live(&path));
+        assert!(open_socket(&path, -1, -1).is_err());
+        drop(first);
+        assert!(!probe_live(&path));
+        let second = open_socket(&path, -1, -1);
+        assert!(second.is_ok(), "stale socket after crash must be reclaimable");
+        drop(second);
+        let _ = unlink_path(&path);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+    }
+
+    #[test]
+    fn non_directory_parent_is_rejected() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("seatd-admit-{}-fileparent", std::process::id()));
+        std::fs::write(&p, b"not a dir").unwrap();
+        let path = format!("{}/sock", p.to_string_lossy());
+        assert!(open_socket(&path, -1, -1).is_err());
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+    }
+
+    #[test]
+    fn replaced_parent_is_detected() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("seatd-admit-{}-parent", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sock").to_string_lossy().into_owned();
+        let before = super::parent_dev_ino(&path).unwrap();
+        let mut moved = std::env::temp_dir();
+        moved.push(format!("seatd-admit-{}-parent-moved", std::process::id()));
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let after = super::parent_dev_ino(&path).unwrap();
+        assert_ne!(before, after, "replaced parent must have fresh identity");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
 }
