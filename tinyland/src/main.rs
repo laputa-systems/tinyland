@@ -12,30 +12,35 @@ fn usage() -> &'static str {
     "usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N]"
 }
 
+fn argument_error(message: &str) -> ! {
+    eprintln!("{message}\n{}", usage());
+    std::process::exit(2);
+}
+
 fn main() {
     env_logger::init();
     let shutdown = match shutdown::Shutdown::new() {
         Ok(shutdown) => shutdown,
         Err(error) => { eprintln!("signal setup: {error}"); std::process::exit(1); }
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args_os().skip(1);
     let mut mode = "smoke";
     let mut drm_device: PathBuf = PathBuf::from("/dev/dri/card0");
     let mut width: u32 = 1024;
     let mut height: u32 = 768;
     while let Some(a) = args.next() {
-        match a.as_str() {
+        match a.to_str().unwrap_or_else(|| argument_error("option must be UTF-8")) {
             "--drm-proof" => mode = "drm-proof",
             "--wayland-pixels" => mode = "wayland-pixels",
             "--smoke" => mode = "smoke",
             "--drm-device" => {
-                drm_device = PathBuf::from(args.next().expect("missing --drm-device value"));
+                drm_device = PathBuf::from(args.next().unwrap_or_else(|| argument_error("missing --drm-device value")));
             }
             "--width" => {
-                width = args.next().expect("missing --width value").parse().expect("bad width");
+                width = args.next().and_then(|value| value.to_str().and_then(|value| value.parse().ok())).unwrap_or_else(|| argument_error("invalid --width: expected unsigned integer"));
             }
             "--height" => {
-                height = args.next().expect("missing --height value").parse().expect("bad height");
+                height = args.next().and_then(|value| value.to_str().and_then(|value| value.parse().ok())).unwrap_or_else(|| argument_error("invalid --height: expected unsigned integer"));
             }
             "--help" | "-h" => {
                 println!("{}", usage());
