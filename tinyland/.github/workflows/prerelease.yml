@@ -21,7 +21,12 @@ jobs:
           cargo fetch --locked
       - name: test and lint
         run: |
+          dpkg -l | grep -i xkb || true
+          ls /usr/local/lib | grep -i xkb || true
           cargo test --locked
+          for bin in target/debug/deps/tinyland-*; do
+            [ -x "$bin" ] && [ ! -d "$bin" ] && ldd "$bin" 2>/dev/null | grep -i xkb || true
+          done
           cargo clippy --locked --all-targets
       - name: release musl build
         run: cargo build --locked --release --target x86_64-unknown-linux-musl
