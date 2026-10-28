@@ -25,6 +25,10 @@ impl Card {
         opts.read(true).write(true);
         Ok(Card(opts.open(path)?))
     }
+
+    fn from_file(file: File) -> Self {
+        Card(file)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +90,18 @@ pub struct DrmOutput {
     width: u32,
     height: u32,
     mode_path: &'static str,
+    in_flight: Option<InFlight>,
+}
+
+struct InFlight {
+    back: usize,
+    deadline: std::time::Instant,
+}
+
+impl AsFd for DrmOutput {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.card.as_fd()
+    }
 }
 
 fn select_compatible_crtc(
@@ -113,12 +129,23 @@ fn select_compatible_crtc(
     res.crtcs()
         .first()
         .copied()
+        .inspect(|_| eprintln!("TINYLAND_CRTC_FALLBACK using first resource crtc"))
         .ok_or_else(|| "no crtc".to_string())
 }
 
 impl DrmOutput {
     pub fn open(device: &Path, want_w: u32, want_h: u32) -> Result<Self, String> {
-        let card = std::sync::Arc::new(Card::open(device).map_err(|e| format!("open {}: {e}", device.display()))?);
+        let file = Card::open(device).map_err(|e| format!("open {}: {e}", device.display()))?.0;
+        Self::open_from_file(file, want_w, want_h, Some(device.display().to_string()))
+    }
+
+    pub fn open_from_file(
+        file: File,
+        want_w: u32,
+        want_h: u32,
+        origin: Option<String>,
+    ) -> Result<Self, String> {
+        let card = std::sync::Arc::new(Card::from_file(file));
         if let Err(error) = card.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
             if !atomic_unsupported(AtomicStage::Capability, &error) { return Err(format!("universal planes: {error}")); }
         }
@@ -145,7 +172,10 @@ impl DrmOutput {
         let con = connectors
             .iter()
             .find(|c| c.state() == connector::State::Connected)
-            .or_else(|| connectors.first())
+            .or_else(|| {
+                eprintln!("TINYLAND_CONNECTOR_FALLBACK no connected connector, using first");
+                connectors.first()
+            })
             .ok_or("no connector")?;
         let con_handle = con.handle();
         let mode = con
@@ -174,8 +204,11 @@ impl DrmOutput {
         eprintln!("TINYLAND_SCANOUT format=XRGB8888 buffers=2 size={w}x{h}");
         let mut out = DrmOutput {
             card, buffers: [front, back], front: 0, crtc,
-            width: w, height: h, mode_path: "unset",
+            width: w, height: h, mode_path: "unset", in_flight: None,
         };
+        if let Some(origin) = origin {
+            eprintln!("TINYLAND_DRM_ORIGIN {origin}");
+        }
         out.modeset(&mode, con_handle, atomic_ok)?;
         Ok(out)
     }
@@ -348,7 +381,18 @@ impl DrmOutput {
         self.present_pixels(&pixels, self.width, self.height)
     }
 
-    pub fn present_pixels(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<u32, String> {
+    pub fn has_pending_flip(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    pub fn flip_deadline(&self) -> Option<std::time::Instant> {
+        self.in_flight.as_ref().map(|flight| flight.deadline)
+    }
+
+    pub fn queue_present(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+        if self.in_flight.is_some() {
+            return Err("page flip already pending".into());
+        }
         if (width, height) != self.size() || pixels.len() != width as usize * height as usize * 4 {
             return Err("presentation must cover the complete output".into());
         }
@@ -365,7 +409,34 @@ impl DrmOutput {
         self.card.dirty_framebuffer(buffer.fb, &[rect]).map_err(|error| format!("dirty framebuffer: {error}"))?;
         self.card.page_flip(self.crtc, buffer.fb, drm::control::PageFlipFlags::EVENT, None)
             .map_err(|error| format!("queue page flip: {error}"))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        self.in_flight = Some(InFlight { back, deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
+        Ok(())
+    }
+
+    pub fn poll_flip(&mut self) -> Result<Option<u32>, String> {
+        let (back, deadline) = match &self.in_flight {
+            Some(flight) => (flight.back, flight.deadline),
+            None => return Ok(None),
+        };
+        let events = self.card.receive_events().map_err(|error| format!("page flip events: {error}"))?;
+        for event in events {
+            if let drm::control::Event::PageFlip(event) = event {
+                if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
+                self.front = back;
+                self.in_flight = None;
+                eprintln!("TINYLAND_PRESENTED sequence={} time_ms={} path={}", event.frame, event.duration.as_millis(), self.mode_path);
+                return Ok(Some(event.duration.as_millis() as u32));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("page flip timed out".into());
+        }
+        Ok(None)
+    }
+
+    pub fn present_pixels(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<u32, String> {
+        self.queue_present(pixels, width, height)?;
+        let deadline = self.flip_deadline().ok_or("page flip timed out")?;
         loop {
             let timeout = deadline.checked_duration_since(std::time::Instant::now()).ok_or("page flip timed out")?;
             let timeout = rustix::time::Timespec::try_from(timeout).map_err(|error| format!("page flip timeout: {error}"))?;
@@ -374,14 +445,8 @@ impl DrmOutput {
             if !fds[0].revents().contains(rustix::event::PollFlags::IN) {
                 return Err("page flip timed out or device disconnected".into());
             }
-            let events = self.card.receive_events().map_err(|error| format!("page flip events: {error}"))?;
-            for event in events {
-                if let drm::control::Event::PageFlip(event) = event {
-                    if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
-                    self.front = back;
-                    eprintln!("TINYLAND_PRESENTED sequence={} time_ms={} path={}", event.frame, event.duration.as_millis(), self.mode_path);
-                    return Ok(event.duration.as_millis() as u32);
-                }
+            if let Some(time) = self.poll_flip()? {
+                return Ok(time);
             }
         }
     }
