@@ -175,8 +175,8 @@ archive is checked against its pinned digest. Dependency fetches use
 measurement deferred until a separate host-ready run.
 
 Workflow YAML, embedded shell syntax, and the explicit musl target
-configuration were checked locally. Hosted CI has not run: these changes
-have not been pushed.
+configuration were checked locally. Hosted CI runs on push; check the
+workflow status for the pushed head.
 
 ## Idle gate result
 
