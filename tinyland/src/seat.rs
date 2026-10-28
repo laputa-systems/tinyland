@@ -60,6 +60,36 @@ fn last_error(context: &str) -> String {
     format!("{context}: {}", std::io::Error::last_os_error())
 }
 
+/// The daemon is gone when its side of the session socket hangs up.
+/// Poll with a zero timeout so this never blocks the event loop.
+fn daemon_liveness(fd: BorrowedFd<'_>) -> Result<(), String> {
+    let mut fds = [rustix::event::PollFd::new(
+        &fd,
+        rustix::event::PollFlags::IN,
+    )];
+    let zero = rustix::time::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match rustix::event::poll(&mut fds, Some(&zero)) {
+        Ok(_) => {
+            if fds[0]
+                .revents()
+                .intersects(rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR)
+            {
+                return Err("seat daemon lost".to_string());
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if e == rustix::io::Errno::INTR {
+                return Ok(());
+            }
+            Err(format!("seat poll failed: {e}"))
+        }
+    }
+}
+
 /// An open libseat session. Owns the listener, its state, and the session
 /// pointer. The listener and state are boxed: libseat keeps the listener
 /// pointer, so both must outlive the session at stable addresses.
@@ -151,7 +181,12 @@ impl Session {
     }
 
     /// Dispatch pending seat events without waiting. Daemon loss is fatal.
+    ///
+    /// `libseat_dispatch` with a zero timeout reports a dead daemon as an
+    /// empty read, so check the session fd for hangup first: without this,
+    /// a killed broker is silent and the session never exits.
     pub fn dispatch(&self) -> Result<(), String> {
+        daemon_liveness(self.fd.as_fd())?;
         // SAFETY: seat is open; timeout 0 never blocks.
         let n = unsafe { libseat_dispatch(self.seat, 0) };
         if n < 0 {
@@ -247,8 +282,17 @@ mod tests {
     }
 
     #[test]
-    fn open_without_daemon_is_a_hard_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn closed_peer_reports_daemon_loss() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+        let (open, peer) = UnixStream::pair().unwrap();
+        assert!(daemon_liveness(open.as_fd()).is_ok());
+        drop(peer);
+        assert!(daemon_liveness(open.as_fd()).is_err());
+    }
+
+    #[test]
+    fn open_without_daemon_is_a_hard_error() {        let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("LIBSEAT_BACKEND");
         unsafe {
             std::env::set_var("LIBSEAT_BACKEND", "seatd");

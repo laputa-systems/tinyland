@@ -31,7 +31,9 @@ used symbols against the pinned 0.9.3 header (all present in the guest's
 listener pointer past the open call; both stay on the owning thread.
 `Session::open` enforces `LIBSEAT_BACKEND=seatd` before touching the
 library. Dispatch runs every main-loop iteration with timeout 0; any
-dispatch error is fatal. The enable path runs only from the suspended
+dispatch error is fatal. A zero-timeout `libseat_dispatch` reports a dead
+daemon as an empty read, so dispatch polls the session fd for hangup first
+and treats it as daemon loss. The enable path runs only from the suspended
 state, so the initial activation event never double-opens devices.
 
 Seams in tree:
