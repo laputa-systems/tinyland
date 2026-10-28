@@ -4,7 +4,10 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: none. Red: none (no code). Next: S0 skeleton, then S1 DRM scanout.
+Accepted: S0 (skeleton, check 0.08s incr / test-build 8.4s), S1
+(drm-proof exit 0: 1280x800 teal, avg_rgb 383.0, atomic path, quit teardown).
+Red: none. Next: S2 guest verification (server code compiles, unit tests
+green; wayland-pixels harness + foot spawn still to prove in QEMU).
 Resume: run `make smoke` status via S-item acceptance below; steer after each accepted slice.
 
 ## Charter
