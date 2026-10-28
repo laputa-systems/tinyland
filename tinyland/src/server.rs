@@ -84,8 +84,8 @@ impl State {
     }
 
     fn apply_commit(&mut self, surf_id: &ObjectId) {
-        let pending = match self.surfaces.get_mut(surf_id) {
-            Some(surface) => std::mem::take(&mut surface.pending),
+        let (pending, pending_stacking) = match self.surfaces.get_mut(surf_id) {
+            Some(surface) => (std::mem::take(&mut surface.pending), surface.pending_stacking.take()),
             None => return,
         };
         if let Some(top_id) = self.toplevel_for_surface(surf_id) {
@@ -121,10 +121,30 @@ impl State {
         let update = SurfaceUpdate { pixels, callbacks: pending.callbacks };
         if self.synchronized(surf_id) {
             self.surfaces.get_mut(surf_id).unwrap().cached.get_or_insert_with(SurfaceUpdate::default).merge(update);
+            if let Some(order) = pending_stacking {
+                self.surfaces.get_mut(surf_id).unwrap().cached_stacking = Some(order);
+            }
+            let children: Vec<ObjectId> = self.surfaces.get(surf_id).map(|s| s.stacking.clone()).unwrap_or_default();
+            for child_id in children.into_iter().filter(|id| id != surf_id) {
+                if let Some(child) = self.surfaces.get_mut(&child_id) {
+                    if let Some(pos) = child.pending_pos.take() {
+                        child.cached_pos = Some(pos);
+                    }
+                }
+            }
             return;
         }
-        self.surfaces.get_mut(surf_id).unwrap().apply(update);
-        self.flush_children(surf_id);
+        {
+            let surface = self.surfaces.get_mut(surf_id).unwrap();
+            surface.apply(update);
+            if let Some(order) = pending_stacking {
+                surface.stacking = order;
+                surface.cached_stacking = None;
+            } else if let Some(order) = surface.cached_stacking.take() {
+                surface.stacking = order;
+            }
+        }
+        self.flush_applied(surf_id);
         if let Some(top_id) = self.toplevel_for_surface(surf_id) {
             if self.surfaces[surf_id].pixels.is_none() {
                 let top = self.toplevels.get_mut(&top_id).unwrap();
@@ -145,23 +165,45 @@ impl State {
         let Some(surface) = self.surfaces.get_mut(id) else { return; };
         surface.subsurface_sync = false;
         if self.synchronized(id) { return; }
-        if let Some(update) = self.surfaces.get_mut(id).unwrap().cached.take() {
+        let cached = self.surfaces.get_mut(id).unwrap().cached.take();
+        let cached_stacking = self.surfaces.get_mut(id).unwrap().cached_stacking.take();
+        let had_cached = cached.is_some() || cached_stacking.is_some();
+        if let Some(update) = cached {
             self.surfaces.get_mut(id).unwrap().apply(update);
-            self.flush_children(id);
+        }
+        if let Some(order) = cached_stacking {
+            if let Some(surface) = self.surfaces.get_mut(id) {
+                surface.stacking = order;
+            }
+        }
+        if had_cached {
+            self.flush_cached_descendants(id);
             self.pending_present = true;
         }
     }
 
-    fn flush_children(&mut self, parent: &ObjectId) {
-        let surface = self.surfaces.get_mut(parent).unwrap();
-        if let Some(order) = surface.pending_stacking.take() { surface.stacking = order; }
-        let children = surface.stacking.clone();
-        for id in children.into_iter().filter(|id| id != parent) {
-            if let Some(child) = self.surfaces.get_mut(&id) {
-                if let Some(position) = child.pending_pos.take() { child.subsurface_pos = position; }
+    fn flush_applied(&mut self, parent: &ObjectId) {
+        let children: Vec<ObjectId> = self.surfaces.get(parent).map(|s| s.stacking.clone()).unwrap_or_default();
+        for child_id in children.into_iter().filter(|id| id != parent) {
+            if let Some(child) = self.surfaces.get_mut(&child_id) {
+                if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
+                if let Some(pos) = child.pending_pos.take() { child.subsurface_pos = pos; }
                 if let Some(update) = child.cached.take() { child.apply(update); }
+                if let Some(order) = child.cached_stacking.take() { child.stacking = order; }
             }
-            self.flush_children(&id);
+            self.flush_cached_descendants(&child_id);
+        }
+    }
+
+    fn flush_cached_descendants(&mut self, parent: &ObjectId) {
+        let children: Vec<ObjectId> = self.surfaces.get(parent).map(|s| s.stacking.clone()).unwrap_or_default();
+        for child_id in children.into_iter().filter(|id| id != parent) {
+            if let Some(child) = self.surfaces.get_mut(&child_id) {
+                if let Some(update) = child.cached.take() { child.apply(update); }
+                if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
+                if let Some(order) = child.cached_stacking.take() { child.stacking = order; }
+            }
+            self.flush_cached_descendants(&child_id);
         }
     }
 

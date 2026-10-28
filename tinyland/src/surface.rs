@@ -26,6 +26,8 @@ pub struct SurfaceData {
     pub resource: wl_surface::WlSurface,
     pub pending: PendingState,
     pub cached: Option<SurfaceUpdate>,
+    pub cached_pos: Option<(i32, i32)>,
+    pub cached_stacking: Option<Vec<ObjectId>>,
     pub pixels: Option<SurfacePixels>,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub parent: Option<ObjectId>,
@@ -42,7 +44,8 @@ impl SurfaceData {
     pub fn new(resource: wl_surface::WlSurface) -> Self {
         let id = resource.id();
         Self {
-            resource, pending: PendingState::default(), cached: None, pixels: None,
+            resource, pending: PendingState::default(), cached: None, cached_pos: None,
+            cached_stacking: None, pixels: None,
             callbacks: Vec::new(), parent: None, stacking: vec![id], pending_stacking: None,
             subsurface_pos: (0, 0), pending_pos: None, subsurface_sync: true,
             has_role: false, is_popup: false,

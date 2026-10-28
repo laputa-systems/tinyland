@@ -157,7 +157,8 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
         if let Some(s) = state.surfaces.remove(&id) {
             if let Some(parent) = s.parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &id);
-                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &id); } }
+                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &id); }
+                    if let Some(order) = &mut parent.cached_stacking { order.retain(|child| child != &id); } }
             }
             for seat in &mut state.seats {
                 if seat.keyboard_focus.as_ref() == Some(&id) { seat.keyboard_focus = None; }
@@ -336,11 +337,15 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
         if let Some(surf_id) = state.subsurfaces.remove(&resource.id()) {
             let parent = state.surfaces.get_mut(&surf_id).and_then(|surface| {
                 surface.cached = None;
+                surface.cached_pos = None;
+                surface.cached_stacking = None;
+                surface.pending_pos = None;
                 surface.parent.take()
             });
             if let Some(parent) = parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &surf_id);
-                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &surf_id); } }
+                    if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &surf_id); }
+                    if let Some(order) = &mut parent.cached_stacking { order.retain(|child| child != &surf_id); } }
             }
             state.pending_present = true;
         }

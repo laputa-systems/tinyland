@@ -389,6 +389,49 @@ fn contains_opcode(data: &[u8], opcode: u16) -> bool {
 }
 
 #[test]
+fn nested_position_waits_for_immediate_parent_commit() {
+    use wayland_server::protocol::{wl_subcompositor, wl_subsurface};
+    let mut f = Fixture::new();
+    let root = f.surface();
+    let parent = f.surface();
+    let grandchild = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, parent.id().protocol_id(), root.id().protocol_id()]);
+    f.request(&sub, 1, &[3, grandchild.id().protocol_id(), parent.id().protocol_id()]);
+    let grand_sub_id = f.state.subsurfaces.iter().find(|(_, surf)| **surf == grandchild.id()).map(|(id, _)| id.clone()).unwrap();
+    let grand_sub = wl_subsurface::WlSubsurface::from_id(&f.state.dh, grand_sub_id).unwrap();
+    f.request(&grand_sub, 1, &[5, 0]);
+    f.request(&root, 6, &[]);
+    assert_eq!(f.state.surfaces[&grandchild.id()].subsurface_pos, (0, 0));
+    f.request(&parent, 6, &[]);
+    f.request(&root, 6, &[]);
+    assert_eq!(f.state.surfaces[&grandchild.id()].subsurface_pos, (5, 0));
+}
+
+#[test]
+fn later_position_does_not_leak_into_earlier_transaction() {
+    use wayland_server::protocol::{wl_subcompositor, wl_subsurface};
+    let mut f = Fixture::new();
+    let root = f.surface();
+    let parent = f.surface();
+    let grandchild = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, parent.id().protocol_id(), root.id().protocol_id()]);
+    f.request(&sub, 1, &[3, grandchild.id().protocol_id(), parent.id().protocol_id()]);
+    let grand_sub_id = f.state.subsurfaces.iter().find(|(_, surf)| **surf == grandchild.id()).map(|(id, _)| id.clone()).unwrap();
+    let grand_sub = wl_subsurface::WlSubsurface::from_id(&f.state.dh, grand_sub_id).unwrap();
+    f.request(&grand_sub, 1, &[9, 0]);
+    f.request(&parent, 6, &[]);
+    f.request(&grand_sub, 1, &[20, 0]);
+    f.request(&root, 6, &[]);
+    assert_eq!(f.state.surfaces[&grandchild.id()].subsurface_pos, (9, 0));
+    assert_eq!(f.state.surfaces[&grandchild.id()].pending_pos, Some((20, 0)));
+    f.request(&parent, 6, &[]);
+    f.request(&root, 6, &[]);
+    assert_eq!(f.state.surfaces[&grandchild.id()].subsurface_pos, (20, 0));
+}
+
+#[test]
 fn logical_focus_is_single_active_toplevel_across_two_clients() {
     use std::sync::Arc;
     use wayland_server::protocol::{wl_data_device, wl_data_source, wl_keyboard, wl_seat};
