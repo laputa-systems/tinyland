@@ -638,3 +638,37 @@ fn device_close_then_stale_id_is_ebadf() {
     let (op, _) = c.recv().unwrap();
     assert_eq!(op, S_ERROR);
 }
+
+fn signal_child(child: &mut Child, sig: i32) {
+    unsafe {
+        libc::kill(child.id() as i32, sig);
+    }
+}
+
+#[test]
+fn vt_signals_unbound_are_noops() {
+    let sock = ".work/tmp/vt-sig-unbound.sock";
+    let mut d = spawn_with_env(sock, Some("0"));
+    signal_child(&mut d.child, libc::SIGUSR1);
+    signal_child(&mut d.child, libc::SIGUSR2);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    assert_eq!(c.recv().unwrap().0, 0x8006);
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, S_PONG);
+}
+
+#[test]
+fn vt_signal_release_without_tty_keeps_serving() {
+    let sock = ".work/tmp/vt-sig-bound.sock";
+    let mut d = spawn_with_env(sock, None);
+    signal_child(&mut d.child, libc::SIGUSR1);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    signal_child(&mut d.child, libc::SIGUSR2);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut c = Raw::connect(sock);
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, S_PONG);
+}

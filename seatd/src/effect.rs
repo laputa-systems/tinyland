@@ -1,6 +1,7 @@
 use crate::policy::validate_opened;
 use crate::session::DeviceType;
 use crate::sys;
+use crate::vt;
 use rustix::fd::OwnedFd;
 use std::ffi::CString;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -69,23 +70,23 @@ impl Effect for RealEffect {
     }
 
     fn vt_open(&mut self, session: i32) -> Result<(), i32> {
-        sys::vt::open_vt(session)
+        vt::open_vt(session)
     }
 
     fn vt_close(&mut self, session: i32) -> Result<(), i32> {
-        sys::vt::close_vt(session)
+        vt::close_vt(session)
     }
 
     fn vt_switch(&mut self, cur_vt: i32, target: i32) -> Result<(), i32> {
-        sys::vt::switch_vt(cur_vt, target)
+        vt::switch_vt(cur_vt, target)
     }
 
     fn vt_ack(&mut self, cur_vt: i32, release: bool) -> Result<(), i32> {
-        sys::vt::ack_vt(cur_vt, release)
+        vt::ack_vt(cur_vt, release)
     }
 
     fn current_vt(&mut self) -> Result<i32, i32> {
-        sys::vt::current_vt()
+        vt::current_vt()
     }
 }
 

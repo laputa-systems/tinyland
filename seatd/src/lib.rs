@@ -8,4 +8,5 @@ pub mod log;
 pub mod r#loop;
 pub mod session;
 pub mod sys;
+pub mod vt;
 pub mod wire;
