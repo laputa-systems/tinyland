@@ -87,7 +87,10 @@ pub fn validate_buffer(
 pub fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
     use std::os::unix::fs::FileExt;
     let wbytes = buf.width as usize * 4;
-    let mut out = vec![0u8; wbytes * buf.height as usize];
+    let total = wbytes.checked_mul(buf.height as usize).ok_or("buffer size overflow")?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).map_err(|_| "buffer allocation failed".to_string())?;
+    out.resize(total, 0);
     for y in 0..buf.height as usize {
         let src = buf.offset as u64 + y as u64 * buf.stride as u64;
         let dst = y * wbytes;

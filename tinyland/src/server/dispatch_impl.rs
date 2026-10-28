@@ -28,7 +28,7 @@ impl GlobalDispatch<wl_compositor::WlCompositor, ()> for State {
 impl Dispatch<wl_compositor::WlCompositor, ()> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &wl_compositor::WlCompositor,
         request: wl_compositor::Request,
         _data: &(),
@@ -37,10 +37,31 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
+                use crate::server::MAX_SURFACES_PER_CLIENT;
+                if state.count_client_surfaces(&client.id()) >= MAX_SURFACES_PER_CLIENT {
+                    _resource.post_error(0u32, "too many surfaces for client");
+                    return;
+                }
                 let surf = data_init.init(id, ());
                 state.surfaces.insert(surf.id(), SurfaceData::new(surf));
             }
             wl_compositor::Request::CreateRegion { id } => {
+                use crate::server::MAX_REGIONS_PER_CLIENT;
+                let regions_for_client = state
+                    .regions
+                    .keys()
+                    .filter(|rid| {
+                        state
+                            .dh
+                            .get_client((*rid).clone())
+                            .map(|c| c.id() == client.id())
+                            .unwrap_or(false)
+                    })
+                    .count();
+                if regions_for_client >= MAX_REGIONS_PER_CLIENT {
+                    _resource.post_error(0u32, "too many regions for client");
+                    return;
+                }
                 let region = data_init.init(id, ());
                 state.regions.insert(region.id(), Vec::new());
             }
@@ -71,6 +92,11 @@ impl Dispatch<wl_region::WlRegion, ()> for State {
         match request {
             wl_region::Request::Add { x, y, width, height } => {
                 if width > 0 && height > 0 {
+                    use crate::server::MAX_REGION_RECTS;
+                    if entry.len() >= MAX_REGION_RECTS {
+                        resource.post_error(0u32, "too many region rectangles");
+                        return;
+                    }
                     entry.push((x, y, width, height));
                 }
             }
@@ -110,6 +136,19 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
             }
             wl_surface::Request::Damage { .. } | wl_surface::Request::DamageBuffer { .. } => {}
             wl_surface::Request::Frame { callback: cb_id } => {
+                use crate::server::MAX_CALLBACKS_PER_SURFACE;
+                let pending = state.surfaces.get(&id).map(|s| s.pending.callbacks.len()).unwrap_or(0);
+                let current = state.surfaces.get(&id).map(|s| s.callbacks.len()).unwrap_or(0);
+                let cached = state
+                    .surfaces
+                    .get(&id)
+                    .and_then(|s| s.cached.as_ref())
+                    .map(|c| c.callbacks.len())
+                    .unwrap_or(0);
+                if pending + current + cached >= MAX_CALLBACKS_PER_SURFACE {
+                    resource.post_error(0u32, "too many outstanding frame callbacks");
+                    return;
+                }
                 let cb = data_init.init(cb_id, ());
                 if let Some(s) = state.surfaces.get_mut(&id) {
                     s.pending.callbacks.push(cb);
@@ -155,6 +194,17 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
     ) {
         let id = resource.id();
         if let Some(s) = state.surfaces.remove(&id) {
+            let client = s.resource.client().map(|client| client.id());
+            let current = s.pixels.as_ref().map(|pixels| pixels.bytes.len()).unwrap_or(0);
+            let cached = s.cached.as_ref().and_then(|cached| cached.pixels.as_ref()).and_then(|pixels| pixels.as_ref()).map(|pixels| pixels.bytes.len()).unwrap_or(0);
+            if let Some(client) = client {
+                if current > 0 {
+                    state.release_bytes(client.clone(), current);
+                }
+                if cached > 0 {
+                    state.release_bytes(client, cached);
+                }
+            }
             if let Some(parent) = s.parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &id);
                     if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &id); }
@@ -335,13 +385,29 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
         _data: &(),
     ) {
         if let Some(surf_id) = state.subsurfaces.remove(&resource.id()) {
-            let parent = state.surfaces.get_mut(&surf_id).and_then(|surface| {
-                surface.cached = None;
-                surface.cached_pos = None;
-                surface.cached_stacking = None;
-                surface.pending_pos = None;
-                surface.parent.take()
-            });
+            let (parent, cached_bytes, client) = match state.surfaces.get_mut(&surf_id) {
+                Some(surface) => {
+                    let cached_bytes = surface
+                        .cached
+                        .as_ref()
+                        .and_then(|cached| cached.pixels.as_ref())
+                        .and_then(|pixels| pixels.as_ref())
+                        .map(|pixels| pixels.bytes.len())
+                        .unwrap_or(0);
+                    let client = surface.resource.client().map(|client| client.id());
+                    surface.cached = None;
+                    surface.cached_pos = None;
+                    surface.cached_stacking = None;
+                    surface.pending_pos = None;
+                    (surface.parent.take(), cached_bytes, client)
+                }
+                None => (None, 0, None),
+            };
+            if cached_bytes > 0 {
+                if let Some(client) = client {
+                    state.release_bytes(client, cached_bytes);
+                }
+            }
             if let Some(parent) = parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &surf_id);
                     if let Some(order) = &mut parent.pending_stacking { order.retain(|child| child != &surf_id); }
@@ -370,7 +436,7 @@ impl GlobalDispatch<wl_shm::WlShm, ()> for State {
 impl Dispatch<wl_shm::WlShm, ()> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &wl_shm::WlShm,
         request: wl_shm::Request,
         _data: &(),
@@ -379,6 +445,11 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
     ) {
         match request {
             wl_shm::Request::CreatePool { id, fd, size } => {
+                use crate::server::MAX_POOLS_PER_CLIENT;
+                if state.count_client_pools(&client.id()) >= MAX_POOLS_PER_CLIENT {
+                    _resource.post_error(0u32, "too many shm pools for client");
+                    return;
+                }
                 let pool_size = match shm::validate_pool_size(size) {
                     Ok(n) => n,
                     Err(msg) => {
@@ -410,7 +481,7 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
 impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &wl_shm_pool::WlShmPool,
         request: wl_shm_pool::Request,
         _data: &(),
@@ -419,6 +490,11 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
     ) {
         match request {
             wl_shm_pool::Request::CreateBuffer { id, offset, width, height, stride, format } => {
+                use crate::server::MAX_BUFFERS_PER_CLIENT;
+                if state.count_client_buffers(&client.id()) >= MAX_BUFFERS_PER_CLIENT {
+                    resource.post_error(0u32, "too many buffers for client");
+                    return;
+                }
                 let pool_id = resource.id();
                 let pool_size = match state.pools.get(&pool_id) {
                     Some(p) => p.size,
@@ -515,6 +591,13 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for State {
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        use crate::server::MAX_OUTPUTS_PER_CLIENT;
+        let existing = state.outputs.iter().filter(|(id, _)| id == &client.id()).count();
+        if existing >= MAX_OUTPUTS_PER_CLIENT {
+            let out = data_init.init(resource, ());
+            out.post_error(0u32, "too many outputs for client");
+            return;
+        }
         let out = data_init.init(resource, ());
         out.geometry(
             0,
@@ -569,6 +652,17 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        use crate::server::MAX_SEATS_PER_CLIENT;
+        let existing = state
+            .seats
+            .iter()
+            .filter(|seat| seat.resource.client().map(|c| c.id() == client.id()).unwrap_or(false))
+            .count();
+        if existing >= MAX_SEATS_PER_CLIENT {
+            let seat = data_init.init(resource, ());
+            seat.post_error(0u32, "too many seats for client");
+            return;
+        }
         let seat = data_init.init(resource, ());
         seat.capabilities(wl_seat::Capability::Keyboard);
         if seat.version() >= 2 { seat.name("seat0".to_string()); }
@@ -701,14 +795,26 @@ impl GlobalDispatch<wl_data_device_manager::WlDataDeviceManager, ()> for State {
 }
 
 impl Dispatch<wl_data_device_manager::WlDataDeviceManager, ()> for State {
-    fn request(state: &mut Self, _client: &Client, _resource: &wl_data_device_manager::WlDataDeviceManager,
+    fn request(state: &mut Self, client: &Client, _resource: &wl_data_device_manager::WlDataDeviceManager,
         request: wl_data_device_manager::Request, _data: &(), _dh: &DisplayHandle, data_init: &mut DataInit<'_, Self>) {
         match request {
             wl_data_device_manager::Request::CreateDataSource { id } => {
+                use crate::server::MAX_SOURCES_PER_CLIENT;
+                if state.count_client_sources(client) >= MAX_SOURCES_PER_CLIENT {
+                    let source = data_init.init(id, ());
+                    source.post_error(0u32, "too many data sources for client");
+                    return;
+                }
                 let source = data_init.init(id, ());
                 state.selection.sources.insert(source.id(), crate::selection::DataSourceData { resource: source, mime_types: Vec::new() });
             }
             wl_data_device_manager::Request::GetDataDevice { id, .. } => {
+                use crate::server::MAX_DEVICES_PER_CLIENT;
+                if state.count_client_devices(client) >= MAX_DEVICES_PER_CLIENT {
+                    let device = data_init.init(id, ());
+                    device.post_error(0u32, "too many data devices for client");
+                    return;
+                }
                 let device = data_init.init(id, ());
                 state.selection.devices.insert(device.id(), device);
                 state.send_selection();
@@ -722,7 +828,14 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
     fn request(state: &mut Self, _client: &Client, resource: &wl_data_source::WlDataSource,
         request: wl_data_source::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
         if let wl_data_source::Request::Offer { mime_type } = request {
-            if let Some(source) = state.selection.sources.get_mut(&resource.id()) { source.mime_types.push(mime_type); }
+            if let Some(source) = state.selection.sources.get_mut(&resource.id()) {
+                use crate::server::MAX_MIME_TYPES_PER_SOURCE;
+                if source.mime_types.len() >= MAX_MIME_TYPES_PER_SOURCE {
+                    resource.post_error(0u32, "too many mime types for source");
+                    return;
+                }
+                source.mime_types.push(mime_type);
+            }
         }
     }
 
@@ -849,7 +962,7 @@ pub fn handle_get_xdg_surface(
 impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &xdg_surface::XdgSurface,
         request: xdg_surface::Request,
         _data: &(),
@@ -858,6 +971,11 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     ) {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
+                use crate::server::MAX_TOPLEVELS_PER_CLIENT;
+                if state.count_client_toplevels(&client.id()) >= MAX_TOPLEVELS_PER_CLIENT {
+                    resource.post_error(0u32, "too many toplevels for client");
+                    return;
+                }
                 let xsurf_id = resource.id();
                 let surf_id = match state.xdg_surfaces.get(&xsurf_id) {
                     Some(x) => {

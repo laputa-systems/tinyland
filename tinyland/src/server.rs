@@ -13,7 +13,7 @@ use wayland_server::protocol::{
     wl_buffer, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
     wl_subcompositor,
 };
-use wayland_server::{Display, DisplayHandle, ListeningSocket, Resource};
+use wayland_server::{Client, Display, DisplayHandle, ListeningSocket, Resource};
 
 struct UdsClientData;
 
@@ -43,7 +43,24 @@ pub struct State {
     mapped_logged: bool,
     active_toplevel: Option<ObjectId>,
     toplevel_order: Vec<ObjectId>,
+    client_bytes: HashMap<ClientId, usize>,
+    total_bytes: usize,
 }
+
+pub const MAX_PER_CLIENT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_CALLBACKS_PER_SURFACE: usize = 32;
+pub const MAX_MIME_TYPES_PER_SOURCE: usize = 32;
+pub const MAX_SURFACES_PER_CLIENT: usize = 128;
+pub const MAX_TOPLEVELS_PER_CLIENT: usize = 32;
+pub const MAX_BUFFERS_PER_CLIENT: usize = 64;
+pub const MAX_POOLS_PER_CLIENT: usize = 16;
+pub const MAX_SOURCES_PER_CLIENT: usize = 32;
+pub const MAX_DEVICES_PER_CLIENT: usize = 16;
+pub const MAX_SEATS_PER_CLIENT: usize = 8;
+pub const MAX_OUTPUTS_PER_CLIENT: usize = 8;
+pub const MAX_REGIONS_PER_CLIENT: usize = 32;
+pub const MAX_REGION_RECTS: usize = 128;
 
 impl State {
     fn new(dh: DisplayHandle, out_size: (u32, u32), keyboard: Keyboard) -> Self {
@@ -66,12 +83,134 @@ impl State {
         mapped_logged: false,
         active_toplevel: None,
         toplevel_order: Vec::new(),
+        client_bytes: HashMap::new(),
+        total_bytes: 0,
         }
     }
 
     fn next_serial(&mut self) -> u32 {
         self.serial = self.serial.wrapping_add(1).max(1);
         self.serial
+    }
+
+    fn surface_client_id(&self, surf_id: &ObjectId) -> Option<ClientId> {
+        self.surfaces
+            .get(surf_id)
+            .and_then(|surface| surface.resource.client())
+            .map(|client| client.id())
+    }
+
+    fn current_bytes(&self, surf_id: &ObjectId) -> usize {
+        self.surfaces
+            .get(surf_id)
+            .and_then(|surface| surface.pixels.as_ref())
+            .map(|pixels| pixels.bytes.len())
+            .unwrap_or(0)
+    }
+
+    fn cached_bytes(&self, surf_id: &ObjectId) -> usize {
+        self.surfaces
+            .get(surf_id)
+            .and_then(|surface| surface.cached.as_ref())
+            .and_then(|cached| cached.pixels.as_ref())
+            .and_then(|pixels| pixels.as_ref())
+            .map(|pixels| pixels.bytes.len())
+            .unwrap_or(0)
+    }
+
+    fn charge_bytes(&mut self, client: ClientId, bytes: usize) -> Result<(), String> {
+        let current = self.client_bytes.get(&client).copied().unwrap_or(0);
+        if current.saturating_add(bytes) > MAX_PER_CLIENT_BYTES {
+            return Err("client exceeds per-client memory budget".into());
+        }
+        if self.total_bytes.saturating_add(bytes) > MAX_TOTAL_BYTES {
+            return Err("compositor exceeds global memory budget".into());
+        }
+        self.client_bytes.insert(client, current + bytes);
+        self.total_bytes += bytes;
+        Ok(())
+    }
+
+    fn release_bytes(&mut self, client: ClientId, bytes: usize) {
+        if let Some(current) = self.client_bytes.get_mut(&client) {
+            *current = current.saturating_sub(bytes);
+            if *current == 0 {
+                self.client_bytes.remove(&client);
+            }
+        }
+        self.total_bytes = self.total_bytes.saturating_sub(bytes);
+    }
+
+    fn count_client_surfaces(&self, client: &ClientId) -> usize {
+        self.surfaces
+            .keys()
+            .filter(|id| {
+                self.dh
+                    .get_client((*id).clone())
+                    .map(|c| c.id() == *client)
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn count_client_toplevels(&self, client: &ClientId) -> usize {
+        self.toplevels
+            .values()
+            .filter(|top| {
+                self.dh
+                    .get_client(top.surface.clone())
+                    .map(|c| c.id() == *client)
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn count_client_buffers(&self, client: &ClientId) -> usize {
+        self.buffers
+            .keys()
+            .filter(|id| {
+                self.dh
+                    .get_client((*id).clone())
+                    .map(|c| c.id() == *client)
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn count_client_pools(&self, client: &ClientId) -> usize {
+        self.pools
+            .keys()
+            .filter(|id| {
+                self.dh
+                    .get_client((*id).clone())
+                    .map(|c| c.id() == *client)
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn count_client_sources(&self, client: &Client) -> usize {
+        let target = client.id();
+        self.selection
+            .sources
+            .values()
+            .filter(|source| {
+                source
+                    .resource
+                    .client()
+                    .map(|c| c.id() == target)
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn count_client_devices(&self, client: &Client) -> usize {
+        let target = client.id();
+        self.selection
+            .devices
+            .values()
+            .filter(|device| device.client().map(|c| c.id() == target).unwrap_or(false))
+            .count()
     }
 
     fn synchronized(&self, surf_id: &ObjectId) -> bool {
@@ -104,18 +243,73 @@ impl State {
                 top.last_configure = serial;
             }
         }
+        let client_id = self.surface_client_id(surf_id);
+        let old_cached = self.cached_bytes(surf_id);
+        let old_current = self.current_bytes(surf_id);
+        let is_sync = self.synchronized(surf_id);
+        let current_callbacks = self.surfaces.get(surf_id).map(|s| s.callbacks.len()).unwrap_or(0);
+        let cached_callbacks = self.surfaces.get(surf_id).and_then(|s| s.cached.as_ref()).map(|c| c.callbacks.len()).unwrap_or(0);
+        if pending.callbacks.len() + current_callbacks + cached_callbacks > MAX_CALLBACKS_PER_SURFACE {
+            self.surfaces[surf_id].resource.post_error(0u32, "too many outstanding frame callbacks");
+            return;
+        }
         let pixels = match pending.buffer {
             Some(Some(id)) => {
+                let needed = match self.buffers.get(&id) {
+                    Some((_, data)) => (data.width as usize).checked_mul(data.height as usize).and_then(|n| n.checked_mul(4)),
+                    None => None,
+                };
                 let Some((buffer, data)) = self.buffers.get(&id) else {
                     self.surfaces[surf_id].resource.post_error(0u32, "attached buffer was destroyed before commit");
                     return;
                 };
+                let needed = match needed {
+                    Some(n) => n,
+                    None => {
+                        self.surfaces[surf_id].resource.post_error(0u32, "buffer size overflow");
+                        return;
+                    }
+                };
+                if let Some(client) = client_id.clone() {
+                    let old = if is_sync { old_cached } else { old_current };
+                    let net = needed as isize - old as isize;
+                    if net > 0
+                        && (self.client_bytes.get(&client).copied().unwrap_or(0).saturating_add(net as usize) > MAX_PER_CLIENT_BYTES
+                            || self.total_bytes.saturating_add(net as usize) > MAX_TOTAL_BYTES)
+                    {
+                        self.surfaces[surf_id].resource.post_error(0u32, "client exceeds memory budget");
+                        return;
+                    }
+                }
                 match shm::read_rows(data) {
-                    Ok(pixels) => { buffer.release(); Some(Some(pixels)) }
+                    Ok(pixels) => {
+                        buffer.release();
+                        if let Some(client) = client_id.clone() {
+                            let old = if is_sync { old_cached } else { old_current };
+                            let net = pixels.bytes.len() as isize - old as isize;
+                            if net > 0 {
+                                if self.charge_bytes(client, net as usize).is_err() {
+                                    self.surfaces[surf_id].resource.post_error(0u32, "client exceeds memory budget");
+                                    return;
+                                }
+                            } else if net < 0 {
+                                self.release_bytes(client, (-net) as usize);
+                            }
+                        }
+                        Some(Some(pixels))
+                    }
                     Err(error) => { self.surfaces[surf_id].resource.post_error(0u32, error); return; }
                 }
             }
-            Some(None) => Some(None),
+            Some(None) => {
+                if let Some(client) = client_id.clone() {
+                    let old = if is_sync { old_cached } else { old_current };
+                    if old > 0 {
+                        self.release_bytes(client, old);
+                    }
+                }
+                Some(None)
+            }
             None => None,
         };
         let update = SurfaceUpdate { pixels, callbacks: pending.callbacks };
@@ -165,6 +359,13 @@ impl State {
         let Some(surface) = self.surfaces.get_mut(id) else { return; };
         surface.subsurface_sync = false;
         if self.synchronized(id) { return; }
+        let client = self.surface_client_id(id);
+        let old_current = self.current_bytes(id);
+        let had_pixel_change = self
+            .surfaces
+            .get(id)
+            .and_then(|s| s.cached.as_ref())
+            .is_some_and(|cached| cached.pixels.is_some());
         let cached = self.surfaces.get_mut(id).unwrap().cached.take();
         let cached_stacking = self.surfaces.get_mut(id).unwrap().cached_stacking.take();
         let had_cached = cached.is_some() || cached_stacking.is_some();
@@ -177,6 +378,13 @@ impl State {
             }
         }
         if had_cached {
+            if had_pixel_change {
+                if let Some(client) = client {
+                    if old_current > 0 {
+                        self.release_bytes(client, old_current);
+                    }
+                }
+            }
             self.flush_cached_descendants(id);
             self.pending_present = true;
         }
@@ -185,11 +393,25 @@ impl State {
     fn flush_applied(&mut self, parent: &ObjectId) {
         let children: Vec<ObjectId> = self.surfaces.get(parent).map(|s| s.stacking.clone()).unwrap_or_default();
         for child_id in children.into_iter().filter(|id| id != parent) {
+            let client = self.surface_client_id(&child_id);
+            let old_current = self.current_bytes(&child_id);
+            let had_pixel_change = self
+                .surfaces
+                .get(&child_id)
+                .and_then(|s| s.cached.as_ref())
+                .is_some_and(|cached| cached.pixels.is_some());
             if let Some(child) = self.surfaces.get_mut(&child_id) {
                 if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
                 if let Some(pos) = child.pending_pos.take() { child.subsurface_pos = pos; }
                 if let Some(update) = child.cached.take() { child.apply(update); }
                 if let Some(order) = child.cached_stacking.take() { child.stacking = order; }
+            }
+            if had_pixel_change {
+                if let Some(client) = client {
+                    if old_current > 0 {
+                        self.release_bytes(client, old_current);
+                    }
+                }
             }
             self.flush_cached_descendants(&child_id);
         }
@@ -198,10 +420,24 @@ impl State {
     fn flush_cached_descendants(&mut self, parent: &ObjectId) {
         let children: Vec<ObjectId> = self.surfaces.get(parent).map(|s| s.stacking.clone()).unwrap_or_default();
         for child_id in children.into_iter().filter(|id| id != parent) {
+            let client = self.surface_client_id(&child_id);
+            let old_current = self.current_bytes(&child_id);
+            let had_pixel_change = self
+                .surfaces
+                .get(&child_id)
+                .and_then(|s| s.cached.as_ref())
+                .is_some_and(|cached| cached.pixels.is_some());
             if let Some(child) = self.surfaces.get_mut(&child_id) {
                 if let Some(update) = child.cached.take() { child.apply(update); }
                 if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
                 if let Some(order) = child.cached_stacking.take() { child.stacking = order; }
+            }
+            if had_pixel_change {
+                if let Some(client) = client {
+                    if old_current > 0 {
+                        self.release_bytes(client, old_current);
+                    }
+                }
             }
             self.flush_cached_descendants(&child_id);
         }

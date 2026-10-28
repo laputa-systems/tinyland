@@ -560,3 +560,75 @@ fn two_toplevels_from_same_client_share_one_active_surface() {
     assert_eq!(f.state.seats[0].keyboard_focus, Some(second.id()));
     assert_eq!(f.state.active_surface(), Some(second.id()));
 }
+
+#[test]
+fn per_client_memory_budget_rejects_without_harming_healthy_client() {
+    use std::sync::Arc;
+    let mut f = Fixture::new();
+    let (mut socket2, server2) = UnixStream::pair().unwrap();
+    socket2.set_nonblocking(true).unwrap();
+    let client2 = f.state.dh.insert_client(server2, Arc::new(UdsClientData)).unwrap();
+    let offender = f.surface();
+    let healthy_surface = client2
+        .create_resource::<wl_surface::WlSurface, (), State>(&f.state.dh, 4, ())
+        .unwrap();
+    f.state
+        .surfaces
+        .insert(healthy_surface.id(), SurfaceData::new(healthy_surface.clone()));
+    let offender_buffer = f.buffer(&[1; 8]);
+    let healthy_buffer = {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(8).unwrap();
+        std::os::unix::fs::FileExt::write_all_at(&file, &[2; 8], 0).unwrap();
+        let buffer = client2.create_resource::<wl_buffer::WlBuffer, (), State>(&f.state.dh, 1, ()).unwrap();
+        f.state.buffers.insert(
+            buffer.id(),
+            (
+                buffer.clone(),
+                ShmBufferData {
+                    file: Arc::new(file),
+                    offset: 0,
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: ShmFormat::Xrgb8888,
+                },
+            ),
+        );
+        buffer
+    };
+    let offender_client = f.client.id();
+    f.state.client_bytes.insert(offender_client, crate::server::MAX_PER_CLIENT_BYTES - 4);
+    f.state.total_bytes = crate::server::MAX_PER_CLIENT_BYTES - 4;
+    f.request(&offender, 1, &[offender_buffer.id().protocol_id(), 0, 0]);
+    let response = f.request(&offender, 6, &[]);
+    assert!(String::from_utf8_lossy(&response).contains("memory budget"));
+    assert!(f.state.surfaces.get(&offender.id()).map(|s| s.pixels.is_none()).unwrap_or(true));
+    let mut header = Vec::new();
+    header.extend(healthy_surface.id().protocol_id().to_ne_bytes());
+    header.extend((((8 + 3 * 4) as u32) << 16 | 1).to_ne_bytes());
+    header.extend(healthy_buffer.id().protocol_id().to_ne_bytes());
+    header.extend(0u32.to_ne_bytes());
+    header.extend(0u32.to_ne_bytes());
+    socket2.write_all(&header).unwrap();
+    let mut commit = Vec::new();
+    commit.extend(healthy_surface.id().protocol_id().to_ne_bytes());
+    commit.extend(((8u32) << 16 | 6).to_ne_bytes());
+    socket2.write_all(&commit).unwrap();
+    f.display.dispatch_clients(&mut f.state).unwrap();
+    f.display.flush_clients().unwrap();
+    assert!(f.state.surfaces[&healthy_surface.id()].pixels.is_some());
+    let _ = drain_socket(&mut socket2);
+}
+
+#[test]
+fn callback_bound_disconnects_offender_only() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    for new_id in 2..(2 + crate::server::MAX_CALLBACKS_PER_SURFACE as u32) {
+        let response = f.request(&surface, 3, &[new_id]);
+        assert!(response.is_empty(), "callback {new_id} should be accepted");
+    }
+    let response = f.request(&surface, 3, &[2 + crate::server::MAX_CALLBACKS_PER_SURFACE as u32]);
+    assert!(String::from_utf8_lossy(&response).contains("too many outstanding frame callbacks"));
+}
