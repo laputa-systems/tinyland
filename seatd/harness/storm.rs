@@ -150,6 +150,54 @@ fn open_client(sock: &str) -> Raw {
 }
 
 #[test]
+fn storm_sigkill_disconnects_and_stale_reclaims() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/storm-sigkill.sock";
+    unlink(sock);
+    let mut d = spawn_rust(sock);
+    let mut a = open_client(sock);
+    assert_eq!(a.recv().0, 0x8006);
+    d.child.kill().expect("SIGKILL daemon");
+    d.child.wait().expect("reap daemon");
+    let mut hdr = [0u8; 4];
+    let err = a.s.read_exact(&mut hdr).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    drop(a);
+    assert!(
+        std::path::Path::new(sock).exists(),
+        "SIGKILL must leave the socket path behind (no cleanup runs)"
+    );
+    let d2 = Daemon { child: Command::new(rust_bin())
+        .arg("-l")
+        .arg("silent")
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .env("SEATD_VTBOUND", "0")
+        .env("SEATD_SOCK", sock)
+        .spawn()
+        .expect("spawn replacement seatd") };
+    let mut b = None;
+    for _ in 0..50 {
+        match UnixStream::connect(sock) {
+            Ok(s) => {
+                s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+                s.set_write_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+                b = Some(Raw { s });
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+    let mut b = b.expect("replacement seatd never admitted clients");
+    b.send(1, &[]);
+    assert_eq!(b.recv().0, 0x8001);
+    assert_eq!(b.recv().0, 0x8006);
+    drop(d2);
+    unlink(sock);
+}
+
+#[test]
 fn storm_disconnect_keeps_other_sessions_switchable() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/storm-disconnect.sock";

@@ -441,4 +441,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&moved);
     }
+
+    #[test]
+    fn failed_ownership_setup_cleans_up_socket() {
+        let path = tmp_sock("chown-fail");
+        let _ = std::fs::remove_file(&path);
+        let r = open_socket(&path, 0, 0);
+        if unsafe { libc::geteuid() } == 0 {
+            drop(r);
+            let _ = unlink_path(&path);
+        } else {
+            assert!(r.is_err(), "unprivileged chown to root must fail");
+            assert!(
+                !std::path::Path::new(&path).exists(),
+                "bind-then-chown failure must not leave the socket behind"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+    }
 }
