@@ -1,46 +1,46 @@
-# seatd and libseat
+# seatd
 
-A minimal seat management daemon, and a universal seat management library.
+This repository contains a Linux Rust implementation of the seatd foreground
+daemon. It serves the existing libseat seatd protocol over a Unix socket. The
+daemon supports one seat, `seat0`.
 
-Currently supports Linux and FreeBSD, and has experimental NetBSD support.
+## Build
 
-## What is seat management?
+The repository pins `nightly-2026-09-15` with `rust-src` and `clippy` in
+`rust-toolchain.toml`. Install that toolchain and build with the locked,
+offline dependency set:
 
-Seat management takes care of mediating access to shared devices (graphics, input), without requiring the applications needing access to be root.
+```sh
+cargo build --offline --locked
+```
 
-## What's in the box?
+Rust builds use the `kache` rustc wrapper. Linux musl targets link with `mold`.
+See [validation](doc/validation.md) for target builds and local checks.
 
-### seatd
+## Run under a supervisor
 
-A seat management daemon, that does everything it needs to do. Nothing more, nothing less. Depends only on libc.
+Run seatd as a supervised foreground process. For a seat group named `seat`,
+disable VT binding until the VT-bound path has passed real-VT qualification:
 
-### libseat
+```sh
+SEATD_VTBOUND=0 seatd -g seat -l info
+```
 
-A seat management library allowing applications to use whatever seat management is available.
+The daemon listens on `/run/seatd.sock` unless `SEATD_SOCK` names another path.
+Socket access is the admission boundary. Every process that can connect can
+request seat and supported-device operations. Seatd does not authenticate
+users or manage login, power, or supervision policy. Read [runtime operation](doc/runtime.md)
+before deployment.
 
-Supports:
-- seatd
-- (e)logind
-- embedded seatd for standalone operation
+## Reference client
 
-Each backend can be compile-time included and is runtime auto-detected or manually selected with the `LIBSEAT_BACKEND` environment variable.
+The C libseat client and protocol inputs retained under `oracle/` are a
+test-only compatibility oracle. The helper rebuilds the original C daemon from Git history and builds the
+retained client scenario for differential checks. They are not part of the Rust daemon or its
+runtime dependencies. See [validation](doc/validation.md) for the oracle
+commands and the scope of the comparisons.
 
-Which backend is in use is transparent to the application, providing a simple common interface.
+## License
 
-## Why not (e)logind?
-
-systemd-logind is not portable, and being part of the systemd project, it cannot be used in an environment not based on or compatible with systemd.
-
-elogind tries to isolate systemd-logind from systemd through brute-force. This requires actively fighting against upstream design decisions for deep integration, and the efforts must be repeated every time one syncs with upstream. And even after all this work, one is left with nothing but a hackjob.
-
-Why spend time isolating logind and keeping up with upstream when we could instead create something better with less work?
-
-## Why does libseat support (e)logind?
-
-[In order to not be part of the problem](https://xkcd.com/927/). We will not displace systemd-logind anytime soon, so for user shells like [sway](https://github.com/swaywm/sway), seatd joins the ranks of logind and direct session management for things they need to support.
-
-Instead of giving user shell developers more work, libseat aims to make supporting seatd less work than what they're currently implementing. This is done by taking care of all the seat management needs with multiple backends, providing not only seatd support, but replacing the existing logind and direct seat management implementations.
-
-## How to discuss
-
-Go to [#kennylevinsen @ irc.libera.chat](ircs://irc.libera.chat/#kennylevinsen) to discuss, or use [~kennylevinsen/seatd-devel@lists.sr.ht](https://lists.sr.ht/~kennylevinsen/seatd-devel).
+The project retains the MIT license and attribution to Kenny Levinsen (2020).
+The Rust daemon derives from the retained C reference implementation.

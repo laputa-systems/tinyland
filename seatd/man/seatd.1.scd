@@ -2,56 +2,67 @@ seatd(1)
 
 # NAME
 
-seatd - A seat management daemon
+seatd - Linux seat management daemon
 
 # SYNOPSIS
 
-*seatd* [options]
+*seatd* [*-h*] [*-v*] [*-n* fd] [*-u* user] [*-g* group] [*-l* level] [*-z*]
+
+# DESCRIPTION
+
+seatd is a foreground daemon that provides one seat, *seat0*, over a Unix
+domain socket. Clients use the existing libseat seatd protocol. The default
+socket path is */run/seatd.sock* on Linux.
+
+The daemon uses socket permissions to admit clients. Any process that can
+connect can make seat requests and request supported devices. Seatd does not
+authenticate users or provide login, power, or supervision management. See
+*doc/runtime.md* for operating details and recovery guidance.
 
 # OPTIONS
 
 *-h*
-	Show help message and quit.
-
-*-n <fd>*
-	FD to notify readiness on. A single newline will be written and the fd
-	closed when seatd is ready to serve requests. This is compatible with
-	s6's notification protocol.
-
-*-u <user>*
-	User to own the seatd socket.
-
-*-g <group>*
-	Group to own the seatd socket.
-
-*-l <loglevel>*
-	Log-level to use. Must be one of debug, info, error or silent. Defaults
-	to error.
+	Show help and exit.
 
 *-v*
-	Show the version number and quit.
+	Show the version and exit.
 
-# DESCRIPTION
+*-n* fd
+	Write one newline to fd after the socket is ready, then close fd. This
+	readiness notification is compatible with s6.
 
-seatd provides central seat management, mediating access to shared resources
-such as displays and input devices in a multi-session, multi-seat environment.
+*-u* user
+	Set the socket owner. When either *-u* or *-g* is given, seatd sets the
+	socket mode to 0770. This option cannot be combined with *-z*.
 
-seatd operates over a UNIX domain socket, with *libseat* providing the
-client-side of the protocol.
+*-g* group
+	Set the socket group. When either *-u* or *-g* is given, seatd sets the
+	socket mode to 0770. This option cannot be combined with *-z*.
 
-The location of the socket for seatd is set at compile-time.
+*-l* level
+	Set the log level to *debug*, *info*, *error*, or *silent*. The default is
+	*info*.
+
+*-z*
+	Refuse to start if the socket path already exists. This option cannot be
+	combined with *-u* or *-g*. Without *-z*, seatd removes an existing socket
+	at the path before binding. It refuses to remove a non-socket file.
 
 # ENVIRONMENT
 
+*SEATD_SOCK*
+	Set the socket path. The default is */run/seatd.sock*.
+
 *SEATD_VTBOUND*
-	If set to "0", the seat will not be bound to a VT.
+	Enable VT binding only when the value is exactly *1*. The default is enabled
+	when the variable is unset. Every other value disables VT binding. VT-bound
+	operation is experimental pending real-VT qualification.
+
+# FILES
+
+*/run/seatd.sock*
+	Default Linux socket path.
 
 # SEE ALSO
 
-The libseat library, *<libseat.h>*, *seatd-launch*(1)
-
-# AUTHORS
-
-Maintained by Kenny Levinsen <contact@kl.wtf>, who is assisted by other
-open-source contributors. For more information about seatd development, see
-https://sr.ht/~kennylevinsen/seatd.
+*doc/runtime.md*

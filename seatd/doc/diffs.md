@@ -13,6 +13,8 @@ uses the reference's unmodified seatd backend, without logind or builtin support
 | Platform | Linux only. | C also includes FreeBSD and NetBSD support. Those platforms are outside this port's scope. |
 | VT qualification | VT-bound mode is experimental. | Local tests prove the transition model and ioctl adapter failures. Real VT switching and restoration still require a disposable VM. |
 | Distribution | The foreground Rust daemon replaces C seatd. | The C library and its reference inputs remain test-only. There is no Rust seatd-launch or embedded daemon. |
+| Shutdown socket cleanup | Remove the path only if its device and inode match the startup socket. | C unconditionally unlinks its configured path. Rust preserves a replacement daemon's socket. The directory must remain administrator-controlled. |
+| VT setup failure | Capture prior mode values and attempt rollback on setup failure, then disconnect the opening client. | C leaves the client waiting when setup fails. Rollback is best effort and does not prove restoration of kernel VT ownership. Real-VT proof remains N1. |
 | Logging | Rust includes level, source file, and line. | C includes its own source and timing format. Logs are not wire-protocol goldens. |
 
 Symlinks remain compatible with the reference: resolve the path first, classify

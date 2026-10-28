@@ -1,0 +1,84 @@
+# Run seatd
+
+Seatd is a foreground Linux daemon for one seat, `seat0`. Run it under an
+external supervisor. Seatd does not fork, authenticate users, manage logins,
+or manage power or supervision policy.
+
+## Set up socket access
+
+Seatd listens on `/run/seatd.sock` by default. Set `SEATD_SOCK` to use another
+path. The socket directory must exist and be controlled by the administrator
+or supervisor.
+
+Use `-u user` and `-g group` to set socket ownership. Supplying either option
+sets the socket mode to `0770`. Without either option, the mode is determined
+by the process umask. `-u` and `-g` cannot be combined with `-z`.
+
+Socket access grants access to the daemon's seat operations. Seatd records
+peer credentials but does not use them for authorization. Every connected
+peer can request any supported operation, including opening supported device
+classes while its session is active. Protect the socket and its directory as
+the trust boundary.
+
+## Start under supervision
+
+Until real VT operation has been qualified, start with VT binding disabled:
+
+```sh
+SEATD_VTBOUND=0 seatd -g seat -l info
+```
+
+The daemon runs in the foreground. It logs at `info` by default. The `-n fd`
+option writes one newline and closes the supplied descriptor after the socket
+is ready. This supports supervisors that use the s6 readiness protocol.
+
+At startup, seatd removes a stale socket at the configured path. It refuses to
+remove a non-socket file. Use `-z` to refuse startup when any socket already
+occupies the path. `-z` is mutually exclusive with `-u` and `-g`.
+
+## Select VT behavior
+
+`SEATD_VTBOUND` enables VT binding only when its value is exactly `1`. An
+unset variable enables VT binding. Values such as `0`, `true`, or an empty
+string disable it.
+
+VT-bound operation remains experimental. N1, real VT switching and restoration
+in a disposable VM, is pending. N2, qualification against real DRM and input
+devices, and N3, compositor testing, are also pending. Unit shims and
+protocol parity do not establish hardware or compositor behavior. Do not
+qualify these paths on the host console, GPU, or input devices.
+
+## Device and protocol scope
+
+Seatd accepts Linux device paths with these canonical prefixes:
+
+- `/dev/dri/` for DRM devices.
+- `/dev/input/event` for evdev devices.
+- `/dev/hidraw` for hidraw devices.
+
+It resolves paths before classifying them and checks the opened descriptor's
+identity and character-device type. This is a single-seat implementation; it
+always creates `seat0`.
+
+The daemon retains the libseat seatd wire protocol. The four-byte header and
+integer fields use native byte order. Unix socket descriptor passing uses
+`SCM_RIGHTS` as before; the Rust port does not change the FD wire format.
+
+Per connection, the input and output byte buffers are each 256 bytes, and the
+received and queued descriptor buffers each hold up to 64 file descriptors.
+The daemon supports up to 128 devices for one client. Device path fields are
+limited to 256 bytes, including the terminating NUL byte.
+
+## Recover after failure
+
+For SIGINT or SIGTERM, seatd stops accepting clients, cleans up sessions,
+attempts device revocation, closes its descriptors, and exits. See
+[recovery instructions](recovery.md) for stale sockets, SIGKILL, and client
+restarts. A SIGKILL cannot run cleanup. A device descriptor already passed to
+a client may remain open after the daemon exits.
+
+## See also
+
+- [Command-line reference](../man/seatd.1.scd)
+- [Recovery after failure](recovery.md)
+- [Validation status](validation.md)
