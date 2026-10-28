@@ -9,6 +9,21 @@ pub const MAX_FDS: usize = CONNECTION_BUFFER_SIZE / mem::size_of::<RawFd>();
 
 const CMSG_BUF: usize = 2048;
 
+#[repr(C, align(8))]
+struct CmsgBuf([u8; CMSG_BUF]);
+
+impl CmsgBuf {
+    fn new() -> Self {
+        Self([0u8; CMSG_BUF])
+    }
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+    fn len(&self) -> usize {
+        CMSG_BUF
+    }
+}
+
 fn errno_now() -> i32 {
     io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL)
 }
@@ -123,10 +138,10 @@ impl Ring {
         }
     }
 
-    fn free_iovs(&self) -> ([libc::iovec; 2], usize) {
+    fn free_iovs(&mut self) -> ([libc::iovec; 2], usize) {
         let head = Self::mask(self.head);
         let tail = Self::mask(self.tail);
-        let base = self.data.as_ptr() as *mut libc::c_void;
+        let base = self.data.as_mut_ptr() as *mut libc::c_void;
         unsafe {
             if head < tail {
                 (
@@ -240,16 +255,17 @@ impl Conn {
             return Err(libc::EOVERFLOW);
         }
         let (mut iovs, count) = self.input.free_iovs();
-        let mut cmsg = [0u8; CMSG_BUF];
+        let mut cmsg = CmsgBuf::new();
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
         msg.msg_iov = iovs.as_mut_ptr();
         msg.msg_iovlen = count as _;
         msg.msg_control = cmsg.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = cmsg.len() as _;
         let fd = self.raw_fd();
-        let len = loop {
+        let (len, flags) = loop {
+            let mut msg_copy = msg;
             let n = unsafe {
-                libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC)
+                libc::recvmsg(fd, &mut msg_copy, libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC)
             };
             if n < 0 {
                 let e = errno_now();
@@ -258,8 +274,17 @@ impl Conn {
                 }
                 return Err(e);
             }
-            break n as usize;
+            msg = msg_copy;
+            break (n as usize, msg.msg_flags);
         };
+        if len == 0 {
+            return Ok(0);
+        }
+        if (flags & libc::MSG_CTRUNC) != 0 || (flags & libc::MSG_TRUNC) != 0 {
+            let _ = self.decode_cmsg(&msg);
+            self.close_fds();
+            return Err(libc::EOVERFLOW);
+        }
         self.decode_cmsg(&msg)?;
         self.input.head = self.input.head.wrapping_add(len as u32);
         Ok(self.input.size())
@@ -275,20 +300,29 @@ impl Conn {
                 {
                     let hdr = libc::CMSG_LEN(0);
                     let size = (*cmsg).cmsg_len.saturating_sub(hdr);
-                    let max = (CONNECTION_BUFFER_SIZE - self.fds_in.size()) as u32;
-                    if size > max || overflow {
+                    if size % (mem::size_of::<RawFd>() as u32) != 0 {
                         overflow = true;
                         let count = size / mem::size_of::<RawFd>() as u32;
                         let data = libc::CMSG_DATA(cmsg) as *const RawFd;
                         for i in 0..count {
                             libc::close(*data.add(i as usize));
                         }
-                    } else if self.fds_in.put(std::slice::from_raw_parts(
-                        libc::CMSG_DATA(cmsg),
-                        size as usize,
-                    )) != Ok(())
-                    {
-                        return Err(errno_now());
+                    } else {
+                        let max = (CONNECTION_BUFFER_SIZE - self.fds_in.size()) as u32;
+                        if size > max || overflow {
+                            overflow = true;
+                            let count = size / mem::size_of::<RawFd>() as u32;
+                            let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+                            for i in 0..count {
+                                libc::close(*data.add(i as usize));
+                            }
+                        } else if self.fds_in.put(std::slice::from_raw_parts(
+                            libc::CMSG_DATA(cmsg),
+                            size as usize,
+                        )) != Ok(())
+                        {
+                            return Err(errno_now());
+                        }
                     }
                 }
                 cmsg = libc::CMSG_NXTHDR(msg, cmsg);
@@ -307,7 +341,7 @@ impl Conn {
         let tail = self.output.tail;
         while self.output.size() > 0 {
             let (mut iovs, count) = self.output.used_iovs();
-            let mut cmsg = [0u8; CMSG_BUF];
+            let mut cmsg = CmsgBuf::new();
             let mut clen: u32 = 0;
             let mut size = self.fds_out.size();
             if size > MAX_FDS * mem::size_of::<RawFd>() {
@@ -346,6 +380,9 @@ impl Conn {
                         continue;
                     }
                     return Err(e);
+                }
+                if n == 0 {
+                    return Err(libc::EAGAIN);
                 }
                 break n as usize;
             };
@@ -490,5 +527,112 @@ mod tests {
         let (mut a, _b) = pair();
         let big = [0u8; CONNECTION_BUFFER_SIZE + 1];
         assert_eq!(a.put(&big), Err(libc::EOVERFLOW));
+    }
+
+    #[test]
+    fn ring_wraparound_preserves_order() {
+        let mut r = Ring::new();
+        let first = [1u8; 200];
+        r.put(&first).unwrap();
+        let mut out = [0u8; 200];
+        r.copy_out(&mut out);
+        assert_eq!(out, first);
+        r.consume(200);
+        assert_eq!(r.size(), 0);
+        let second = [2u8; 200];
+        r.put(&second).unwrap();
+        let mut out2 = [0u8; 200];
+        r.copy_out(&mut out2);
+        assert_eq!(out2, second);
+        r.consume(100);
+        let third = [3u8; 100];
+        r.put(&third).unwrap();
+        let mut combined = [0u8; 200];
+        r.copy_out(&mut combined);
+        assert_eq!(&combined[..100], &[2u8; 100]);
+        assert_eq!(&combined[100..], &[3u8; 100]);
+    }
+
+    #[test]
+    fn ring_counters_wrap_without_loss() {
+        let mut r = Ring::new();
+        r.head = u32::MAX - 10;
+        r.tail = u32::MAX - 10;
+        assert_eq!(r.size(), 0);
+        let data = [9u8; 10];
+        r.put(&data).unwrap();
+        assert_eq!(r.size(), 10);
+        assert_eq!(r.head, u32::MAX);
+        let more = [8u8; 5];
+        r.put(&more).unwrap();
+        assert_eq!(r.head, 4);
+        assert_eq!(r.size(), 15);
+        let mut out = [0u8; 15];
+        r.copy_out(&mut out);
+        assert_eq!(&out[..10], &[9u8; 10]);
+        assert_eq!(&out[10..], &[8u8; 5]);
+        r.consume(15);
+        assert_eq!(r.size(), 0);
+    }
+
+    #[test]
+    fn ring_restore_recovers_frame_header() {
+        let mut r = Ring::new();
+        r.put(&[1, 2, 3, 4]).unwrap();
+        let mut hdr = [0u8; 4];
+        r.copy_out(&mut hdr);
+        r.consume(4);
+        assert_eq!(r.size(), 0);
+        r.restore(4);
+        assert_eq!(r.size(), 4);
+        let mut hdr2 = [0u8; 4];
+        r.copy_out(&mut hdr2);
+        assert_eq!(hdr, hdr2);
+    }
+
+    #[test]
+    fn fd_round_trip_exactly_once() {
+        let (mut a, mut b) = pair();
+        let f = std::fs::File::open("/dev/null").unwrap();
+        let raw = {
+            use std::os::unix::io::AsRawFd;
+            f.as_raw_fd()
+        };
+        let dup = unsafe { libc::dup(raw) };
+        assert!(dup >= 0);
+        a.put_fd(unsafe { OwnedFd::from_raw_fd(dup) }).unwrap();
+        a.put(&[1u8]).unwrap();
+        a.flush().unwrap();
+        b.read().unwrap();
+        assert_eq!(b.queued_fds(), 1);
+        let received = b.get_fd().unwrap();
+        assert!(received.as_raw_fd() >= 0);
+        assert_eq!(b.queued_fds(), 0);
+        assert!(b.get_fd().is_err());
+    }
+
+    #[test]
+    fn eof_with_partial_frame_signals_dead() {
+        let (mut a, mut b) = pair();
+        a.put(&[1u8, 2u8]).unwrap();
+        a.flush().unwrap();
+        assert!(b.read().unwrap() >= 2);
+        drop(a);
+        assert_eq!(b.read(), Ok(0));
+    }
+
+    #[test]
+    fn unexpected_fds_closed_on_drop() {
+        let (mut a, mut b) = pair();
+        for _ in 0..3 {
+            let dup = unsafe { libc::dup(1) };
+            assert!(dup >= 0);
+            a.put_fd(unsafe { OwnedFd::from_raw_fd(dup) }).unwrap();
+        }
+        a.put(&[0u8]).unwrap();
+        a.flush().unwrap();
+        b.read().unwrap();
+        assert_eq!(b.queued_fds(), 3);
+        drop(b);
     }
 }
