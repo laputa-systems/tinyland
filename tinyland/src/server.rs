@@ -1,11 +1,14 @@
 use crate::input::{self, Keyboard, SeatData};
 use crate::output::DrmOutput;
+use crate::seat::Session;
 use crate::selection::SelectionState;
 use crate::shell::{ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
 use crate::surface::{SurfaceData, SurfaceUpdate};
 use std::collections::HashMap;
+use std::fs::File;
 use std::os::unix::io::AsFd;
+use evdev::Device;
 use std::sync::Arc;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
 use wayland_server::backend::{ClientData, ClientId, ObjectId};
@@ -695,15 +698,26 @@ fn now_ms() -> u32 {
     (ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000) as u32
 }
 
-pub fn run(
-    mode: &str,
-    device: &std::path::Path,
-    width: u32,
-    height: u32,
-    socket_name: &std::ffi::OsString,
-    command: &[std::ffi::OsString],
-    shutdown: &crate::shutdown::Shutdown,
-) -> i32 {
+pub struct ServerConfig<'a> {
+    pub mode: &'a str,
+    pub device: &'a std::path::Path,
+    pub width: u32,
+    pub height: u32,
+    pub socket_name: &'a std::ffi::OsString,
+    pub command: &'a [std::ffi::OsString],
+    pub shutdown: &'a crate::shutdown::Shutdown,
+    pub seat_mode: bool,
+}
+
+pub fn run(config: &ServerConfig<'_>) -> i32 {
+    let mode = config.mode;
+    let device = config.device;
+    let width = config.width;
+    let height = config.height;
+    let socket_name = config.socket_name;
+    let command = config.command;
+    let shutdown = config.shutdown;
+    let seat_mode = config.seat_mode;
     let runtime_dir = match validate_runtime_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -712,19 +726,55 @@ pub fn run(
         }
     };
 
-    let mut output = match DrmOutput::open(device, width, height) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("display init failed: {e}");
+    let mut broker = if seat_mode {
+        match Session::open() {
+            Ok(session) => Some(session),
+            Err(error) => {
+                eprintln!("seat open failed: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut output: Option<DrmOutput> = None;
+    let mut drm_id: Option<i32> = None;
+    let mut inputs: Vec<(Option<i32>, Device)> = Vec::new();
+    if let Some(broker) = broker.as_ref() {
+        if let Err(error) = open_brokered_devices(
+            broker, device, width, height,
+            &mut output, &mut drm_id, &mut inputs,
+        ) {
+            eprintln!("brokered display init failed: {error}");
             return 1;
         }
+    } else {
+        match DrmOutput::open(device, width, height) {
+            Ok(o) => output = Some(o),
+            Err(e) => {
+                eprintln!("display init failed: {e}");
+                return 1;
+            }
+        }
+        match input::discover_keyboards() {
+            Ok(found) => inputs = found.into_iter().map(|dev| (None, dev)).collect(),
+            Err(error) => {
+                eprintln!("keyboard discovery: {error}");
+                return 1;
+            }
+        }
+    }
+    let Some(out) = output.as_mut() else {
+        eprintln!("display init failed: no output");
+        return 1;
     };
-    let (w, h) = output.size();
-    if output.fill_solid(0, 0, 0).is_err() {
+    let (w, h) = out.size();
+    if out.fill_solid(0, 0, 0).is_err() {
         eprintln!("initial clear failed");
         return 1;
     }
-    eprintln!("TINYLAND_DRM_OK size={w}x{h} path={}", output.mode_path());
+    eprintln!("TINYLAND_DRM_OK size={w}x{h} path={}", out.mode_path());
 
     let mut display = match Display::<State>::new() {
         Ok(d) => d,
@@ -760,24 +810,21 @@ pub fn run(
         Ok(keyboard) => keyboard,
         Err(error) => { eprintln!("keyboard init: {error}"); return 1; }
     };
-    let mut devices = match input::discover_keyboards() {
-        Ok(devices) => devices,
-        Err(error) => { eprintln!("keyboard discovery: {error}"); return 1; }
-    };
     let mut state = State::new(dh.clone(), (w, h), keyboard);
 
     let mut app = match spawn_app(mode, runtime_dir.as_str(), sock_name.as_str(), command) {
         Ok(app) => app,
         Err(error) => { eprintln!("foot spawn failed: {error}"); return 1; }
     };
-    eprintln!("TINYLAND_COMPOSITOR_READY socket={sock_name} size={w}x{h} path={}", output.mode_path());
+    let ready_path = output.as_ref().map(|o| o.mode_path().to_string()).unwrap_or_else(|| "none".into());
+    eprintln!("TINYLAND_COMPOSITOR_READY socket={sock_name} size={w}x{h} path={ready_path}");
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
         if shutdown.signal().is_some() { return 0; }
-        let poll_timeout = match output.flip_deadline() {
+        let poll_timeout = match output.as_ref().and_then(|o| o.flip_deadline()) {
             Some(deadline) => {
                 let now = std::time::Instant::now();
                 if now >= deadline {
@@ -793,40 +840,72 @@ pub fn run(
             }
             None => base_timeout,
         };
-        let mut fds = vec![
-            rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
-            rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
-            rustix::event::PollFd::new(&output, rustix::event::PollFlags::IN),
-        ];
-        for device in &devices {
-            fds.push(rustix::event::PollFd::new(device, rustix::event::PollFlags::IN));
-        }
-        match rustix::event::poll(&mut fds, Some(&poll_timeout)) {
-            Ok(_) => {}
-            Err(e) => {
-                if e == rustix::io::Errno::INTR {
-                    continue;
-                }
-                eprintln!("poll failed: {e}");
-                return 1;
+        {
+            let seat_fd = broker.as_ref().map(|b| b.poll_fd());
+            let mut fds = vec![
+                rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
+                rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
+            ];
+            if let Some(out) = output.as_ref() {
+                fds.push(rustix::event::PollFd::new(out, rustix::event::PollFlags::IN));
             }
-        }
-        drop(fds);
-        if output.has_pending_flip() {
-            match output.poll_flip() {
-                Ok(Some(time)) => {
-                    state.pending_present = false;
-                    state.presented(time);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if shutdown.signal().is_some() { return 0; }
-                    eprintln!("present failed: {error}");
+            if let Some(fd) = &seat_fd {
+                fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
+            }
+            for (_, device) in &inputs {
+                fds.push(rustix::event::PollFd::new(device, rustix::event::PollFlags::IN));
+            }
+            match rustix::event::poll(&mut fds, Some(&poll_timeout)) {
+                Ok(_) => {}
+                Err(e) => {
+                    if e == rustix::io::Errno::INTR {
+                        continue;
+                    }
+                    eprintln!("poll failed: {e}");
                     return 1;
                 }
             }
         }
-        for device in &mut devices {
+        if let Some(broker) = broker.as_mut() {
+            if let Err(error) = broker.dispatch() {
+                eprintln!("seat dispatch failed: {error}");
+                return 1;
+            }
+            if broker.take_disabled() {
+                if let Err(error) = disable_seat_devices(broker, &mut output, &mut drm_id, &mut inputs) {
+                    eprintln!("seat disable failed: {error}");
+                    return 1;
+                }
+            } else if broker.take_enabled() {
+                match open_brokered_devices(broker, device, width, height, &mut output, &mut drm_id, &mut inputs) {
+                    Ok(()) => {
+                        state.keyboard.reset_stuck();
+                        state.pending_present = true;
+                    }
+                    Err(error) => {
+                        eprintln!("seat resume failed: {error}");
+                        return 1;
+                    }
+                }
+            }
+        }
+        if let Some(out) = output.as_mut() {
+            if out.has_pending_flip() {
+                match out.poll_flip() {
+                    Ok(Some(time)) => {
+                        state.pending_present = false;
+                        state.presented(time);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if shutdown.signal().is_some() { return 0; }
+                        eprintln!("present failed: {error}");
+                        return 1;
+                    }
+                }
+            }
+        }
+        for (_, device) in &mut inputs {
             match input::read_keys(device) {
                 Ok(keys) => for (code, down) in keys { state.key(code, down); },
                 Err(error) => { eprintln!("{error}"); return 1; }
@@ -855,12 +934,14 @@ pub fn run(
             eprintln!("dispatch failed: {e}");
             return 1;
         }
-        if state.pending_present && !output.has_pending_flip() {
-            let pixels = state.compose();
-            if let Err(error) = output.queue_present(&pixels, w, h) {
-                if shutdown.signal().is_some() { return 0; }
-                eprintln!("present failed: {error}");
-                return 1;
+        if state.pending_present && !output.as_ref().is_some_and(|o| o.has_pending_flip()) {
+            if let Some(out) = output.as_mut() {
+                let pixels = state.compose();
+                if let Err(error) = out.queue_present(&pixels, w, h) {
+                    if shutdown.signal().is_some() { return 0; }
+                    eprintln!("present failed: {error}");
+                    return 1;
+                }
             }
         }
         if let Err(e) = display.flush_clients() {
@@ -868,6 +949,60 @@ pub fn run(
             return 1;
         }
     }
+}
+
+fn open_brokered_devices(
+    broker: &Session,
+    device: &std::path::Path,
+    width: u32,
+    height: u32,
+    output: &mut Option<DrmOutput>,
+    drm_id: &mut Option<i32>,
+    inputs: &mut Vec<(Option<i32>, Device)>,
+) -> Result<(), String> {
+    let (fd, id) = broker.open_device(device)?;
+    let origin = format!("seat:{}", device.display());
+    *output = Some(DrmOutput::open_from_file(File::from(fd), width, height, Some(origin))?);
+    *drm_id = Some(id);
+    for path in input::discover_keyboard_paths()? {
+        let origin = format!("seat:{}", path.display());
+        let (fd, id) = broker.open_device(&path)?;
+        match input::device_from_fd(fd, &origin) {
+            Ok(dev) => inputs.push((Some(id), dev)),
+            Err(error) if error.contains("is not a keyboard") => {
+                broker.close_device(id, &origin)?;
+            }
+            Err(error) => {
+                let _ = broker.close_device(id, &origin);
+                return Err(error);
+            }
+        }
+    }
+    if inputs.is_empty() {
+        return Err("no keyboard with alphabetic and enter keys".into());
+    }
+    Ok(())
+}
+
+fn disable_seat_devices(
+    broker: &Session,
+    output: &mut Option<DrmOutput>,
+    drm_id: &mut Option<i32>,
+    inputs: &mut Vec<(Option<i32>, Device)>,
+) -> Result<(), String> {
+    *output = None;
+    for (id, dev) in inputs.drain(..) {
+        drop(dev);
+        if let Some(id) = id {
+            broker.close_device(id, "input")?;
+        }
+    }
+    if let Some(id) = drm_id.take() {
+        broker.close_device(id, "drm")?;
+    }
+    broker.acknowledge_disable()?;
+    eprintln!("TINYLAND_SEAT_DISABLED");
+    Ok(())
 }
 
 fn validate_runtime_dir() -> Result<String, String> {

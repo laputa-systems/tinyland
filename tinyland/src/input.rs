@@ -99,6 +99,19 @@ fn validate_keyboard(device: &Device, path: &std::path::Path) -> Result<(), Stri
     Ok(())
 }
 
+pub fn discover_keyboard_paths() -> Result<Vec<std::path::PathBuf>, String> {
+    let mut entries = std::fs::read_dir("/dev/input")
+        .map_err(|e| format!("read /dev/input: {e}"))?
+        .collect::<Result<Vec<_>, _>>().map_err(|e| format!("read input entry: {e}"))?;
+    entries.sort_by_key(|e| e.path());
+    let mut paths = Vec::new();
+    for entry in entries {
+        if !entry.file_name().as_encoded_bytes().starts_with(b"event") { continue; }
+        paths.push(entry.path());
+    }
+    Ok(paths)
+}
+
 pub fn discover_keyboards() -> Result<Vec<Device>, String> {
     let mut entries = std::fs::read_dir("/dev/input")
         .map_err(|e| format!("read /dev/input: {e}"))?

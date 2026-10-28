@@ -1,4 +1,5 @@
 mod input;
+mod seat;
 mod selection;
 mod shutdown;
 mod output;
@@ -10,7 +11,7 @@ mod surface;
 use std::ffi::OsString;
 use std::path::PathBuf;
 fn usage() -> &'static str {
-    "usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]"
+    "usage: tinyland [--seat] [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]"
 }
 
 fn argument_error(message: &str) -> ! {
@@ -31,6 +32,7 @@ fn main() {
     let mut height: u32 = 768;
     let mut socket_name = OsString::from("wayland-0");
     let mut command: Vec<OsString> = Vec::new();
+    let mut seat_mode = false;
     while let Some(a) = args.next() {
         if a == "--" {
             for rest in args.by_ref() {
@@ -43,6 +45,7 @@ fn main() {
             "--drm-proof" => mode = "drm-proof",
             "--wayland-pixels" => mode = "wayland-pixels",
             "--smoke" => mode = "smoke",
+            "--seat" => seat_mode = true,
             "--drm-device" => {
                 drm_device = PathBuf::from(args.next().unwrap_or_else(|| argument_error("missing --drm-device value")));
             }
@@ -75,7 +78,16 @@ fn main() {
 
     let code = match mode {
         "drm-proof" => output::drm_proof(&drm_device, width, height, &shutdown),
-        "wayland-pixels" | "smoke" => server::run(mode, &drm_device, width, height, &socket_name, &command, &shutdown),
+        "wayland-pixels" | "smoke" => server::run(&server::ServerConfig {
+            mode,
+            device: &drm_device,
+            width,
+            height,
+            socket_name: &socket_name,
+            command: &command,
+            shutdown: &shutdown,
+            seat_mode,
+        }),
         _ => {
             eprintln!("unknown mode");
             1
