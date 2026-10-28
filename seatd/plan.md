@@ -4,12 +4,13 @@
 
 - Goal: Rust seatd on Linux, libseat-compatible; supervised foreground daemon.
 - Base: fork HEAD `bc0e96f` (2026-10-25). C baseline green (3/3).
-- Accepted: R0–R6. R7 functional checks pass: 69 tests, raw oracle golden, unmodified C libseat differential, Clippy with warnings denied.
-- Fixed: the apparent OPEN_SEAT timeout waited for ENABLE_SEAT on an inactive client. Storms then reproduced stale client indices after disconnect; compaction now remaps seat references. Test children are reaped on panic.
-- Pending: idle CPU/wakeup gate, deferred because `perf-gate-ready` reports a busy host. No release or performance-parity claim.
-- Next: R8 delivery, oracle isolation, both musl builds, docs, and completion review. Finish idle gate when the host is ready.
+- Accepted: R0–R6. R7 functional checks and R8 local delivery pass: 79 tests, strict all-target Clippy, raw oracle goldens, and unmodified C libseat differential against both musl release binaries (aarch64 via QEMU user mode).
+- Fixed: the OPEN_SEAT timeout was an inactive-client enable expectation. Regressions also cover disconnect index remapping, replacement sockets, malformed-frame panic, current-VT refresh, newest-waiter handoff, backpressure state, signal output scheduling, revocation diagnostics, and failed VT setup rollback.
+- Delivered: Rust-only production daemon; retained client inputs under `oracle/`; historical C daemon rebuilt offline from Git; operating/recovery/difference docs; full-SHA-pinned checkout and pinned CI tools. CI replaces obsolete C-platform pipelines. Owner authorized CI work on 2026-10-28.
+- Pending: idle CPU/wakeup gate, deferred because `perf-gate-ready` reports a busy host. No release or performance-parity claim. Hosted CI has not run because changes remain local; pushing is forbidden.
+- Next: run the ignored idle case with valid before/after host-readiness checks. Observe hosted CI after a separately authorized publication.
 - Parked: N1 real-VT, N2 real-device qualification, N3 compositor smoke. The unidentified R4 single-test failure remains unclassified.
-- Resume: `cargo test --offline --locked`; build the oracle first with `harness/libseat_diff.sh` if absent.
+- Resume: build the oracle first with `sh harness/build_oracle.sh` if absent, then `cargo test --offline --locked`. Details and per-architecture evidence are in `doc/validation.md`.
 
 ## Charter
 
@@ -68,7 +69,7 @@ Serial R0→R8 on `master`. Attempt limit 3, then park with cause + retry condit
 | R5 VT+signals: ioctls (common/terminal.c:154-278), SIGUSR1/2/INT/TERM (seatd/server.c:25-54), restore on exit; VT-bound via adapter, VTBOUND=0 live | src/vt.rs | R3 | `cargo test --offline vt` + signal/shutdown test; real VT stays N1 |
 | R6 crash/shutdown: bounded cleanup, unlink without harming replacement, SIGKILL-with-retained-FDs behavior + reconnect procedure | src/shutdown.rs, doc/recovery.md | R3 R5 | kill/restart + FD-leak tests (`0` growth/1000 reconnects) |
 | R7 differential+hardening: full corpus both daemons (unmodified C libseat, seatd-only, O3), goldens in harness/, doc/diffs.md register, reconnect/malformed/slow-reader/switch storms, FD/memory + idle CPU/wakeup logs (O4) | harness/differential.rs, harness/storm.rs, doc/diffs.md | R1–R6 | differential green + `cargo clippy` clean + storm/leak gates |
-| R8 delivery+close: x86_64/aarch64-musl builds (both targets installed), locked deps, minimal CI with full-SHA pins, license attribution, docs (CLI/env/protocol, classes+trust, limits+recovery, per-arch log, gaps, foreground+readiness contract), C daemon deleted per P7, ultrareview P1/P2 fixed, final report | .github/workflows/ci.yml, doc/**, man/**, C deletions | R7 | `cargo build --offline --target x86_64-unknown-linux-musl` + `--target aarch64-unknown-linux-musl` + full `cargo test --offline` + oracle rebuild + clippy |
+| R8 delivery+close: x86_64/aarch64-musl builds (both targets installed), locked deps, minimal CI with full-SHA pins, license attribution, docs (CLI/env/protocol, classes+trust, limits+recovery, per-arch log, gaps, foreground+readiness contract), C daemon deleted per P7, independent completion-review P1/P2 findings fixed, final report | .github/workflows/ci.yml, doc/**, man/**, C deletions | R7 | `cargo build --offline --target x86_64-unknown-linux-musl` + `--target aarch64-unknown-linux-musl` + full `cargo test --offline` + oracle rebuild + clippy |
 
 ## Acceptance
 
@@ -76,12 +77,12 @@ Serial R0→R8 on `master`. Attempt limit 3, then park with cause + retry condit
 - Protocol: byte-exact vs oracle on the corpus; adversarial cases fail observably, never advance unsafe state, never leak FDs.
 - Admission/session/devices/VT/shutdown: per-slice proofs above; `0` FD growth over 1000-reconnect storms; revocation client-observable.
 - Perf: numbers logged per slice from R7; egregious gate O4; no VTBOUND=0 result presented as VT proof (O1).
-- Delivery: musl builds both arches locally; CI minimal with full-SHA pins; docs complete; C daemon deleted with liveness evidence; ultrareview P1/P2 clean.
+- Delivery: musl builds both arches locally; CI minimal with full-SHA pins; docs complete; C daemon deleted with liveness evidence; independent completion-review P1/P2 findings resolved.
 - Never: production-ready claims without N1+N2 run; host-console/GPU/input testing; pushes.
 
 ## Needs environment
 
-- N1 real-VT proof: VT-capable QEMU guest, VT-bound switch + release/acquire + restore; owner runs `harness/vt-proof.sh` there. Until then VT-bound is experimental (O1).
+- N1 real-VT proof: VT-capable QEMU guest, VT-bound switch + release/acquire + restore; qualify through the guest console. Until then VT-bound is experimental (O1).
 - N2 virtual-device qualification: disposable VM with virtio DRM/input, open/revoke/reopen observable via a `simpletest`-equivalent; fake-ioctl success never counts.
 - N3 compositor smoke: existing dwl/foot binaries in the VM against Rust seatd; no Laputa/XSH modification.
 

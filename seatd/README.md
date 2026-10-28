@@ -35,9 +35,9 @@ before deployment.
 ## Reference client
 
 The C libseat client and protocol inputs retained under `oracle/` are a
-test-only compatibility oracle. The helper rebuilds the original C daemon from Git history and builds the
-retained client scenario for differential checks. They are not part of the Rust daemon or its
-runtime dependencies. See [validation](doc/validation.md) for the oracle
+test-only compatibility oracle. The helper rebuilds the original C daemon
+from Git history and builds the retained client scenario for differential
+checks. They are not runtime dependencies of the Rust daemon. See [validation](doc/validation.md) for the oracle
 commands and the scope of the comparisons.
 
 ## License

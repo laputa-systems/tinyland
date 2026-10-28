@@ -48,7 +48,7 @@ run_case() {
 }
 
 run_case oracle .work/tmp/oracle/seatd "$ORACLE_SOCK" "$ORACLE_SOCK"
-run_case rust ./target/debug/seatd "$RUST_SOCK" "$RUST_SOCK"
+run_case rust "${1:-./target/debug/seatd}" "$RUST_SOCK" "$RUST_SOCK"
 
 if diff -u .work/tmp/libseat-diff-oracle.txt .work/tmp/libseat-diff-rust.txt; then
 	echo "LIBSEAT-DIFF-OK"

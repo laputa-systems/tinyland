@@ -5,7 +5,9 @@ dependencies. These commands do not qualify real devices or VT behavior.
 
 ## Run the normal checks
 
-Run the test suite and strict Clippy check:
+Build the oracle before the first test run with `sh harness/build_oracle.sh`.
+The helper requires the original `bc0e96f` revision in local Git history.
+It does not fetch missing history. Then run the tests and strict Clippy:
 
 ```sh
 cargo test --offline --locked
@@ -16,8 +18,10 @@ Build both supported musl targets when their Rust targets and the Linux
 musl linker are installed:
 
 ```sh
-cargo build --offline --locked --target x86_64-unknown-linux-musl
-cargo build --offline --locked --target aarch64-unknown-linux-musl
+export RUSTC_WRAPPER=kache
+export RUSTFLAGS='-Clinker=mold -Clinker-flavor=ld'
+cargo build --offline --locked --release --target x86_64-unknown-linux-musl
+cargo build --offline --locked --release --target aarch64-unknown-linux-musl
 ```
 
 Rust compilation uses the `kache` rustc wrapper. Linux musl links use `mold`.
@@ -28,8 +32,8 @@ cannot find a target or linker does not establish a successful target build.
 
 The retained C sources under `oracle/` come from upstream revision `bc0e96f`.
 They provide an unmodified C libseat seatd client for compatibility checks.
-The reference daemon is rebuilt from the original revision in Git history. They are test inputs, not a runtime dependency of the
-Rust daemon.
+The reference daemon is rebuilt from the original revision in Git history.
+These sources are test inputs, not runtime dependencies of the Rust daemon.
 
 Build the oracle and run the client differential:
 
@@ -86,3 +90,34 @@ The recorded R4 history includes one unidentified test failure during
 contaminated reruns. It remains unclassified. The multi-client disconnect
 crash reproduced during R7 was fixed; that fix does not resolve the unknown
 R4 report.
+
+## Local delivery results
+
+On 2026-10-28, the pinned toolchain and locked dependencies passed 79 tests.
+One idle timing test remained ignored because the host was busy. Strict
+Clippy passed with warnings denied. Both retained C unit tests passed after
+a fresh oracle rebuild.
+
+Both musl release binaries built with `mold` and reported version `0.9.3`.
+The same unmodified C libseat client scenario matched the reference daemon
+against each binary. The aarch64 binary ran through `qemu-aarch64` user-mode
+emulation. This does not qualify ARM hardware, devices, or real VT behavior.
+
+| Target | Unstripped binary size | Client differential |
+|---|---:|---|
+| x86_64-unknown-linux-musl | 685080 bytes | Pass, native Linux |
+| aarch64-unknown-linux-musl | 665416 bytes | Pass, QEMU user mode |
+
+Pass a daemon executable as the first argument to `harness/libseat_diff.sh`
+to check a release build. Without an argument, it checks `target/debug/seatd`.
+
+The [CI workflow](../.github/workflows/ci.yml) runs the functional checks and
+both target builds on a disposable Ubuntu runner. Checkout uses a full commit
+pin. The compiler wrapper, uv, and Meson versions are pinned. The wrapper
+archive is checked against its pinned digest. Dependency fetches use
+`Cargo.lock`, and compilation runs offline afterward. CI leaves the idle
+measurement deferred until a separate host-ready run.
+
+Workflow YAML, embedded shell syntax, and the explicit musl target
+configuration were checked locally. Hosted CI has not run: these changes
+have not been pushed.
