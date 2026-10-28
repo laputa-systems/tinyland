@@ -934,6 +934,75 @@ mod tests {
         assert_eq!(r.unwrap_err(), libc::EMFILE);
     }
 
+    struct FailRevoke {
+        null: NullEffect,
+        failures: usize,
+    }
+
+    impl Effect for FailRevoke {
+        fn open_device(&mut self, path: &str, t: DeviceType) -> Result<rustix::fd::OwnedFd, i32> {
+            self.null.open_device(path, t)
+        }
+        fn activate_device(&mut self, fd: std::os::unix::io::RawFd, t: DeviceType) -> Result<(), i32> {
+            self.null.activate_device(fd, t)
+        }
+        fn deactivate_device(&mut self, _fd: std::os::unix::io::RawFd, _t: DeviceType) -> Result<(), i32> {
+            self.failures += 1;
+            Err(libc::ENODEV)
+        }
+        fn vt_open(&mut self, s: i32) -> Result<(), i32> {
+            self.null.vt_open(s)
+        }
+        fn vt_close(&mut self, s: i32) -> Result<(), i32> {
+            self.null.vt_close(s)
+        }
+        fn vt_switch(&mut self, c: i32, t: i32) -> Result<(), i32> {
+            self.null.vt_switch(c, t)
+        }
+        fn vt_ack(&mut self, c: i32, r: bool) -> Result<(), i32> {
+            self.null.vt_ack(c, r)
+        }
+        fn current_vt(&mut self) -> Result<i32, i32> {
+            self.null.current_vt()
+        }
+    }
+
+    #[test]
+    fn session_revoke_failure_across_full_switch() {
+        let (mut seat, mut slots, null) = setup(false, 0);
+        let mut fx = FailRevoke { null, failures: 0 };
+        let (a, mut pa) = add_client(&mut slots);
+        let (b, mut pb) = add_client(&mut slots);
+        assert!(matches!(open_drain(&mut seat, &mut slots, a, &mut pa, &mut fx, true), Outcome::Done));
+        assert!(matches!(open_drain(&mut seat, &mut slots, b, &mut pb, &mut fx, false), Outcome::Done));
+        device::open_device_resolved(seat.active_client, &mut slots, a, "/dev/input/event0", DeviceType::Evdev, &mut fx).unwrap();
+        assert!(slots[a].client.devices[0].active);
+        assert!(matches!(
+            send(&mut seat, &mut slots, a, &mut pa, CLIENT_SWITCH_SESSION, &2i32.to_ne_bytes(), &mut fx),
+            Outcome::Done
+        ));
+        let (op, _) = read_msg(&mut pa);
+        assert_eq!(op, SERVER_DISABLE_SEAT);
+        let (op, _) = read_msg(&mut pa);
+        assert_eq!(op, SERVER_SESSION_SWITCHED);
+        assert_eq!(fx.failures, 1, "revoke must be attempted exactly once");
+        assert!(
+            slots[a].client.devices[0].active,
+            "failed revoke must not clear the active flag"
+        );
+        assert_eq!(slots[a].client.state, ClientState::PendingDisable);
+        assert!(matches!(
+            send(&mut seat, &mut slots, a, &mut pa, CLIENT_DISABLE_SEAT, &[], &mut fx),
+            Outcome::Done
+        ));
+        let (op, _) = read_msg(&mut pa);
+        assert_eq!(op, SERVER_SEAT_DISABLED);
+        let (op, _) = read_msg(&mut pb);
+        assert_eq!(op, SERVER_ENABLE_SEAT);
+        assert_eq!(slots[b].client.state, ClientState::Active);
+        assert_eq!(seat.active_client, Some(b));
+    }
+
     #[test]
     fn session_full_switch_flow() {
         let (mut seat, mut slots, mut fx) = setup(false, 0);

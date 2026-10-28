@@ -70,6 +70,18 @@ received and queued descriptor buffers each hold up to 64 file descriptors.
 The daemon supports up to 128 devices for one client. Device path fields are
 limited to 256 bytes, including the terminating NUL byte.
 
+## Revocation failure semantics
+
+Device revocation uses the same rule as the C reference: a failed
+revoke is logged and the session transition continues, so a disable
+notification does not prove the old client's descriptors stopped
+working. The daemon never clears the device's active flag on a failed
+revoke, and the failure is observable to the operator through the
+error log. Treat any session handoff that follows a revocation error
+as suspect: restart the affected clients and have them close every
+reference and reopen their devices, per [recovery](recovery.md).
+`session_revoke_failure_across_full_switch` pins this contract.
+
 ## Recover after failure
 
 For SIGINT or SIGTERM, seatd stops accepting clients, cleans up sessions,
