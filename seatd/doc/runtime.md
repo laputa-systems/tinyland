@@ -22,7 +22,7 @@ the trust boundary.
 
 ## Start under supervision
 
-Until real VT operation has been qualified, start with VT binding disabled:
+To run without VT binding:
 
 ```sh
 SEATD_VTBOUND=0 seatd -g seat -l info
@@ -42,11 +42,12 @@ occupies the path. `-z` is mutually exclusive with `-u` and `-g`.
 unset variable enables VT binding. Values such as `0`, `true`, or an empty
 string disable it.
 
-VT-bound operation remains experimental. N1, real VT switching and restoration
-in a disposable VM, is pending. N2, qualification against real DRM and input
-devices, and N3, compositor testing, are also pending. Unit shims and
-protocol parity do not establish hardware or compositor behavior. Do not
-qualify these paths on the host console, GPU, or input devices.
+VT-bound operation passed switching, release/acquire, close restoration, and
+SIGTERM restoration in an x86_64 KVM guest running Alpine Linux 6.6.142-0-virt.
+Virtio DRM master handoff, evdev revocation/reopen, and dwl/foot rendering and
+keyboard input passed in that guest. See [the reproduction recipe](../harness/VM.md).
+These results do not qualify other kernels, physical devices, hidraw revocation,
+or ARM hardware. Never run the proof on host console, GPU, or input devices.
 
 ## Device and protocol scope
 

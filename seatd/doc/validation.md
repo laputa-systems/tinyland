@@ -73,18 +73,23 @@ parity until the valid measurement is available.
 
 ## Qualification limits
 
-The following environment proofs remain pending:
+N1–N3 passed on 2026-10-28 in an x86_64 KVM guest running Alpine
+Linux 6.6.142-0-virt, using virtual GPU and keyboard devices only:
 
-- N1: real VT switching, release and acquire, and console restoration in a
-  disposable VM.
-- N2: device open, revocation, and reopen against real DRM and input devices
-  in a disposable VM.
-- N3: compositor startup and operation against the Rust daemon in that VM.
+- N1: VT1→VT2→VT1 release/acquire, console restoration after seat close,
+  and SIGTERM restoration while a seat client remained connected.
+- N2: evdev returned `ENODEV` after revoke and worked after close/reopen.
+  A competing DRM descriptor gained master while the seat was disabled and
+  was refused master again after the original seat reacquired it.
+- N3: dwl 0.9 with wlroots 0.20 and foot rendered a magenta terminal marker.
+  QMP keyboard injection reached foot through libinput and Rust seatd.
 
-Do not run qualification against host DRM, input, or VT devices. Unit tests,
-test doubles, and C differential checks do not substitute for N1–N3. Until
-those proofs pass, do not describe the daemon as production ready or claim
-actual performance parity.
+The integrated harness reproduced all three modes. The compositor screenshot
+was also visually inspected. Commands and cached-guest preparation are in
+[the VM recipe](../harness/VM.md). No host DRM, input, or VT device was used.
+This proof covers that guest configuration. Physical devices, hidraw revoke,
+and ARM hardware remain outside these results. Unit tests and raw protocol
+parity alone do not establish kernel device behavior.
 
 The recorded R4 history includes one unidentified test failure during
 contaminated reruns. It remains unclassified. The multi-client disconnect

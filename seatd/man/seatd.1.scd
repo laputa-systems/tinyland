@@ -56,7 +56,8 @@ authenticate users or provide login, power, or supervision management. See
 *SEATD_VTBOUND*
 	Enable VT binding only when the value is exactly *1*. The default is enabled
 	when the variable is unset. Every other value disables VT binding. VT-bound
-	operation is experimental pending real-VT qualification.
+	operation has been qualified in a disposable x86_64 virtio guest. See
+	*harness/VM.md* for the tested scope.
 
 # FILES
 

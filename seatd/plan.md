@@ -9,7 +9,7 @@
 - Delivered: Rust-only production daemon; retained client inputs under `oracle/`; historical C daemon rebuilt offline from Git; operating/recovery/difference docs; full-SHA-pinned checkout and pinned CI tools. CI replaces obsolete C-platform pipelines. Owner authorized CI work on 2026-10-28.
 - Pending: idle CPU/wakeup gate, deferred because `perf-gate-ready` reports a busy host. No release or performance-parity claim. Hosted CI has not run because changes remain local; pushing is forbidden.
 - Next: run the ignored idle case with valid before/after host-readiness checks. Observe hosted CI after a separately authorized publication.
-- Parked: N1 real-VT, N2 real-device qualification, N3 compositor smoke. The unidentified R4 single-test failure remains unclassified.
+- Qualified: N1 real-VT transitions and close/SIGTERM restoration, N2 virtio DRM/evdev revoke/reopen and master handoff, N3 dwl/foot rendering and keyboard input in an x86_64 KVM guest (Linux 6.6.142-0-virt). Reproduction: `harness/VM.md`. The unidentified R4 single-test failure remains unclassified.
 - Resume: build the oracle first with `sh harness/build_oracle.sh` if absent, then `cargo test --offline --locked`. Details and per-architecture evidence are in `doc/validation.md`.
 
 ## Charter
@@ -80,9 +80,9 @@ Serial R0→R8 on `master`. Attempt limit 3, then park with cause + retry condit
 - Delivery: musl builds both arches locally; CI minimal with full-SHA pins; docs complete; C daemon deleted with liveness evidence; independent completion-review P1/P2 findings resolved.
 - Never: production-ready claims without N1+N2 run; host-console/GPU/input testing; pushes.
 
-## Needs environment
+## Guest qualification
 
-- N1 real-VT proof: VT-capable QEMU guest, VT-bound switch + release/acquire + restore; qualify through the guest console. Until then VT-bound is experimental (O1).
+- N1 real-VT proof: VT-capable QEMU guest, VT-bound switch + release/acquire + restore; qualify through the guest console. Passed on 2026-10-28 in the documented guest.
 - N2 virtual-device qualification: disposable VM with virtio DRM/input, open/revoke/reopen observable via a `simpletest`-equivalent; fake-ioctl success never counts.
 - N3 compositor smoke: existing dwl/foot binaries in the VM against Rust seatd; no Laputa/XSH modification.
 
@@ -91,7 +91,7 @@ Serial R0→R8 on `master`. Attempt limit 3, then park with cause + retry condit
 - Authorized: edit/create files in this repo; `cargo`/`rustc`/`uvx meson`/`ninja`/`qemu` runs; `.work/wt/<lane>` worktrees; offline cached deps only.
 - Forbidden: push; touch Laputa/XSH/mdevd-rs/libudev-zero; host privileged device ops; unlinking anything but the daemon's own socket path; setuid; new network deps without owner approval (P4).
 - Non-goals (O2): seatd-launch, logind/D-Bus/systemd/polkit/elogind, auth/login/power/supervision, libseat ABI rewrite, BSD/macOS, wscons, D-Bus-linked oracle (oracle stays seatd-only).
-- Contract changes: (1) C→Rust, same CLI/socket/protocol surface; (2) VT-bound experimental until N1; (3) added post-open device validation may reject paths C accepted — each in doc/diffs.md; (4) C daemon deleted at close, libseat retained under oracle/.
+- Contract changes: (1) C→Rust, same CLI/socket/protocol surface; (2) VT-bound guest-qualified after N1; (3) added post-open device validation may reject paths C accepted — each in doc/diffs.md; (4) C daemon deleted at close, libseat retained under oracle/.
 
 ## Reference
 

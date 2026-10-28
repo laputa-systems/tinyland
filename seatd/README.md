@@ -20,7 +20,7 @@ See [validation](doc/validation.md) for target builds and local checks.
 ## Run under a supervisor
 
 Run seatd as a supervised foreground process. For a seat group named `seat`,
-disable VT binding until the VT-bound path has passed real-VT qualification:
+the following invocation disables VT binding:
 
 ```sh
 SEATD_VTBOUND=0 seatd -g seat -l info
@@ -39,6 +39,10 @@ test-only compatibility oracle. The helper rebuilds the original C daemon
 from Git history and builds the retained client scenario for differential
 checks. They are not runtime dependencies of the Rust daemon. See [validation](doc/validation.md) for the oracle
 commands and the scope of the comparisons.
+
+VT-bound operation, virtio DRM/evdev handoff, and dwl/foot input have also
+passed disposable-guest qualification. See [VM qualification](harness/VM.md)
+for the tested environment and reproduction commands.
 
 ## License
 

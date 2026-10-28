@@ -11,17 +11,17 @@ uses the reference's unmodified seatd backend, without logind or builtin support
 | Opened device identity | A path whose device and inode differ from the opened descriptor fails with `EACCES`. | C resolves the path and opens with `O_NOFOLLOW`, without comparing the opened identity. Rust adds a post-open check against replacement races. |
 | Opened device type | A descriptor that is not a character device fails with `ENODEV`. | C classifies by canonical path prefix. Rust also checks the opened descriptor type. |
 | Platform | Linux only. | C also includes FreeBSD and NetBSD support. Those platforms are outside this port's scope. |
-| VT qualification | VT-bound mode is experimental. | Local tests prove the transition model and ioctl adapter failures. Real VT switching and restoration still require a disposable VM. |
+| VT qualification | Switching and graceful restoration passed an x86_64 KVM guest proof. | Qualification covers Alpine Linux 6.6.142-0-virt with virtio devices, not every kernel or physical device. |
 | Distribution | The foreground Rust daemon replaces C seatd. | The C library and its reference inputs remain test-only. There is no Rust seatd-launch or embedded daemon. |
 | Shutdown socket cleanup | Remove the path only if its device and inode match the startup socket. | C unconditionally unlinks its configured path. Rust preserves a replacement daemon's socket. The directory must remain administrator-controlled. |
-| VT setup failure | Capture prior mode values and attempt rollback on setup failure, then disconnect the opening client. | C leaves the client waiting when setup fails. Rollback is best effort and does not prove restoration of kernel VT ownership. Real-VT proof remains N1. |
+| VT setup failure | Capture prior mode values and attempt rollback on setup failure, then disconnect the opening client. | C leaves the client waiting when setup fails. Rollback is best effort and does not prove restoration of kernel VT ownership. The guest proof covers successful switching and graceful restoration. |
 | Logging | Rust includes level, source file, and line. | C includes its own source and timing format. Logs are not wire-protocol goldens. |
 
 Symlinks remain compatible with the reference: resolve the path first, classify
 the canonical prefix, then open with `O_NOFOLLOW`. The extra identity and type
 checks reject only paths whose opened descriptors fail those checks. Tests use
-ordinary scratch files and `/dev/null`; real DRM, evdev, and hidraw qualification
-remains N2 in `plan.md`.
+ordinary scratch files and `/dev/null`. Separate guest tests qualify virtio DRM
+and evdev behavior. Hidraw revocation remains outside that qualification.
 
 The corpus covers ping, open and close, invalid device requests, stale IDs,
 invalid switches, disable acknowledgement, switch event ordering, malformed
