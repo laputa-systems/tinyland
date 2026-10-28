@@ -223,6 +223,10 @@ impl Conn {
         self.input.size()
     }
 
+    pub fn want_flush(&self) -> bool {
+        self.want_flush
+    }
+
     pub fn restore(&mut self, count: usize) {
         self.input.restore(count);
     }

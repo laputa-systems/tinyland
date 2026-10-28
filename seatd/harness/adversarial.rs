@@ -1,5 +1,220 @@
 use seatd::conn::{Conn, CONNECTION_BUFFER_SIZE, MAX_FDS};
+use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::process::{Child, Command, Stdio};
+
+fn daemon_bin() -> String {
+    env!("CARGO_BIN_EXE_seatd").to_string()
+}
+
+struct Daemon {
+    child: Child,
+    #[allow(dead_code)]
+    sock: String,
+}
+
+fn spawn_daemon(sock: &str, args: &[&str], capture_stderr: bool) -> (Daemon, Option<Vec<u8>>) {
+    try_unlink(sock);
+    let mut rfd = [0; 2];
+    assert_eq!(unsafe { libc::pipe(rfd.as_mut_ptr()) }, 0);
+    let (r, w) = (rfd[0], rfd[1]);
+    let mut cmd = Command::new(daemon_bin());
+    cmd.arg("-l")
+        .arg(if capture_stderr { "info" } else { "silent" })
+        .arg("-n")
+        .arg(w.to_string())
+        .args(args)
+        .env("SEATD_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    if capture_stderr {
+        cmd.stderr(Stdio::piped());
+    } else {
+        cmd.stderr(Stdio::null());
+    }
+    let child = cmd.spawn().expect("spawn seatd");
+    unsafe {
+        libc::close(w);
+    }
+    let mut one = [0u8; 1];
+    let n = unsafe { libc::read(r, one.as_mut_ptr() as *mut _, 1) };
+    unsafe {
+        libc::close(r);
+    }
+    assert_eq!((n, one), (1, [b'\n']), "readiness byte");
+    (Daemon { child, sock: sock.to_string() }, None)
+}
+
+fn terminate(child: &mut Child) {
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+}
+
+fn try_unlink(path: &str) {
+    unsafe {
+        let c = std::ffi::CString::new(path).unwrap();
+        libc::unlink(c.as_ptr());
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn admit_socket_serves_and_unlinks() {
+    let sock = ".work/tmp/admit-serve.sock";
+    let (mut d, _) = spawn_daemon(sock, &[], false);
+    let s = std::os::unix::net::UnixStream::connect(sock).expect("connect");
+    drop(s);
+    terminate(&mut d.child);
+    d.child.wait().expect("wait");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!std::path::Path::new(sock).exists(), "socket unlinked on shutdown");
+    let _ = &mut d;
+}
+
+#[test]
+fn admit_sigkill_leaves_socket_for_next_start() {
+    let sock = ".work/tmp/admit-killed.sock";
+    let (mut d, _) = spawn_daemon(sock, &[], false);
+    d.child.kill().expect("kill");
+    d.child.wait().expect("wait");
+    assert!(std::path::Path::new(sock).exists(), "SIGKILL leaves the socket behind");
+    let (mut e, _) = spawn_daemon(sock, &[], false);
+    std::os::unix::net::UnixStream::connect(sock).expect("replacement serves");
+    terminate(&mut e.child);
+    e.child.wait().ok();
+    let _ = &mut d;
+}
+
+#[test]
+fn admit_peer_credentials_logged() {
+    let sock = ".work/tmp/admit-peer.sock";
+    try_unlink(sock);
+    let mut rfd = [0; 2];
+    assert_eq!(unsafe { libc::pipe(rfd.as_mut_ptr()) }, 0);
+    let (r, w) = (rfd[0], rfd[1]);
+    let mut child = Command::new(daemon_bin())
+        .arg("-l")
+        .arg("info")
+        .arg("-n")
+        .arg(w.to_string())
+        .env("SEATD_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    unsafe {
+        libc::close(w);
+    }
+    let mut one = [0u8; 1];
+    assert_eq!(unsafe { libc::read(r, one.as_mut_ptr() as *mut _, 1) }, 1);
+    unsafe {
+        libc::close(r);
+    }
+    let s = std::os::unix::net::UnixStream::connect(sock).expect("connect");
+    drop(s);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    let mut err = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    assert!(
+        err.contains(&format!("uid: {uid}")) && err.contains(&format!("gid: {gid}")),
+        "peer creds in log: {err}"
+    );
+}
+
+#[test]
+fn admit_refuses_non_socket_path() {
+    let path = ".work/tmp/admit-regular-file.sock";
+    std::fs::write(path, b"not a socket").unwrap();
+    let out = Command::new(daemon_bin())
+        .arg("-l")
+        .arg("silent")
+        .env("SEATD_SOCK", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(std::fs::read(path).unwrap(), b"not a socket");
+    try_unlink(path);
+}
+
+#[test]
+fn admit_z_flag_refuses_competing_instance() {
+    let sock = ".work/tmp/admit-compete.sock";
+    let (_d, _) = spawn_daemon(sock, &[], false);
+    let out = Command::new(daemon_bin())
+        .arg("-l")
+        .arg("silent")
+        .arg("-z")
+        .env("SEATD_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn admit_replaces_leftover_socket() {
+    let sock = ".work/tmp/admit-replace.sock";
+    let (mut first, _) = spawn_daemon(sock, &[], false);
+    let (mut second, _) = spawn_daemon(sock, &[], false);
+    std::os::unix::net::UnixStream::connect(sock).expect("second serves");
+    second.child.kill().ok();
+    second.child.wait().ok();
+    first.child.kill().ok();
+    first.child.wait().ok();
+}
+
+#[test]
+fn admit_rejects_bad_user_group_and_levels() {
+    for args in [
+        vec!["-u", "no-such-user-xyz"],
+        vec!["-g", "no-such-group-xyz"],
+        vec!["-u", "root", "-z"],
+        vec!["-l", "bogus"],
+    ] {
+        let out = Command::new(daemon_bin())
+            .args(&args)
+            .env("SEATD_SOCK", ".work/tmp/admit-cli.sock")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("run");
+        assert_eq!(out.status.code(), Some(1), "args {args:?}");
+    }
+}
+
+#[test]
+fn admit_group_socket_gets_0770() {
+    let sock = ".work/tmp/admit-mode.sock";
+    let gid = unsafe { libc::getgid() };
+    let group = unsafe {
+        let gr = libc::getgrgid(gid);
+        assert!(!gr.is_null());
+        std::ffi::CStr::from_ptr((*gr).gr_name).to_string_lossy().into_owned()
+    };
+    let (mut d, _) = spawn_daemon(sock, &["-g", &group], false);
+    let mode = std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(sock).unwrap());
+    assert_eq!(mode & 0o777, 0o770, "socket mode");
+    d.child.kill().ok();
+    d.child.wait().ok();
+}
 
 fn pair() -> (Conn, Conn) {
     unsafe {

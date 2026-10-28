@@ -1,3 +1,5 @@
+use crate::admit;
+use crate::conn::Conn;
 use crate::{log_debug, log_error, log_info};
 use rustix::fd::OwnedFd;
 use std::io;
@@ -5,12 +7,23 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 const WATCHED: [libc::c_int; 4] = [libc::SIGUSR1, libc::SIGUSR2, libc::SIGINT, libc::SIGTERM];
 
+#[allow(dead_code)]
+struct ClientSlot {
+    conn: Conn,
+    pid: libc::pid_t,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    dead: bool,
+}
+
 pub struct Server {
     pub running: bool,
     listen_fd: Option<OwnedFd>,
     sig_fd: Option<OwnedFd>,
     old_mask: libc::sigset_t,
     pollfds: Vec<libc::pollfd>,
+    clients: Vec<ClientSlot>,
+    dirty: bool,
 }
 
 fn os_error() -> io::Error {
@@ -47,11 +60,13 @@ impl Server {
             sig_fd: Some(unsafe { OwnedFd::from_raw_fd(sig_raw) }),
             old_mask: old,
             pollfds: Vec::new(),
+            clients: Vec::new(),
+            dirty: true,
         })
     }
 
-    pub fn set_listen(&mut self, fd: RawFd) {
-        self.listen_fd = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+    pub fn set_listen(&mut self, fd: OwnedFd) {
+        self.listen_fd = Some(fd);
     }
 
     fn rebuild(&mut self) {
@@ -68,6 +83,18 @@ impl Server {
                 revents: 0,
             });
         }
+        for client in self.clients.iter() {
+            let mut events = libc::POLLIN;
+            if client.conn.want_flush() {
+                events |= libc::POLLOUT;
+            }
+            self.pollfds.push(libc::pollfd {
+                fd: client.conn.raw_fd(),
+                events,
+                revents: 0,
+            });
+        }
+        self.dirty = false;
     }
 
     fn handle_signals(&mut self) {
@@ -101,28 +128,70 @@ impl Server {
 
     fn handle_listen(&mut self) {
         let listen_fd = self.listen_fd.as_ref().unwrap().as_raw_fd();
-        unsafe {
-            let fd = libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut());
-            if fd < 0 {
-                let e = os_error();
-                log_error!("Could not accept client connection: {e}");
-                return;
+        match admit::accept_client(listen_fd) {
+            Some((fd, creds)) => {
+                self.clients.push(ClientSlot {
+                    conn: Conn::new(fd),
+                    pid: creds.pid,
+                    uid: creds.uid,
+                    gid: creds.gid,
+                    dead: false,
+                });
+                self.dirty = true;
             }
-            let mut flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            None => {}
+        }
+    }
+
+    fn handle_client_writable(&mut self, idx: usize) {
+        let client = &mut self.clients[idx];
+        match client.conn.flush() {
+            Ok(_) => {
+                self.dirty = true;
             }
-            flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            Err(e) if e == libc::EAGAIN => {
+                self.dirty = true;
             }
-            log_info!("Accepted client connection (fd {fd}); session support lands in R3");
-            libc::close(fd);
+            Err(e) => {
+                let err = io::Error::from_raw_os_error(e);
+                log_error!("Could not flush client connection: {err}");
+                client.dead = true;
+            }
+        }
+    }
+
+    fn handle_client_readable(&mut self, idx: usize) {
+        let client = &mut self.clients[idx];
+        match client.conn.read() {
+            Ok(0) => {
+                log_error!("Could not read client connection: zero-length read");
+                client.dead = true;
+            }
+            Ok(_) => {
+                // Frame dispatch arrives in R3; bytes accumulate until then.
+            }
+            Err(e) if e == libc::EAGAIN => {}
+            Err(e) => {
+                let err = io::Error::from_raw_os_error(e);
+                log_error!("Could not read client connection: {err}");
+                client.dead = true;
+            }
+        }
+    }
+
+    fn sweep_dead(&mut self) {
+        let before = self.clients.len();
+        self.clients.retain(|c| !c.dead);
+        if self.clients.len() != before {
+            log_info!("Client disconnected");
+            self.dirty = true;
         }
     }
 
     pub fn poll_once(&mut self) -> io::Result<()> {
-        self.rebuild();
+        if self.dirty {
+            self.rebuild();
+        }
         let n = unsafe {
             libc::poll(
                 self.pollfds.as_mut_ptr(),
@@ -156,6 +225,35 @@ impl Server {
                 self.handle_listen();
             }
         }
+        let base = if self.listen_fd.is_some() { 2 } else { 1 };
+        for i in 0..self.clients.len() {
+            // A client accepted during this dispatch has no pollfd yet;
+            // it is picked up on the next rebuild.
+            if base + i >= self.pollfds.len() {
+                continue;
+            }
+            let revents = self.pollfds[base + i].revents;
+            if revents == 0 {
+                continue;
+            }
+            if revents & libc::POLLERR != 0 {
+                log_error!("Connection error");
+                self.clients[i].dead = true;
+                continue;
+            }
+            if revents & libc::POLLHUP != 0 {
+                log_info!("Client disconnected");
+                self.clients[i].dead = true;
+                continue;
+            }
+            if revents & libc::POLLOUT != 0 {
+                self.handle_client_writable(i);
+            }
+            if revents & libc::POLLIN != 0 {
+                self.handle_client_readable(i);
+            }
+        }
+        self.sweep_dead();
         Ok(())
     }
 

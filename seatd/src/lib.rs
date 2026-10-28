@@ -1,3 +1,4 @@
+pub mod admit;
 pub mod cli;
 pub mod conn;
 pub mod log;
