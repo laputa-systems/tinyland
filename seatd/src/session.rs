@@ -280,7 +280,7 @@ pub fn seat_remove_client(
     let state = slots[idx].client.state;
     let session = slots[idx].client.session;
     if seat.vt_bound && ((was_current && seat.active_client.is_none())
-        || (!was_current && state != ClientState::Closed)) {
+        || (!was_current && !matches!(state, ClientState::New | ClientState::Closed))) {
         let _ = fx.vt_close(session);
     }
     slots[idx].client.state = ClientState::Closed;
@@ -415,7 +415,12 @@ fn handle_open_seat(
     {
         return Err(-1);
     }
-    let _ = seat_open_client(seat, slots, idx, fx);
+    if seat.active_client.is_none() {
+        if let Err(e) = seat_open_client(seat, slots, idx, fx) {
+            crate::log_error!("Could not activate client: {}", std::io::Error::from_raw_os_error(e));
+            return Err(-1);
+        }
+    }
     Ok(())
 }
 
@@ -1014,6 +1019,26 @@ mod tests {
         assert_eq!(slots[b].client.state, ClientState::Active);
         let (op, _) = read_msg(&mut pb);
         assert_eq!(op, SERVER_ENABLE_SEAT);
+    }
+
+    #[test]
+    fn session_vt_setup_failure_disconnects_client() {
+        struct FailedVt;
+        impl Effect for FailedVt {
+            fn open_device(&mut self, _: &str, _: DeviceType) -> Result<OwnedFd, i32> { unreachable!() }
+            fn activate_device(&mut self, _: i32, _: DeviceType) -> Result<(), i32> { unreachable!() }
+            fn deactivate_device(&mut self, _: i32, _: DeviceType) -> Result<(), i32> { unreachable!() }
+            fn vt_open(&mut self, _: i32) -> Result<(), i32> { Err(libc::EIO) }
+            fn vt_close(&mut self, _: i32) -> Result<(), i32> { panic!("closing a VT that was never acquired") }
+            fn vt_switch(&mut self, _: i32, _: i32) -> Result<(), i32> { unreachable!() }
+            fn vt_ack(&mut self, _: i32, _: bool) -> Result<(), i32> { unreachable!() }
+            fn current_vt(&mut self) -> Result<i32, i32> { Ok(1) }
+        }
+        let (mut seat, mut slots, _) = setup(true, 1);
+        let (a, mut pa) = add_client(&mut slots);
+        assert!(matches!(open_seat(&mut seat, &mut slots, a, &mut pa, &mut FailedVt), Outcome::Destroy));
+        assert_eq!(seat.active_client, None);
+        seat_remove_client(&mut seat, &mut slots, a, &mut FailedVt);
     }
 
     #[test]

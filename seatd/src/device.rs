@@ -48,7 +48,11 @@ pub fn close_device(slots: &mut [ClientSlot], idx: usize, dev: usize, fx: &mut d
     let mut dev = slots[idx].client.devices.remove(dev);
     if dev.fd.is_some() {
         let raw = dev.fd.as_ref().unwrap().as_raw_fd();
-        let _ = fx.deactivate_device(raw, dev.dev_type);
+        if dev.active {
+            if let Err(e) = fx.deactivate_device(raw, dev.dev_type) {
+                crate::log_error!("Could not deactivate device {}: {}", dev.path, std::io::Error::from_raw_os_error(e));
+            }
+        }
         dev.fd.take();
     }
     unsafe {
@@ -229,6 +233,25 @@ mod tests {
         fn current_vt(&mut self) -> Result<i32, i32> {
             self.null.current_vt()
         }
+    }
+
+    #[test]
+    fn device_teardown_reports_revocation_failure() {
+        let marker = "SEATD_TEST_REVOKE_FAILURE";
+        if std::env::var_os(marker).is_some() {
+            let (_seat, mut slots, mut fx) = FailFx::new();
+            open_device_resolved(Some(0), &mut slots, 0, "/dev/input/event-test", DeviceType::Evdev, &mut fx).unwrap();
+            close_device(&mut slots, 0, 0, &mut fx);
+            assert!(slots[0].client.devices.is_empty());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "device::tests::device_teardown_reports_revocation_failure", "--nocapture"])
+            .env(marker, "1").output().unwrap();
+        assert!(output.status.success());
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(diagnostic.contains("Could not deactivate device /dev/input/event-test"), "{diagnostic}");
+        assert!(diagnostic.contains(&std::io::Error::from_raw_os_error(libc::EIO).to_string()), "{diagnostic}");
     }
 
     #[test]

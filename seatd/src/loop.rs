@@ -22,6 +22,7 @@ pub struct Server {
     dirty: bool,
 }
 
+
 fn os_error() -> io::Error {
     io::Error::last_os_error()
 }
@@ -115,6 +116,7 @@ impl Server {
             if n != std::mem::size_of::<libc::signalfd_siginfo>() as isize {
                 break;
             }
+            self.dirty = true;
             match info.ssi_signo as libc::c_int {
                 libc::SIGINT | libc::SIGTERM => {
                     self.running = false;
@@ -336,5 +338,57 @@ impl Server {
             drop(self.sig_fd.take());
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_processing_flushes_queued_notifications() {
+        let mut server = Server::new().unwrap();
+        server.seats[0].vt_bound = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0, fds.as_mut_ptr()) }, 0);
+            let peer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+            server.clients.push(ClientSlot {
+                conn: Conn::new(unsafe { OwnedFd::from_raw_fd(fds[0]) }),
+                client: Client::fresh(1, 1, 1),
+                dead: false,
+            });
+            server.rebuild();
+            let filler = [0x55u8; 1024];
+            let mut queued = 0;
+            loop {
+                let n = unsafe { libc::send(fds[0], filler.as_ptr().cast(), filler.len(), libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+                if n < 0 {
+                    assert_eq!(os_error().raw_os_error(), Some(libc::EAGAIN));
+                    break;
+                }
+                assert!(n > 0);
+                queued += n as usize;
+                assert!(queued < 4 * 1024 * 1024);
+            }
+            let event = Header { opcode: crate::wire::SERVER_ENABLE_SEAT, size: 0 }.encode();
+            server.clients[0].conn.put(&event).unwrap();
+            assert_eq!(server.clients[0].conn.flush(), Err(libc::EAGAIN));
+            assert_eq!(unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGUSR2) }, 0);
+            server.handle_signals();
+            while queued > 0 {
+                let mut drain = [0u8; 1024];
+                let n = unsafe { libc::recv(peer.as_raw_fd(), drain.as_mut_ptr().cast(), queued.min(drain.len()), libc::MSG_DONTWAIT) };
+                assert!(n > 0);
+                queued -= n as usize;
+            }
+            assert_eq!(unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGUSR1) }, 0);
+            server.poll_once().unwrap();
+            let mut received = [0u8; 4];
+            assert_eq!(unsafe { libc::recv(peer.as_raw_fd(), received.as_mut_ptr().cast(), received.len(), libc::MSG_DONTWAIT) }, 4);
+            assert_eq!(received, event);
+        }));
+        server.finish();
+        result.unwrap();
     }
 }
