@@ -113,9 +113,13 @@ libseat dev package (`apk add libseat-dev` on Alpine) for
 
 `make seat` proves gates 1 and the device half of 2 in tinyland's own
 guest (Alpine foot 1.17.2, C seatd 0.8.0): denial marker, seat open,
-brokered devices, post-input marker with confirmed presentation. The exact
-Laputa foot/image chain, lifecycle qualification, and dependency
-measurement land with the `qemu-tinyland-foot` Laputa profile.
+brokered devices, post-input marker with confirmed presentation. The
+`qemu-tinyland-foot` Laputa profile proves gates 1 and 2 against the exact
+Laputa chain (foot 1.28.0, C seatd 0.9.3, Laputa image): unprivileged
+session, denial marker, brokered DRM/input, real input to changed pixels
+to confirmed presentation, plus the 26-package closure for gate 4.
+Lifecycle qualification beyond app exit and broker loss, and the
+seatd-rs/mdevd-rs substitutions, remain open in that order.
 
 ## Sequencing
 
