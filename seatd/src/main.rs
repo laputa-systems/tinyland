@@ -71,6 +71,14 @@ fn main() {
         }
     };
     server.set_listen(socket_fd);
+    let socket_path = match shutdown::SocketPath::capture(&path) {
+        Ok(socket) => socket,
+        Err(e) => {
+            log_error!("Could not identify bound socket: {e}");
+            server.finish();
+            std::process::exit(1);
+        }
+    };
 
     log_info!("seatd started");
 
@@ -88,5 +96,5 @@ fn main() {
 
     server.run();
 
-    shutdown::shutdown(server, &path);
+    shutdown::shutdown(server, socket_path);
 }

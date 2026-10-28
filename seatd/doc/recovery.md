@@ -1,46 +1,47 @@
-# Crash recovery
+# Recover after a daemon or client failure
 
-## Graceful shutdown (SIGINT/SIGTERM)
+## Graceful shutdown
 
-The daemon stops admission, destroys all sessions (closing every
-daemon-held device descriptor), unlinks its socket, and exits 0.
-A supervisor can then start a replacement on the same path.
+Send SIGINT or SIGTERM. Seatd stops admission, removes sessions, attempts device
+revocation, closes its descriptors, and exits. Cleanup errors appear in stderr.
+It unlinks the socket only when its device and inode still match the socket
+captured at startup. A replacement daemon's socket remains available.
 
-## Daemon SIGKILL
+Use a socket directory writable only by the supervisor or administrator.
+Identity checking does not make unlink atomic against a hostile writer in
+that directory. Startup replaces an existing socket unless `-z` is supplied.
+Use `-z` when a second instance must refuse to replace the first.
 
-SIGKILL cannot be caught. What is true afterwards:
+## Daemon crash or SIGKILL
 
-- The socket path is left behind. The next start unlinks the stale
-  socket and serves (same as the C daemon).
-- Device descriptors the daemon held are closed by the kernel.
-- Descriptors already passed to clients via `SCM_RIGHTS` stay open
-  in those clients, but their authority is whatever the last
-  deactivation left:
-  - DRM: dropping the daemon's master releases master. A client
-    holding a DRM descriptor keeps its render context but has no
-    master until it reopens through a new daemon (which calls
-    `drm_set_master` again).
-  - evdev/hidraw: `EVIOCREVOKE`/`HIDIOCREVOKE` persist on the open
-    file description. Revoked descriptors are dead; the client must
-    close and reopen them after reconnecting.
-- There is no transparent recovery. After any daemon death:
+SIGKILL performs no userspace cleanup and leaves the socket path behind.
+The kernel closes the daemon's descriptors. Descriptor copies already passed
+to clients remain open. Do not assume closing the daemon's copy revokes DRM
+master or input access. No crash-time revoke ioctl runs.
 
-  1. Terminate seat clients (they cannot regain a working seat on
-     the old connection; the daemon side is gone).
-  2. Start a new daemon on the same socket path.
-  3. Reconnect every client and reopen every device.
+Recover in this order:
+
+1. Stop every client of the failed daemon and close its device descriptors.
+2. Start the replacement daemon on the same socket path.
+3. Restart clients so they reconnect and reopen every device.
+
+A normal start replaces the leftover socket. With `-z`, remove the stale socket
+from the administrator-controlled directory before restarting.
+
+Input descriptors successfully revoked before the crash remain revoked.
+Clients must close every reference and reopen evdev and hidraw devices after
+reactivation. There is no transparent recovery across daemon death.
 
 ## Client crash
 
-A client that exits without `close_seat` is reaped on disconnect:
-its devices are closed and deactivated, its session is removed,
-and a waiting session is activated. No operator action is needed.
+Seatd removes a disconnected client's session, attempts device revocation,
+closes daemon-held device descriptors, and activates a waiting session.
+Revocation failures are logged. Closing a daemon descriptor does not guarantee
+that a descriptor retained by another process has lost its authority.
 
-## VT-bound seats
+## VT-bound operation
 
-A replacement daemon re-reads the current VT on the next client
-open or `SIGUSR2`. Kernel VT modes are per-descriptor; a dead
-daemon's descriptors are closed, so the replacement must open the
-VT again (normal open path does this). If the previous daemon died
-mid-switch, send `SIGUSR2` after clients reconnect to resync.
-Real-VT qualification is environment-gated (see plan N1).
+VT-bound operation is experimental until N1 in `plan.md` passes in a disposable
+VM. A crash does not guarantee restoration of keyboard, display, or VT modes.
+Use the VM's separate management console to recover its console state before
+restarting clients. Do not apply VM qualification steps to the host console.

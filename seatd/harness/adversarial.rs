@@ -777,6 +777,22 @@ fn shutdown_malformed_storm_leaks_no_fds() {
 }
 
 #[test]
+fn shutdown_preserves_replacement_socket() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/shutdown-replacement.sock";
+    let (mut first, _) = spawn_daemon(sock, &[], false);
+    let (mut second, _) = spawn_daemon(sock, &[], false);
+    terminate(&mut first.child);
+    assert!(first.child.wait().unwrap().success());
+    let mut c = Raw::connect(sock);
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, 0x8007);
+    terminate(&mut second.child);
+    assert!(second.child.wait().unwrap().success());
+    assert!(!std::path::Path::new(sock).exists());
+}
+
+#[test]
 fn shutdown_graceful_restart_serves() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/shutdown-restart.sock";
