@@ -1,4 +1,8 @@
 use seatd::conn::{Conn, CONNECTION_BUFFER_SIZE, MAX_FDS};
+
+// Test threads share one fd table, so fd-number asserts would race with
+// opens in other threads. Every test holds this for its whole body.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Child, Command, Stdio};
@@ -67,6 +71,7 @@ impl Drop for Daemon {
 
 #[test]
 fn admit_socket_serves_and_unlinks() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-serve.sock";
     let (mut d, _) = spawn_daemon(sock, &[], false);
     let s = std::os::unix::net::UnixStream::connect(sock).expect("connect");
@@ -80,6 +85,7 @@ fn admit_socket_serves_and_unlinks() {
 
 #[test]
 fn admit_sigkill_leaves_socket_for_next_start() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-killed.sock";
     let (mut d, _) = spawn_daemon(sock, &[], false);
     d.child.kill().expect("kill");
@@ -94,6 +100,7 @@ fn admit_sigkill_leaves_socket_for_next_start() {
 
 #[test]
 fn admit_peer_credentials_logged() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-peer.sock";
     try_unlink(sock);
     let mut rfd = [0; 2];
@@ -135,6 +142,7 @@ fn admit_peer_credentials_logged() {
 
 #[test]
 fn admit_refuses_non_socket_path() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let path = ".work/tmp/admit-regular-file.sock";
     std::fs::write(path, b"not a socket").unwrap();
     let out = Command::new(daemon_bin())
@@ -153,6 +161,7 @@ fn admit_refuses_non_socket_path() {
 
 #[test]
 fn admit_z_flag_refuses_competing_instance() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-compete.sock";
     let (_d, _) = spawn_daemon(sock, &[], false);
     let out = Command::new(daemon_bin())
@@ -170,6 +179,7 @@ fn admit_z_flag_refuses_competing_instance() {
 
 #[test]
 fn admit_replaces_leftover_socket() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-replace.sock";
     let (mut first, _) = spawn_daemon(sock, &[], false);
     let (mut second, _) = spawn_daemon(sock, &[], false);
@@ -182,6 +192,7 @@ fn admit_replaces_leftover_socket() {
 
 #[test]
 fn admit_rejects_bad_user_group_and_levels() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     for args in [
         vec!["-u", "no-such-user-xyz"],
         vec!["-g", "no-such-group-xyz"],
@@ -202,6 +213,7 @@ fn admit_rejects_bad_user_group_and_levels() {
 
 #[test]
 fn admit_group_socket_gets_0770() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/admit-mode.sock";
     let gid = unsafe { libc::getgid() };
     let group = unsafe {
@@ -252,6 +264,7 @@ fn fd_is_open(fd: i32) -> bool {
 
 #[test]
 fn wire_fragmented_header_reassembles() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     a.put(&[1u8, 0, 0, 0]).unwrap();
     a.flush().unwrap();
@@ -270,6 +283,7 @@ fn wire_fragmented_header_reassembles() {
 
 #[test]
 fn wire_coalesced_frames_parse_in_order() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     a.put(&[1u8, 0, 0, 0, 7u8, 0, 0, 0]).unwrap();
     a.flush().unwrap();
@@ -285,6 +299,7 @@ fn wire_coalesced_frames_parse_in_order() {
 
 #[test]
 fn wire_empty_read_is_clean_eof() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (a, mut b) = pair();
     drop(a);
     assert_eq!(b.read().unwrap(), 0);
@@ -293,6 +308,7 @@ fn wire_empty_read_is_clean_eof() {
 
 #[test]
 fn wire_oversized_put_fails_loudly() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, _b) = pair();
     assert_eq!(a.put(&[0u8; CONNECTION_BUFFER_SIZE + 1]), Err(libc::EOVERFLOW));
     let exact = [0u8; CONNECTION_BUFFER_SIZE];
@@ -301,6 +317,7 @@ fn wire_oversized_put_fails_loudly() {
 
 #[test]
 fn wire_malformed_short_get_is_eagain() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     a.put(&[9u8]).unwrap();
     a.flush().unwrap();
@@ -312,6 +329,7 @@ fn wire_malformed_short_get_is_eagain() {
 
 #[test]
 fn wire_fd_round_trip_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     let null = dev_null();
     let null_raw = null.as_raw_fd();
@@ -334,6 +352,7 @@ fn wire_fd_round_trip_exactly_once() {
 
 #[test]
 fn wire_unexpected_fds_have_one_owner() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     let f1 = dev_null();
     let f2 = dev_null();
@@ -355,6 +374,7 @@ fn wire_unexpected_fds_have_one_owner() {
 
 #[test]
 fn wire_fd_queue_overflow_fails_loudly() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, _b) = pair();
     for _ in 0..MAX_FDS {
         a.put_fd(dev_null()).unwrap();
@@ -364,6 +384,7 @@ fn wire_fd_queue_overflow_fails_loudly() {
 
 #[test]
 fn wire_receiver_fd_overflow_closes_extras() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut a, mut b) = pair();
     for _ in 0..MAX_FDS {
         a.put_fd(dev_null()).unwrap();
@@ -389,6 +410,7 @@ fn wire_receiver_fd_overflow_closes_extras() {
 
 #[test]
 fn wire_partial_write_keeps_fd_exactly_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         let mut fds = [0; 2];
         assert_eq!(
@@ -538,6 +560,7 @@ fn spawn_with_env(sock: &str, vtbound: Option<&str>) -> Daemon {
 
 #[test]
 fn proto_open_ping_close_unbound() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/proto-unbound.sock";
     let _d = spawn_with_env(sock, Some("0"));
     let mut c = Raw::connect(sock);
@@ -552,6 +575,7 @@ fn proto_open_ping_close_unbound() {
 
 #[test]
 fn proto_vtbound_without_tty_fails_loudly() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/proto-vtbound.sock";
     let _d = spawn_with_env(sock, None);
     let mut c = Raw::connect(sock);
@@ -572,6 +596,7 @@ fn open_unbound_client(sock: &str) -> (Daemon, Raw) {
 
 #[test]
 fn device_unsupported_paths_are_errors_not_death() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/dev-unsupported.sock";
     let (_d, mut c) = open_unbound_client(sock);
     // NOTE: valid-prefix paths that resolve to real host devices are N2
@@ -602,6 +627,7 @@ fn device_unsupported_paths_are_errors_not_death() {
 
 #[test]
 fn device_overlong_path_is_protocol_error() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/dev-overlong.sock";
     let (_d, mut c) = open_unbound_client(sock);
     let long = "a".repeat(300);
@@ -614,6 +640,7 @@ fn device_overlong_path_is_protocol_error() {
 
 #[test]
 fn device_ops_without_seat_destroy() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/dev-noseat.sock";
     let _d = spawn_with_env(sock, Some("0"));
     let mut c = Raw::connect(sock);
@@ -628,6 +655,7 @@ fn device_ops_without_seat_destroy() {
 
 #[test]
 fn device_close_then_stale_id_is_ebadf() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/dev-stale.sock";
     let (_d, mut c) = open_unbound_client(sock);
     c.send(4, &1i32.to_ne_bytes());
@@ -647,6 +675,7 @@ fn signal_child(child: &mut Child, sig: i32) {
 
 #[test]
 fn vt_signals_unbound_are_noops() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/vt-sig-unbound.sock";
     let mut d = spawn_with_env(sock, Some("0"));
     signal_child(&mut d.child, libc::SIGUSR1);
@@ -662,6 +691,7 @@ fn vt_signals_unbound_are_noops() {
 
 #[test]
 fn vt_signal_release_without_tty_keeps_serving() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/vt-sig-bound.sock";
     let mut d = spawn_with_env(sock, None);
     signal_child(&mut d.child, libc::SIGUSR1);
@@ -671,4 +701,93 @@ fn vt_signal_release_without_tty_keeps_serving() {
     let mut c = Raw::connect(sock);
     c.send(7, &[]);
     assert_eq!(c.recv().unwrap().0, S_PONG);
+}
+
+fn proc_fd_count(pid: u32) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/fd")).map(|d| d.count()).unwrap_or(usize::MAX)
+}
+
+fn rest_fd_count(child: &Child) -> usize {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    proc_fd_count(child.id())
+}
+
+fn wait_for_fds(child: &Child, want: usize) {
+    for _ in 0..300 {
+        if proc_fd_count(child.id()) <= want {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "fd count {} did not settle to {want}",
+        proc_fd_count(child.id())
+    );
+}
+
+#[test]
+fn shutdown_reconnect_storm_leaks_no_fds() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/storm-reconnect.sock";
+    let mut d = spawn_with_env(sock, Some("0"));
+    let baseline = rest_fd_count(&d.child);
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    drop(c);
+    wait_for_fds(&d.child, baseline);
+    for _ in 0..200 {
+        let s = Raw::connect(sock);
+        drop(s);
+    }
+    wait_for_fds(&d.child, baseline);
+    assert_eq!(proc_fd_count(d.child.id()), baseline);
+    for _ in 0..800 {
+        let s = Raw::connect(sock);
+        drop(s);
+    }
+    wait_for_fds(&d.child, baseline);
+    assert_eq!(proc_fd_count(d.child.id()), baseline, "0 fd growth over 1000 reconnects");
+    terminate(&mut d.child);
+    d.child.wait().ok();
+}
+
+#[test]
+fn shutdown_malformed_storm_leaks_no_fds() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/storm-malformed.sock";
+    let mut d = spawn_with_env(sock, Some("0"));
+    let baseline = rest_fd_count(&d.child);
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    drop(c);
+    wait_for_fds(&d.child, baseline);
+    for i in 0..100 {
+        let mut s = Raw::connect(sock);
+        s.send(0x7000 + (i % 100) as u16, &[0xAAu8; 32]);
+        let mut buf = [0u8; 64];
+        use std::io::Read as _Read;
+        let _ = s.s.read(&mut buf);
+    }
+    wait_for_fds(&d.child, baseline);
+    assert_eq!(proc_fd_count(d.child.id()), baseline);
+    terminate(&mut d.child);
+    d.child.wait().ok();
+}
+
+#[test]
+fn shutdown_graceful_restart_serves() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/shutdown-restart.sock";
+    let mut first = spawn_with_env(sock, Some("0"));
+    terminate(&mut first.child);
+    first.child.wait().ok();
+    assert!(!std::path::Path::new(sock).exists());
+    let mut second = spawn_with_env(sock, Some("0"));
+    let mut c = Raw::connect(sock);
+    c.send(1, &[]);
+    assert_eq!(c.recv().unwrap().0, S_OPEN);
+    terminate(&mut second.child);
+    second.child.wait().ok();
 }

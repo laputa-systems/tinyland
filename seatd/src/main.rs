@@ -2,6 +2,7 @@ use seatd::admit;
 use seatd::cli;
 use seatd::log;
 use seatd::r#loop::Server;
+use seatd::shutdown;
 use seatd::{log_error, log_info};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,9 +88,5 @@ fn main() {
 
     server.run();
 
-    if let Err(e) = admit::unlink_path(&path) {
-        log_error!("Could not remove socket: {e}");
-    }
-    server.finish();
-    log_info!("seatd stopped");
+    shutdown::shutdown(server, &path);
 }
