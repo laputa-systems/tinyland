@@ -20,6 +20,7 @@ rg -qxF '.work/' "$exclude" || printf '\n.work/\n' >> "$exclude"
 mkdir -p .work/tmp .work/vm-qualification
 export TMPDIR="$PWD/.work/tmp"
 work="$PWD/.work/vm-qualification/$mode"
+rm -rf "$work/root"
 mkdir -p "$work/root"
 cp -a --reflink=auto "$source_root/." "$work/root/"
 cp "$daemon" "$work/root/usr/local/bin/seatd"
@@ -62,13 +63,34 @@ qmp="$work/qmp.sock"
 log="$work/console.log"
 rm -f "$qmp" "$log"
 pid=
+wait_for_exit() {
+  for _ in $(seq 1 "$1"); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  ! kill -0 "$pid" 2>/dev/null
+}
 cleanup() {
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
+  if [ -n "$pid" ]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      if ! wait_for_exit 5; then
+        kill -KILL "$pid" 2>/dev/null || true
+        if ! wait_for_exit 5; then
+          echo "QEMU did not exit after SIGKILL: $pid" >&2
+          return
+        fi
+      fi
+    fi
     wait "$pid" 2>/dev/null || true
+    pid=
   fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 131' QUIT
+trap 'exit 143' TERM
 qemu-system-x86_64 -M q35 -m 1024 -cpu host -enable-kvm -vga none -device virtio-gpu-pci -device virtio-keyboard-pci -kernel "$kernel" -initrd "$initramfs" -append "console=tty0 console=ttyS0 root=/dev/vda rootfstype=ext4 rw init=/init VM_MODE=$mode" -drive "file=$work/guest.img,format=raw,if=virtio" -display none -serial "file:$log" -qmp "unix:$qmp,server=on,wait=off" -no-reboot > "$work/qemu.log" 2>&1 &
 pid=$!
 if [ "$mode" = compositor ]; then
@@ -88,6 +110,9 @@ if [ "$mode" = compositor ]; then
   python3 harness/vm-qmp.py "$qmp" screenshot "$work/screen.ppm"
   python3 harness/vm-check-image.py "$work/screen.ppm"
   python3 harness/vm-qmp.py "$qmp" quit
+  if ! wait_for_exit 15; then echo 'QEMU did not exit after QMP quit' >&2; exit 1; fi
+  wait "$pid"
+  pid=
 else
   for _ in $(seq 1 60); do
     kill -0 "$pid" 2>/dev/null || break
