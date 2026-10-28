@@ -134,7 +134,10 @@ was also visually inspected. Commands and cached-guest preparation are in
 [the VM recipe](../harness/VM.md). No host DRM, input, or VT device was used.
 This proof covers that guest configuration. Physical devices, hidraw revoke,
 and ARM hardware remain outside these results. Unit tests and raw protocol
-parity alone do not establish kernel device behavior.
+parity alone do not establish kernel device behavior. Since the upstream C
+sources left this repo, no C libseat client has been run against the
+daemon; compatibility rests on the frozen golden transcript and the
+raw-protocol guest client, and a C-client run remains an open gap.
 
 The recorded R4 history includes one unidentified test failure during
 contaminated reruns. It remains unclassified. The multi-client disconnect
