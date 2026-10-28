@@ -28,10 +28,12 @@ impl Keyboard {
         let mut context = xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES);
         if let Some(root) = std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")) {
             let path = std::path::PathBuf::from(root);
-            if context.include_path_append(path.as_path()) {
-                eprintln!("TINYLAND_XKB_ROOT {}", path.display());
-            } else {
-                return Err("XKB include path append failed".into());
+            if path.exists() {
+                if context.include_path_append(path.as_path()) {
+                    eprintln!("TINYLAND_XKB_ROOT {}", path.display());
+                } else {
+                    return Err("XKB include path append failed".into());
+                }
             }
         }
         if !context.include_path_append_default() { return Err("XKB include paths unavailable".into()); }
