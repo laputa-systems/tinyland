@@ -39,7 +39,18 @@ impl Keyboard {
         let _ = context.include_path_append_default();
         let keymap = xkb::Keymap::new_from_names(
             &context, "evdev", "pc105", "us", "", Some(String::new()), xkb::KEYMAP_COMPILE_NO_FLAGS,
-        ).ok_or("compile US XKB keymap")?;
+        );
+        let keymap = match keymap {
+            Some(keymap) => keymap,
+            None => {
+                let system = std::path::Path::new("/usr/share/X11/xkb/rules/evdev");
+                return Err(format!(
+                    "compile US XKB keymap (override={:?}, system-rules-present={})",
+                    std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")),
+                    system.exists(),
+                ));
+            }
+        };
         let mut text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1).into_bytes();
         text.push(0);
         let mut file = File::from(rustix::fs::memfd_create("tinyland-keymap", rustix::fs::MemfdFlags::CLOEXEC)
