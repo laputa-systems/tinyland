@@ -26,6 +26,14 @@ pub struct Keyboard {
 impl Keyboard {
     pub fn new() -> Result<Self, String> {
         let mut context = xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES);
+        if let Some(root) = std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")) {
+            let path = std::path::PathBuf::from(root);
+            if context.include_path_append(path.as_path()) {
+                eprintln!("TINYLAND_XKB_ROOT {}", path.display());
+            } else {
+                return Err("XKB include path append failed".into());
+            }
+        }
         if !context.include_path_append_default() { return Err("XKB include paths unavailable".into()); }
         let keymap = xkb::Keymap::new_from_names(
             &context, "evdev", "pc105", "us", "", Some(String::new()), xkb::KEYMAP_COMPILE_NO_FLAGS,
@@ -49,6 +57,46 @@ impl Keyboard {
          self.state.serialize_mods(xkb::STATE_MODS_LOCKED),
          self.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE)]
     }
+
+    #[allow(dead_code)]
+    pub fn reset_stuck(&mut self) -> [u32; 4] {
+        for code in 0..256u16 {
+            self.state.update_key((code as u32 + 8).into(), xkb::KeyDirection::Up);
+        }
+        self.modifiers()
+    }
+}
+
+pub fn open_keyboard(path: &std::path::Path) -> Result<Device, String> {
+    let mut device = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    validate_keyboard(&device, path)?;
+    device.set_nonblocking(true).map_err(|e| format!("input nonblocking: {e}"))?;
+    device.grab().map_err(|e| format!("input grab: {e}"))?;
+    eprintln!("TINYLAND_KEYBOARD device={} name={:?}", path.display(), device.name());
+    Ok(device)
+}
+
+#[allow(dead_code)]
+pub fn device_from_fd(fd: std::os::fd::OwnedFd, origin: &str) -> Result<Device, String> {
+    let mut device = Device::from_fd(fd).map_err(|e| format!("input from {origin}: {e}"))?;
+    let keyboard = device.supported_keys().is_some_and(|keys|
+        [KeyCode::KEY_A, KeyCode::KEY_Z, KeyCode::KEY_ENTER].iter().all(|key| keys.contains(*key)));
+    if !keyboard {
+        return Err(format!("input {origin} is not a keyboard"));
+    }
+    device.set_nonblocking(true).map_err(|e| format!("input nonblocking: {e}"))?;
+    device.grab().map_err(|e| format!("input grab: {e}"))?;
+    eprintln!("TINYLAND_KEYBOARD device={origin} name={:?}", device.name());
+    Ok(device)
+}
+
+fn validate_keyboard(device: &Device, path: &std::path::Path) -> Result<(), String> {
+    let keyboard = device.supported_keys().is_some_and(|keys|
+        [KeyCode::KEY_A, KeyCode::KEY_Z, KeyCode::KEY_ENTER].iter().all(|key| keys.contains(*key)));
+    if !keyboard {
+        return Err(format!("input {} is not a keyboard", path.display()));
+    }
+    Ok(())
 }
 
 pub fn discover_keyboards() -> Result<Vec<Device>, String> {
@@ -60,13 +108,11 @@ pub fn discover_keyboards() -> Result<Vec<Device>, String> {
     for entry in entries {
         if !entry.file_name().as_encoded_bytes().starts_with(b"event") { continue; }
         let path = entry.path();
-        let mut device = Device::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let keyboard = device.supported_keys().is_some_and(|keys|
-            [KeyCode::KEY_A, KeyCode::KEY_Z, KeyCode::KEY_ENTER].iter().all(|key| keys.contains(*key)));
-        if !keyboard { continue; }
-        device.set_nonblocking(true).map_err(|e| format!("input nonblocking: {e}"))?;
-        device.grab().map_err(|e| format!("input grab: {e}"))?;
-        eprintln!("TINYLAND_KEYBOARD device={} name={:?}", path.display(), device.name());
+        let device = match open_keyboard(&path) {
+            Ok(device) => device,
+            Err(error) if error.contains("is not a keyboard") => continue,
+            Err(error) => return Err(error),
+        };
         devices.push(device);
     }
     if devices.is_empty() { return Err("no keyboard with alphabetic and enter keys".into()); }
@@ -95,5 +141,18 @@ mod tests {
         assert_eq!(keyboard.state.key_get_utf8(a), "A");
         assert_eq!(keyboard.update(KeyCode::KEY_LEFTSHIFT.code(), false)[0], 0);
         assert_eq!(keyboard.state.key_get_utf8(a), "a");
+    }
+
+    #[test]
+    fn reset_clears_depressed_modifiers_for_resume() {
+        let mut keyboard = Keyboard::new().unwrap();
+        assert_ne!(keyboard.update(KeyCode::KEY_LEFTSHIFT.code(), true)[0], 0);
+        assert_eq!(keyboard.reset_stuck(), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn seat_fd_without_keyboard_is_rejected() {
+        let fd = rustix::fs::memfd_create("tinyland-test", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        assert!(device_from_fd(fd, "test").is_err());
     }
 }
