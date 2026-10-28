@@ -4,11 +4,12 @@
 
 - Goal: Rust seatd on Linux, libseat-compatible; supervised foreground daemon.
 - Base: fork HEAD `bc0e96f` (2026-10-25). C baseline green (3/3).
-- Accepted: R0–R6. R7 functional checks and R8 local delivery pass: 79 tests, strict all-target Clippy, raw oracle goldens, and unmodified C libseat differential against both musl release binaries (aarch64 via QEMU user mode).
+- Complete: R0–R8 local campaign, including N1–N3 guest qualification and the idle gate. Functional evidence: 79 tests, strict all-target Clippy, raw oracle goldens, and unmodified C libseat differential against both musl release binaries (aarch64 via QEMU user mode).
 - Fixed: the OPEN_SEAT timeout was an inactive-client enable expectation. Regressions also cover disconnect index remapping, replacement sockets, malformed-frame panic, current-VT refresh, newest-waiter handoff, backpressure state, signal output scheduling, revocation diagnostics, and failed VT setup rollback.
 - Delivered: Rust-only production daemon; retained client inputs under `oracle/`; historical C daemon rebuilt offline from Git; operating/recovery/difference docs; full-SHA-pinned checkout and pinned CI tools. CI replaces obsolete C-platform pipelines. Owner authorized CI work on 2026-10-28.
-- Pending: idle CPU/wakeup gate, deferred because `perf-gate-ready` reports a busy host. No release or performance-parity claim. Hosted CI has not run because changes remain local; pushing is forbidden.
-- Next: run the ignored idle case with valid before/after host-readiness checks. Observe hosted CI after a separately authorized publication.
+- Performance: five release-mode idle samples passed before/after `perf-gate-ready` checks. Rust and C each consumed 0 CPU ticks and 0 voluntary context-switch increments in every five-second sample. No measurable idle regression at this resolution.
+- Publication: hosted CI has not run because changes remain local; pushing remains forbidden. No publication or external rollout is part of this local closeout.
+- Next: none for local campaign acceptance. Reproduce guest checks with `harness/VM.md` and timing checks with `doc/validation.md` when changing relevant inputs.
 - Qualified: N1 real-VT transitions and close/SIGTERM restoration, N2 virtio DRM/evdev revoke/reopen and master handoff, N3 dwl/foot rendering and keyboard input in an x86_64 KVM guest (Linux 6.6.142-0-virt). Reproduction: `harness/VM.md`. The unidentified R4 single-test failure remains unclassified.
 - Resume: build the oracle first with `sh harness/build_oracle.sh` if absent, then `cargo test --offline --locked`. Details and per-architecture evidence are in `doc/validation.md`.
 
@@ -28,7 +29,7 @@
 
 Owner (2026-10-28):
 
-- O1 VT bar: qualify `SEATD_VTBOUND=0` + VT unit shims locally; real-VT proof is N1 and VT-bound ships labeled experimental until it runs.
+- O1 VT bar: qualify `SEATD_VTBOUND=0` + VT unit shims locally; real-VT proof is N1; its experimental gate was satisfied by the completed guest qualification.
 - O2 Scope: no seatd-launch port, no logind/D-Bus/systemd/polkit, no auth/login/power/supervision, no libseat ABI rewrite.
 - O3 Oracle: fork HEAD `bc0e96f`; C libseat with seatd backend only (`-Dlibseat-logind=disabled -Dlibseat-builtin=disabled`), driven with `LIBSEAT_BACKEND=seatd`.
 - O4 Perf: log numbers per slice; gate only egregious (idle CPU/wakeups >2x C ref, any FD/memory growth under storms); full parity numbers at close.
@@ -80,7 +81,7 @@ Serial R0→R8 on `master`. Attempt limit 3, then park with cause + retry condit
 - Delivery: musl builds both arches locally; CI minimal with full-SHA pins; docs complete; C daemon deleted with liveness evidence; independent completion-review P1/P2 findings resolved.
 - Never: production-ready claims without N1+N2 run; host-console/GPU/input testing; pushes.
 
-## Guest qualification
+## Completed guest qualification
 
 - N1 real-VT proof: VT-capable QEMU guest, VT-bound switch + release/acquire + restore; qualify through the guest console. Passed on 2026-10-28 in the documented guest.
 - N2 virtual-device qualification: disposable VM with virtio DRM/input, open/revoke/reopen observable via a `simpletest`-equivalent; fake-ioctl success never counts.

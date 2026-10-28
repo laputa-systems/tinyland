@@ -62,7 +62,7 @@ after the measurement:
 
 ```sh
 perf-gate-ready
-cargo test --offline --locked --test storm storm_idle_parity_with_oracle -- --ignored --exact --nocapture
+cargo test --offline --locked --release --test storm storm_idle_parity_with_oracle -- --ignored --exact --nocapture
 perf-gate-ready -1
 ```
 
@@ -99,8 +99,9 @@ R4 report.
 ## Local delivery results
 
 On 2026-10-28, the pinned toolchain and locked dependencies passed 79 tests.
-One idle timing test remained ignored because the host was busy. Strict
-Clippy passed with warnings denied. Both retained C unit tests passed after
+The normal suite ignores the idle timing case. That case subsequently passed
+five release-mode samples with valid readiness checks. Strict Clippy passed
+with warnings denied. Both retained C unit tests passed after
 a fresh oracle rebuild.
 
 Both musl release binaries built with `mold` and reported version `0.9.3`.
@@ -126,3 +127,17 @@ measurement deferred until a separate host-ready run.
 Workflow YAML, embedded shell syntax, and the explicit musl target
 configuration were checked locally. Hosted CI has not run: these changes
 have not been pushed.
+
+## Idle gate result
+
+Five release-mode samples passed the default host-readiness check before
+each run and the `-1` check immediately afterward. Each sample observed both
+daemons over five seconds. Rust and the C reference both recorded zero CPU
+ticks and zero voluntary context-switch increments in every sample: median
+0, range 0–0 for each counter.
+
+This passes the idle CPU/wakeup regression gate at the counters' resolution.
+It establishes no throughput, startup-latency, or busy-workload speedup.
+The byte, descriptor, and memory storm checks remain separate functional
+resource gates. Earlier samples attempted while readiness checks failed were
+discarded and are not part of these results.
