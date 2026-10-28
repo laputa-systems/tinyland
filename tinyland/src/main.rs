@@ -7,9 +7,10 @@ mod shell;
 mod shm;
 mod surface;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 fn usage() -> &'static str {
-    "usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N]"
+    "usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]"
 }
 
 fn argument_error(message: &str) -> ! {
@@ -28,8 +29,17 @@ fn main() {
     let mut drm_device: PathBuf = PathBuf::from("/dev/dri/card0");
     let mut width: u32 = 1024;
     let mut height: u32 = 768;
+    let mut socket_name = OsString::from("wayland-0");
+    let mut command: Vec<OsString> = Vec::new();
     while let Some(a) = args.next() {
-        match a.to_str().unwrap_or_else(|| argument_error("option must be UTF-8")) {
+        if a == "--" {
+            for rest in args.by_ref() {
+                command.push(rest);
+            }
+            break;
+        }
+        let text = a.to_str().unwrap_or_else(|| argument_error("option must be UTF-8")).to_string();
+        match text.as_str() {
             "--drm-proof" => mode = "drm-proof",
             "--wayland-pixels" => mode = "wayland-pixels",
             "--smoke" => mode = "smoke",
@@ -42,20 +52,30 @@ fn main() {
             "--height" => {
                 height = args.next().and_then(|value| value.to_str().and_then(|value| value.parse().ok())).unwrap_or_else(|| argument_error("invalid --height: expected unsigned integer"));
             }
+            "--socket" => {
+                socket_name = args.next().unwrap_or_else(|| argument_error("missing --socket value"));
+            }
             "--help" | "-h" => {
                 println!("{}", usage());
                 return;
             }
-            other => {
+            other if other.starts_with("--") => {
                 eprintln!("unknown arg: {other}\n{}", usage());
                 std::process::exit(2);
+            }
+            _ => {
+                command.push(OsString::from(text));
+                for rest in args.by_ref() {
+                    command.push(rest);
+                }
+                break;
             }
         }
     }
 
     let code = match mode {
         "drm-proof" => output::drm_proof(&drm_device, width, height, &shutdown),
-        "wayland-pixels" | "smoke" => server::run(mode, &drm_device, width, height, &shutdown),
+        "wayland-pixels" | "smoke" => server::run(mode, &drm_device, width, height, &socket_name, &command, &shutdown),
         _ => {
             eprintln!("unknown mode");
             1

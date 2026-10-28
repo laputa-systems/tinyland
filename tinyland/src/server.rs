@@ -695,7 +695,15 @@ fn now_ms() -> u32 {
     (ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000) as u32
 }
 
-pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32, shutdown: &crate::shutdown::Shutdown) -> i32 {
+pub fn run(
+    mode: &str,
+    device: &std::path::Path,
+    width: u32,
+    height: u32,
+    socket_name: &std::ffi::OsString,
+    command: &[std::ffi::OsString],
+    shutdown: &crate::shutdown::Shutdown,
+) -> i32 {
     let mut output = match DrmOutput::open(device, width, height) {
         Ok(o) => o,
         Err(e) => {
@@ -726,16 +734,22 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32, shutdo
     dh.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
     dh.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
 
-    let socket = match ListeningSocket::bind("wayland-0") {
+    let socket_name_str = socket_name.to_string_lossy().into_owned();
+    let socket = match ListeningSocket::bind(socket_name_str.as_str()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("socket bind failed: {e:?}");
             return 1;
         }
     };
-    let sock_name = socket.socket_name().map(|s| s.to_string_lossy().into_owned());
+    let sock_name = socket
+        .socket_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or(socket_name_str.clone());
     eprintln!("TINYLAND_SOCKET {sock_name:?}");
     eprintln!("TINYLAND_COMPOSITOR_READY");
+
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
 
     let keyboard = match Keyboard::new() {
         Ok(keyboard) => keyboard,
@@ -747,7 +761,7 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32, shutdo
     };
     let mut state = State::new(dh.clone(), (w, h), keyboard);
 
-    let mut app = match spawn_app(mode) {
+    let mut app = match spawn_app(mode, runtime_dir.as_str(), sock_name.as_str(), command) {
         Ok(app) => app,
         Err(error) => { eprintln!("foot spawn failed: {error}"); return 1; }
     };
@@ -844,14 +858,26 @@ impl Drop for App {
     }
 }
 
-fn spawn_app(mode: &str) -> std::io::Result<App> {
+fn spawn_app(mode: &str, runtime_dir: &str, socket_name: &str, command: &[std::ffi::OsString]) -> std::io::Result<App> {
+    if !command.is_empty() {
+        eprintln!("TINYLAND_SPAWN_COMMAND command={command:?}");
+        let child = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("XDG_RUNTIME_DIR", runtime_dir)
+            .env("WAYLAND_DISPLAY", socket_name)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+        return Ok(App(Some(child)));
+    }
     let test_arg = if mode == "wayland-pixels" { "wayland-pixels" } else { "smoke" };
-    eprintln!("TINYLAND_SPAWN_FOOT mode={test_arg}");
+    eprintln!("TINYLAND_SPAWN_FOOT mode={test_arg} (legacy fallback)");
     let child = std::process::Command::new("foot")
         .arg("/usr/local/bin/guest-test")
         .arg(test_arg)
-        .env("XDG_RUNTIME_DIR", "/tmp")
-        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("WAYLAND_DISPLAY", socket_name)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())

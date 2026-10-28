@@ -9,7 +9,11 @@ export XDG_RUNTIME_DIR=/tmp
 MODE="${TINYLAND_MODE:-drm-proof}"
 export TINYLAND_FAULT="${TINYLAND_FAULT:-none}"
 echo "TINYLAND_BOOT mode=$MODE fault=$TINYLAND_FAULT" > /dev/console
-set -- /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768
+if [ "$MODE" = drm-proof ]; then
+  set -- /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768 --socket wayland-0
+else
+  set -- /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768 --socket wayland-0 -- foot /usr/local/bin/guest-test "$MODE"
+fi
 if [ "$TINYLAND_FAULT" = atomic-unsupported ]; then
   set -- strace -qq -e trace=ioctl -e inject=ioctl:error=ENOSYS:when=3 -o /dev/ttyS1 "$@"
 fi
