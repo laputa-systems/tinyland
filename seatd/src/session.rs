@@ -119,14 +119,12 @@ fn flush_client(conn: &mut Conn) -> Result<(), i32> {
 
 fn send_enable(conn: &mut Conn) -> Result<(), i32> {
     send_simple(conn, SERVER_ENABLE_SEAT)?;
-    conn.flush()?;
-    Ok(())
+    flush_client(conn)
 }
 
 fn send_disable(conn: &mut Conn) -> Result<(), i32> {
     send_simple(conn, SERVER_DISABLE_SEAT)?;
-    conn.flush()?;
-    Ok(())
+    flush_client(conn)
 }
 
 pub fn seat_add_client(
@@ -165,6 +163,7 @@ fn seat_add_client_assign(
         if cur == -1 {
             return Err(libc::EINVAL);
         }
+        seat.cur_vt = cur;
         if seat.active_client.is_some() {
             for c in seat.clients.iter() {
                 if slots[*c].client.session == cur {
@@ -191,7 +190,7 @@ fn seat_add_client_assign(
         slots[idx].client.session = next;
     }
     slots[idx].client.seat = Some(0);
-    seat.clients.push(idx);
+    seat.clients.insert(0, idx);
     Ok(())
 }
 
@@ -441,12 +440,11 @@ fn handle_open_device(
     size: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
-    if slots[idx].client.seat.is_none() {
+    if slots[idx].client.seat.is_none() || size < 2 {
         return Err(-1);
     }
     let mut msg = [0u8; 2];
     if slots[idx].conn.get(&mut msg).is_err() {
-        eprintln!("DBG open_dev: get msg failed");
         return Err(-1);
     }
     let path_len = u16::from_ne_bytes([msg[0], msg[1]]) as usize;
@@ -743,6 +741,36 @@ mod tests {
     }
 
     #[test]
+    fn session_backpressure_preserves_enable_state() {
+        let (mut seat, mut slots, mut fx) = setup(false, 0);
+        let (a, mut pa) = add_client(&mut slots);
+        let mut queued = 0;
+        let filler = [0x55u8; 1024];
+        loop {
+            let n = unsafe { libc::send(slots[a].conn.raw_fd(), filler.as_ptr().cast(), filler.len(), libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) };
+            if n < 0 {
+                assert_eq!(errno_last(), libc::EAGAIN);
+                break;
+            }
+            assert!(n > 0);
+            queued += n as usize;
+            assert!(queued < 4 * 1024 * 1024);
+        }
+        assert!(matches!(open_seat(&mut seat, &mut slots, a, &mut pa, &mut fx), Outcome::Done));
+        assert_eq!(seat.active_client, Some(a));
+        assert_eq!(slots[a].client.state, ClientState::Active);
+        while queued > 0 {
+            let mut drain = [0u8; 1024];
+            let n = unsafe { libc::recv(pa.raw_fd(), drain.as_mut_ptr().cast(), queued.min(drain.len()), libc::MSG_DONTWAIT) };
+            assert!(n > 0);
+            queued -= n as usize;
+        }
+        slots[a].conn.flush().unwrap();
+        assert_eq!(read_msg(&mut pa).0, SERVER_SEAT_OPENED);
+        assert_eq!(read_msg(&mut pa).0, SERVER_ENABLE_SEAT);
+    }
+
+    #[test]
     fn session_open_assigns_incremental_ids() {
         let (mut seat, mut slots, mut fx) = setup(false, 0);
         let (a, mut pa) = add_client(&mut slots);
@@ -986,6 +1014,22 @@ mod tests {
         assert_eq!(slots[b].client.state, ClientState::Active);
         let (op, _) = read_msg(&mut pb);
         assert_eq!(op, SERVER_ENABLE_SEAT);
+    }
+
+    #[test]
+    fn session_vt_open_during_release_activates_after_ack() {
+        let (mut seat, mut slots, mut fx) = setup(true, 1);
+        let (a, mut pa) = add_client(&mut slots);
+        let (b, mut pb) = add_client(&mut slots);
+        assert!(matches!(open_drain(&mut seat, &mut slots, a, &mut pa, &mut fx, true), Outcome::Done));
+        seat_vt_release(&mut seat, &mut slots, &mut fx);
+        assert_eq!(read_msg(&mut pa).0, SERVER_DISABLE_SEAT);
+        fx.cur_vt = 2;
+        assert!(matches!(open_drain(&mut seat, &mut slots, b, &mut pb, &mut fx, false), Outcome::Done));
+        assert!(matches!(send(&mut seat, &mut slots, a, &mut pa, CLIENT_DISABLE_SEAT, &[], &mut fx), Outcome::Done));
+        assert_eq!(seat.active_client, Some(b));
+        assert_eq!(read_msg(&mut pa).0, SERVER_SEAT_DISABLED);
+        assert_eq!(read_msg(&mut pb).0, SERVER_ENABLE_SEAT);
     }
 
     #[test]

@@ -3,6 +3,8 @@ use seatd::wire::*;
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::process::{Child, Command, Stdio};
 
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Daemon(Child);
 
 impl Drop for Daemon {
@@ -334,5 +336,45 @@ fn check_pair() {
 
 #[test]
 fn differential_transcripts_match_oracle() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     check_pair();
+}
+
+fn automatic_handoff(sock: &str) -> usize {
+    let mut a = ScriptConn { conn: connect(sock) };
+    let mut b = ScriptConn { conn: connect(sock) };
+    let mut c = ScriptConn { conn: connect(sock) };
+    a.send(CLIENT_OPEN_SEAT, &[]);
+    a.recv_all(2);
+    b.send(CLIENT_OPEN_SEAT, &[]);
+    b.recv_all(1);
+    c.send(CLIENT_OPEN_SEAT, &[]);
+    c.recv_all(1);
+    a.send(CLIENT_CLOSE_SEAT, &[]);
+    assert_eq!(a.recv().unwrap().opcode, SERVER_SEAT_CLOSED);
+    let mut pending = [
+        libc::pollfd { fd: b.conn.raw_fd(), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: c.conn.raw_fd(), events: libc::POLLIN, revents: 0 },
+    ];
+    assert!(unsafe { libc::poll(pending.as_mut_ptr(), 2, 2000) } > 0);
+    if pending[0].revents & libc::POLLIN != 0 {
+        assert_eq!(b.recv().unwrap().opcode, SERVER_ENABLE_SEAT);
+        1
+    } else {
+        assert_eq!(c.recv().unwrap().opcode, SERVER_ENABLE_SEAT);
+        2
+    }
+}
+
+#[test]
+fn differential_automatic_handoff_matches_oracle() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let oracle_sock = ".work/tmp/oracle.sock";
+    let oracle = spawn(&oracle_bin(), oracle_sock);
+    let expected = automatic_handoff(oracle_sock);
+    assert_eq!(expected, 2);
+    drop(oracle);
+    let rust_sock = ".work/tmp/diff-handoff.sock";
+    let _rust = spawn(&rust_bin(), rust_sock);
+    assert_eq!(automatic_handoff(rust_sock), expected);
 }

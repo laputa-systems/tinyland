@@ -595,6 +595,20 @@ fn open_unbound_client(sock: &str) -> (Daemon, Raw) {
 }
 
 #[test]
+fn device_short_pipelined_frame_does_not_kill_daemon() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/dev-short-pipeline.sock";
+    let (_d, mut c) = open_unbound_client(sock);
+    let mut survivor = Raw::connect(sock);
+    let mut frames = seatd::wire::Header { opcode: 3, size: 0 }.encode().to_vec();
+    frames.extend_from_slice(&seatd::wire::Header { opcode: 7, size: 0 }.encode());
+    c.s.write_all(&frames).unwrap();
+    c.expect_eof();
+    survivor.send(7, &[]);
+    assert_eq!(survivor.recv().unwrap().0, 0x8007);
+}
+
+#[test]
 fn device_unsupported_paths_are_errors_not_death() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sock = ".work/tmp/dev-unsupported.sock";
