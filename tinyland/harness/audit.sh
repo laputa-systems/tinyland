@@ -1,11 +1,20 @@
 #!/bin/bash
 set -euo pipefail
-echo "== forbidden dep audit =="
-cargo tree -e features 2>/dev/null | grep -Ei 'libwayland|libdrm|mesa|smithay|wlroots|gbm|egl' && { echo "FORBIDDEN DEP PRESENT"; exit 1; } || true
-echo "no forbidden crate names in tree"
-echo "== dynamic libs =="
-if [ -f target/debug/tinyland ]; then
-  ldd target/debug/tinyland || true
+cd "$(dirname "$0")/.."
+mkdir -p .work/tmp
+cargo tree --locked -e features > .work/tmp/features.txt
+if rg -i 'smithay|wlroots|libdrm|mesa|gbm|egl|wayland-backend feature "server_system"|wayland-sys feature "server"' .work/tmp/features.txt; then
+  echo 'FAIL: forbidden compositor dependency'; exit 1
 fi
-echo "== unsafe inventory =="
-grep -rn "unsafe" src/ || echo "no unsafe blocks"
+BINARY=target/x86_64-unknown-linux-musl/debug/tinyland
+readelf -d "$BINARY" > .work/tmp/linker.txt
+if rg -i 'NEEDED.*(wayland|drm|mesa|gbm|egl|pixman|systemd)' .work/tmp/linker.txt; then
+  echo 'FAIL: forbidden linked library'; exit 1
+fi
+cat .work/tmp/linker.txt
+if rg -n '\bunsafe\b' src; then
+  echo 'FAIL: unexpected unsafe code requires inventory review'; exit 1
+fi
+wc -l src/*.rs src/server/*.rs
+wc -c "$BINARY"
+echo AUDIT_OK

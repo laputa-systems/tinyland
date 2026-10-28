@@ -4,13 +4,13 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0–S3. `make smoke` exits 0: real QMP input through evdev and
-wl_keyboard yields `GUEST_GOT_LINE: laputa` + `GUEST_TEXT_OK`; 1280x800 atomic
-scanout, nonblack 0.959, magenta 0.000842. Console, compositor, QEMU, PNG
-artifacts are in `.work/`; QMP quit reaps QEMU. All 12 Rust tests pass.
-Red: none. Next: S4 protocol/lifetime hardening, negative proofs, dependency audit.
-Steering: one writer; actual guest input and rendering are now proven. Harden the
-observed protocol and lifecycle boundaries before final completion review.
+Accepted: S0–S4. Real guest smoke and negative screenshot/text/crash checks
+pass. Protocol tests cover retained buffers, pool growth/truncation, synchronized
+children, serial rejection, callback presentation, destruction, cycles, and
+positioner errors. Feature/link audit passes with zero application unsafe blocks.
+Red: none. Next: S5 remove dead code and complete repository review + final proofs.
+Steering: serial, bounded S4 complete. Finish remaining cleanup and review without
+expanding the feature set. Timing claims remain unmeasured on the busy host.
 
 ## Charter
 

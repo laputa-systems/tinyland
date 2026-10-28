@@ -1,5 +1,4 @@
 #!/bin/bash
-# Build pinned Alpine guest rootfs + disk image + kernel for QEMU proofs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,7 +51,6 @@ cp "$BIN" "$ROOT/usr/local/bin/tinyland"
 
 cat > "$ROOT/init" <<'INIT_EOF'
 #!/bin/sh
-# initramfs already provides /proc /sys /dev (devtmpfs). Do not overmount /dev.
 mount -o remount,rw / 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /tmp
 mount -t devpts none /dev/pts 2>/dev/null || true
@@ -75,16 +73,11 @@ if [ "$MODE" = "drm-proof" ]; then
   cat /sys/kernel/debug/dri/0/state > /dev/console 2>&1 | head -n 60 || true
   echo "=== dri framebuffer ===" > /dev/console
   cat /sys/kernel/debug/dri/0/framebuffer > /dev/console 2>&1 | head -n 20 || true
-  # Hold scanout for the host screendump; host powers us off via QMP.
   sleep 60
   wait $TPID
   echo "TINYLAND_DONE rc=$?" > /dev/console
 elif [ "$MODE" = "wayland-pixels" ] || [ "$MODE" = "smoke" ]; then
-  if [ "$MODE" = "smoke" ]; then
-    ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) 2>&1 | tee /dev/ttyS1 > /dev/console &
-  else
-    ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) > /dev/console 2>&1 &
-  fi
+  ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) 2>&1 | tee /dev/ttyS1 > /dev/console &
   CPID=$!
   sleep 120
   wait "$CPID"
@@ -97,7 +90,6 @@ chmod +x "$ROOT/init"
 
 cat > "$ROOT/usr/local/bin/guest-test" <<'GUEST_EOF'
 #!/bin/sh
-# Guest-side test program launched inside foot's terminal.
 MODE="${1:-smoke}"
 if [ "$MODE" = "wayland-pixels" ]; then
   printf '\033[48;5;201m WAYLAND_PIXELS_MARKER \033[0m\n'

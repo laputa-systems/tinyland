@@ -1,5 +1,3 @@
-use wayland_server::backend::ObjectId;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmFormat {
     Argb8888,
@@ -7,31 +5,43 @@ pub enum ShmFormat {
 }
 
 pub struct ShmPoolData {
-    pub file: std::fs::File,
-    pub mmap: memmap2::Mmap,
+    pub file: std::sync::Arc<std::fs::File>,
     pub size: i64,
 }
 
 impl ShmPoolData {
-    pub fn resize(&mut self, size: i32) -> Result<(), String> {
-        if size as i64 <= self.size {
-            return Err("pool resize must grow".into());
+    pub fn new(file: std::fs::File, size: i32) -> Result<Self, String> {
+        validate_pool_size(size)?;
+        if file.metadata().map_err(|e| format!("pool metadata: {e}"))?.len() < size as u64 {
+            return Err("pool size exceeds backing file".into());
         }
-        // SAFETY: the mapping is read-only, owned by this pool, and only validated buffer ranges are read.
-        let mmap = unsafe { memmap2::MmapOptions::new().len(size as usize).map(&self.file) }
-            .map_err(|e| format!("resize mmap: {e}"))?;
-        self.mmap = mmap;
+        Ok(Self { file: std::sync::Arc::new(file), size: size as i64 })
+    }
+
+    pub fn resize(&mut self, size: i32) -> Result<(), String> {
+        if size as i64 <= self.size { return Err("pool resize must grow".into()); }
+        if self.file.metadata().map_err(|e| format!("pool metadata: {e}"))?.len() < size as u64 {
+            return Err("pool resize exceeds backing file".into());
+        }
         self.size = size as i64;
         Ok(())
     }
 }
 
 pub struct ShmBufferData {
-    pub pool: ObjectId,
+    pub file: std::sync::Arc<std::fs::File>,
     pub offset: i32,
     pub width: i32,
     pub height: i32,
     pub stride: i32,
+    pub format: ShmFormat,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfacePixels {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
     pub format: ShmFormat,
 }
 
@@ -74,19 +84,17 @@ pub fn validate_buffer(
     Ok(())
 }
 
-pub fn read_rows(pool: &memmap2::Mmap, buf: &ShmBufferData) -> Result<Vec<u8>, &'static str> {
-    let need = buf.offset as usize + buf.stride as usize * buf.height as usize;
-    if need > pool.len() {
-        return Err("buffer out of mapping");
-    }
+pub fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
+    use std::os::unix::fs::FileExt;
     let wbytes = buf.width as usize * 4;
     let mut out = vec![0u8; wbytes * buf.height as usize];
     for y in 0..buf.height as usize {
-        let src = buf.offset as usize + y * buf.stride as usize;
+        let src = buf.offset as u64 + y as u64 * buf.stride as u64;
         let dst = y * wbytes;
-        out[dst..dst + wbytes].copy_from_slice(&pool[src..src + wbytes]);
+        buf.file.read_exact_at(&mut out[dst..dst + wbytes], src)
+            .map_err(|e| format!("read shm buffer: {e}"))?;
     }
-    Ok(out)
+    Ok(SurfacePixels { bytes: out, width: buf.width as u32, height: buf.height as u32, format: buf.format })
 }
 
 #[cfg(test)]
@@ -122,20 +130,35 @@ mod tests {
 }
 
 #[cfg(test)]
-mod resize_tests {
+mod lifetime_tests {
     use super::*;
+    use std::os::unix::fs::FileExt;
 
     #[test]
     fn grown_pool_accepts_buffers_in_the_extended_range() {
         let file = tempfile::tempfile().unwrap();
         file.set_len(2304).unwrap();
-        // SAFETY: the test owns the file and keeps its size at least the mapping length.
-        let mmap = unsafe { memmap2::MmapOptions::new().len(2304).map(&file) }.unwrap();
-        let mut pool = ShmPoolData { file, mmap, size: 2304 };
+        let mut pool = ShmPoolData::new(file, 2304).unwrap();
         pool.file.set_len(12096).unwrap();
         pool.resize(12096).unwrap();
-        assert_eq!(pool.mmap.len(), 12096);
         assert!(validate_buffer(pool.size, 9600, 9, 16, 36).is_ok());
         assert!(pool.resize(2304).is_err());
+        assert!(pool.resize(16000).is_err());
+    }
+
+    #[test]
+    fn pool_destruction_keeps_buffers_alive_and_truncation_returns_error() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(24).unwrap();
+        file.write_all_at(&[1, 2, 3, 255, 4, 5, 6, 255], 0).unwrap();
+        file.write_all_at(&[7, 8, 9, 255, 10, 11, 12, 255], 12).unwrap();
+        let pool = ShmPoolData::new(file, 24).unwrap();
+        let buffer = ShmBufferData { file: pool.file.clone(), offset: 0, width: 2, height: 2, stride: 12, format: ShmFormat::Xrgb8888 };
+        drop(pool);
+        let pixels = read_rows(&buffer).unwrap();
+        assert_eq!(pixels.bytes, [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]);
+        buffer.file.set_len(0).unwrap();
+        assert!(read_rows(&buffer).is_err());
+        assert_eq!(pixels.bytes[0], 1);
     }
 }

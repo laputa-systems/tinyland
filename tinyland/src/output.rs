@@ -330,7 +330,7 @@ impl Drop for DrmOutput {
     }
 }
 
-pub fn drm_proof(device: &Path, width: u32, height: u32) -> i32 {
+pub fn drm_proof(device: &Path, width: u32, height: u32, shutdown: &crate::shutdown::Shutdown) -> i32 {
     match DrmOutput::open(device, width, height) {
         Ok(mut out) => {
             let (w, h) = out.size();
@@ -339,11 +339,10 @@ pub fn drm_proof(device: &Path, width: u32, height: u32) -> i32 {
                 return 1;
             }
             println!("DRM_PROOF_OK size={w}x{h} path={}", out.mode_path());
-            // Hold the scanout until killed: exiting would drop DRM master
-            // and the kernel would restore fbcon, blanking our pixels.
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
+            while shutdown.signal().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
+            0
         }
         Err(e) => {
             eprintln!("drm-proof failed: {e}");

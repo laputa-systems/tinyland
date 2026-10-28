@@ -3,15 +3,15 @@ use crate::output::DrmOutput;
 use crate::selection::SelectionState;
 use crate::shell::{ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
-use crate::surface::SurfaceData;
+use crate::surface::{SurfaceData, SurfaceUpdate};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::AsFd;
 use std::sync::Arc;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
 use wayland_server::backend::{ClientData, ClientId, ObjectId};
 use wayland_server::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
-    wl_subcompositor, wl_surface,
+    wl_buffer, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
+    wl_subcompositor,
 };
 use wayland_server::{Display, DisplayHandle, ListeningSocket, Resource};
 
@@ -26,7 +26,6 @@ impl ClientData for UdsClientData {
 
 pub struct State {
     dh: DisplayHandle,
-    output: DrmOutput,
     out_size: (u32, u32),
     serial: u32,
     keyboard: Keyboard,
@@ -43,58 +42,110 @@ pub struct State {
     regions: HashMap<ObjectId, Vec<(i32, i32, i32, i32)>>,
     pending_present: bool,
     mapped_logged: bool,
-    ready_logged: bool,
 }
 
 impl State {
+    fn new(dh: DisplayHandle, out_size: (u32, u32), keyboard: Keyboard) -> Self {
+        Self {
+        dh,
+        out_size,
+        serial: 0,
+        keyboard,
+        surfaces: HashMap::new(),
+        toplevels: HashMap::new(),
+        xdg_surfaces: HashMap::new(),
+        popups: HashSet::new(),
+        subsurfaces: HashMap::new(),
+        pools: HashMap::new(),
+        buffers: HashMap::new(),
+        seats: Vec::new(),
+        outputs: Vec::new(),
+        selection: SelectionState::default(),
+        regions: HashMap::new(),
+        pending_present: false,
+        mapped_logged: false,
+        }
+    }
+
     fn next_serial(&mut self) -> u32 {
         self.serial = self.serial.wrapping_add(1).max(1);
         self.serial
     }
 
-    fn find_surface_by_resource(&self, resource: &wl_surface::WlSurface) -> Option<ObjectId> {
-        let id = resource.id();
-        if self.surfaces.contains_key(&id) {
-            Some(id)
-        } else {
-            None
+    fn synchronized(&self, surf_id: &ObjectId) -> bool {
+        let mut cursor = surf_id;
+        while let Some(surface) = self.surfaces.get(cursor) {
+            if surface.parent.is_some() && surface.subsurface_sync { return true; }
+            match &surface.parent { Some(parent) => cursor = parent, None => break }
         }
+        false
     }
 
     fn apply_commit(&mut self, surf_id: &ObjectId) {
-        let (pending, parent, sync, children) = match self.surfaces.get(surf_id) {
-            Some(s) => (
-                s.pending.clone(),
-                s.parent.clone(),
-                s.subsurface_sync,
-                s.children.clone(),
-            ),
+        let pending = match self.surfaces.get_mut(surf_id) {
+            Some(surface) => std::mem::take(&mut surface.pending),
             None => return,
         };
-        if parent.is_some() && sync {
-            return;
-        }
-        if let Some(s) = self.surfaces.get_mut(surf_id) {
-            if let Some(buf) = pending.buffer {
-                s.current.buffer = buf;
+        if let Some(top_id) = self.toplevel_for_surface(surf_id) {
+            let top = &self.toplevels[&top_id];
+            if matches!(pending.buffer, Some(Some(_))) && (top.last_configure == 0 || top.acked_configure != top.last_configure) {
+                top.xdg_surface.post_error(3u32, "buffer committed before configure ack");
+                return;
             }
-            s.current.scale = pending.scale;
-            s.pending.buffer = None;
-            s.pending.damage_full = false;
+            if top.last_configure == 0 && !matches!(pending.buffer, Some(Some(_))) {
+                let serial = self.next_serial();
+                let top = self.toplevels.get_mut(&top_id).unwrap();
+                use wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                top.resource.configure(self.out_size.0 as i32, self.out_size.1 as i32,
+                    [State::Fullscreen, State::Activated].into_iter().flat_map(|state| (state as u32).to_ne_bytes()).collect());
+                top.xdg_surface.configure(serial);
+                top.last_configure = serial;
+            }
         }
-        for child in children {
-            if let Some(c) = self.surfaces.get(&child) {
-                if c.parent.as_ref() == Some(surf_id) && c.subsurface_sync {
-                    self.apply_commit(&child);
+        let pixels = match pending.buffer {
+            Some(Some(id)) => {
+                let Some((buffer, data)) = self.buffers.get(&id) else {
+                    self.surfaces[surf_id].resource.post_error(0u32, "attached buffer was destroyed before commit");
+                    return;
+                };
+                match shm::read_rows(data) {
+                    Ok(pixels) => { buffer.release(); Some(Some(pixels)) }
+                    Err(error) => { self.surfaces[surf_id].resource.post_error(0u32, error); return; }
                 }
             }
+            Some(None) => Some(None),
+            None => None,
+        };
+        let update = SurfaceUpdate { pixels, callbacks: pending.callbacks };
+        if self.synchronized(surf_id) {
+            self.surfaces.get_mut(surf_id).unwrap().cached.get_or_insert_with(SurfaceUpdate::default).merge(update);
+            return;
         }
-        if self.is_mapped_toplevel(surf_id) {
-            self.pending_present = true;
-        } else if self.toplevel_for_surface(surf_id).is_some() {
+        self.surfaces.get_mut(surf_id).unwrap().apply(update);
+        self.flush_children(surf_id);
+        if let Some(top_id) = self.toplevel_for_surface(surf_id) {
+            if self.surfaces[surf_id].pixels.is_none() {
+                let top = self.toplevels.get_mut(&top_id).unwrap();
+                if top.mapped {
+                    top.mapped = false;
+                    top.last_configure = 0;
+                    top.acked_configure = 0;
+                    self.clear_focus(surf_id);
+                }
+            }
             self.try_map(surf_id);
-        } else if parent.is_some() {
-            self.pending_present = true;
+        }
+        self.pending_present = true;
+    }
+
+    fn flush_children(&mut self, parent: &ObjectId) {
+        let children = self.surfaces[parent].children.clone();
+        for id in children {
+            if let Some(child) = self.surfaces.get_mut(&id) {
+                if let Some(position) = child.pending_pos.take() { child.subsurface_pos = position; }
+                if let Some(update) = child.cached.take() { child.apply(update); }
+            }
+            self.flush_children(&id);
         }
     }
 
@@ -119,7 +170,7 @@ impl State {
         let (has_buffer, acked_ok) = match (self.surfaces.get(surf_id), self.toplevels.get(&top_id))
         {
             (Some(s), Some(t)) => (
-                s.current.buffer.is_some(),
+                s.pixels.is_some(),
                 t.acked_configure >= t.last_configure && t.last_configure > 0,
             ),
             _ => return,
@@ -168,6 +219,18 @@ impl State {
         }
     }
 
+    fn clear_focus(&mut self, id: &ObjectId) {
+        let serial = self.next_serial();
+        for seat in &mut self.seats {
+            if seat.keyboard_focus.as_ref() == Some(id) {
+                if let Some(surface) = self.surfaces.get(id) {
+                    for keyboard in &seat.keyboards { keyboard.leave(serial, &surface.resource); }
+                }
+                seat.keyboard_focus = None;
+            }
+        }
+    }
+
     fn send_keyboard_enter(&mut self, surf_id: &ObjectId, serial: u32) {
         let surface = &self.surfaces[surf_id].resource;
         let [depressed, latched, locked, group] = self.keyboard.modifiers();
@@ -195,103 +258,36 @@ impl State {
         }
     }
 
-    fn present_if_needed(&mut self) {
-        if !self.pending_present {
-            return;
-        }
-        self.pending_present = false;
-        let top_surface = match self
-            .toplevels
-            .values()
-            .find(|t| t.mapped)
-            .map(|t| t.surface.clone())
-        {
-            Some(s) => s,
-            None => return,
-        };
+    fn compose(&self) -> Vec<u8> {
         let (w, h) = self.out_size;
-        let mut fb = vec![0u8; w as usize * h as usize * 4];
-        let mut used_buffers: Vec<ObjectId> = Vec::new();
-        let mut fired: Vec<wl_callback::WlCallback> = Vec::new();
-        self.blit_surface(&top_surface, 0, 0, w, h, &mut fb, &mut used_buffers, &mut fired);
-        if output_present(&mut self.output, &fb, w, h).is_err() {
-            return;
+        let mut fb = vec![0; w as usize * h as usize * 4];
+        if let Some(top) = self.toplevels.values().find(|top| top.mapped) {
+            self.blit_surface(&top.surface, 0, 0, &mut fb);
         }
-        let time = now_ms();
-        for cb in fired {
-            cb.done(time);
-        }
-        for buf_id in used_buffers {
-            if let Some((res, _)) = self.buffers.get(&buf_id) {
-                res.release();
+        fb
+    }
+
+    fn presented(&mut self, time: u32) {
+        let Some(top) = self.toplevels.values().find(|top| top.mapped) else { return; };
+        let mut stack = vec![top.surface.clone()];
+        while let Some(id) = stack.pop() {
+            if let Some(surface) = self.surfaces.get_mut(&id) {
+                for callback in surface.callbacks.drain(..) { callback.done(time); }
+                stack.extend(surface.children.clone());
             }
         }
     }
 
-    fn blit_surface(
-        &mut self,
-        surf_id: &ObjectId,
-        ox: i32,
-        oy: i32,
-        out_w: u32,
-        out_h: u32,
-        fb: &mut [u8],
-        used: &mut Vec<ObjectId>,
-        fired: &mut Vec<wl_callback::WlCallback>,
-    ) {
-        let (buf_id, children, pos) = match self.surfaces.get_mut(surf_id) {
-            Some(s) => {
-                let mut cbs = std::mem::take(&mut s.callbacks);
-                fired.append(&mut cbs);
-                (s.current.buffer.clone(), s.children.clone(), s.subsurface_pos)
-            }
-            None => return,
-        };
-        if let Some(id) = buf_id {
-            let rows = self.buffers.get(&id).and_then(|(_, d)| {
-                self.pools.get(&d.pool).and_then(|p| {
-                    shm::read_rows(&p.mmap, d)
-                        .ok()
-                        .map(|r| (r, d.format, d.width, d.height))
-                })
-            });
-            let rows = match rows {
-                Some(v) => v,
-                None => {
-                    log::warn!("present: missing pool or buffer");
-                    return;
-                }
-            };
-            if rows.2 > 0 {
-                blit_rows(
-                    fb,
-                    out_w,
-                    out_h,
-                    &rows.0,
-                    rows.2 as u32,
-                    rows.3 as u32,
-                    ox + pos.0,
-                    oy + pos.1,
-                    rows.1,
-                );
-                if !used.contains(&id) {
-                    used.push(id);
-                }
-            }
+    fn blit_surface(&self, surf_id: &ObjectId, ox: i32, oy: i32, fb: &mut [u8]) {
+        let Some(surface) = self.surfaces.get(surf_id) else { return; };
+        let x = ox.saturating_add(surface.subsurface_pos.0);
+        let y = oy.saturating_add(surface.subsurface_pos.1);
+        if let Some(pixels) = &surface.pixels {
+            blit_rows(fb, self.out_size.0, self.out_size.1, &pixels.bytes,
+                pixels.width, pixels.height, x, y, pixels.format);
         }
-        for child in children {
-            let (cx, cy) = match self.surfaces.get(&child) {
-                Some(c) => c.subsurface_pos,
-                None => continue,
-            };
-            let _ = (cx, cy);
-            self.blit_surface(&child, ox + pos.0, oy + pos.1, out_w, out_h, fb, used, fired);
-        }
+        for child in &surface.children { self.blit_surface(child, x, y, fb); }
     }
-}
-
-fn output_present(output: &mut DrmOutput, fb: &[u8], w: u32, h: u32) -> Result<(), String> {
-    output.present_pixels(fb, w, h)
 }
 
 fn blit_rows(
@@ -306,13 +302,13 @@ fn blit_rows(
     format: ShmFormat,
 ) {
     for sy in 0..src_h as i32 {
-        let dy = oy + sy;
-        if dy < 0 || dy >= out_h as i32 {
+        let dy = oy as i64 + sy as i64;
+        if dy < 0 || dy >= out_h as i64 {
             continue;
         }
         for sx in 0..src_w as i32 {
-            let dx = ox + sx;
-            if dx < 0 || dx >= out_w as i32 {
+            let dx = ox as i64 + sx as i64;
+            if dx < 0 || dx >= out_w as i64 {
                 continue;
             }
             let s = (sy as usize * src_w as usize + sx as usize) * 4;
@@ -326,9 +322,10 @@ fn blit_rows(
                 }
                 ShmFormat::Argb8888 => {
                     let a = rows[s + 3] as u32;
-                    fb[d] = ((rows[s] as u32 * a / 255) & 0xFF) as u8;
-                    fb[d + 1] = ((rows[s + 1] as u32 * a / 255) & 0xFF) as u8;
-                    fb[d + 2] = ((rows[s + 2] as u32 * a / 255) & 0xFF) as u8;
+                    for channel in 0..3 {
+                        fb[d + channel] = (rows[s + channel] as u32
+                            + fb[d + channel] as u32 * (255 - a) / 255).min(255) as u8;
+                    }
                     fb[d + 3] = 0xFF;
                 }
             }
@@ -342,7 +339,7 @@ fn now_ms() -> u32 {
     (ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000) as u32
 }
 
-pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32 {
+pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32, shutdown: &crate::shutdown::Shutdown) -> i32 {
     let mut output = match DrmOutput::open(device, width, height) {
         Ok(o) => o,
         Err(e) => {
@@ -392,27 +389,7 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
         Ok(devices) => devices,
         Err(error) => { eprintln!("keyboard discovery: {error}"); return 1; }
     };
-    let mut state = State {
-        dh: dh.clone(),
-        output,
-        out_size: (w, h),
-        serial: 0,
-        keyboard,
-        surfaces: HashMap::new(),
-        toplevels: HashMap::new(),
-        xdg_surfaces: HashMap::new(),
-        popups: HashSet::new(),
-        subsurfaces: HashMap::new(),
-        pools: HashMap::new(),
-        buffers: HashMap::new(),
-        seats: Vec::new(),
-        outputs: Vec::new(),
-        selection: SelectionState::default(),
-        regions: HashMap::new(),
-        pending_present: false,
-        mapped_logged: false,
-        ready_logged: false,
-    };
+    let mut state = State::new(dh.clone(), (w, h), keyboard);
 
     let mut app = match spawn_app(mode) {
         Ok(app) => app,
@@ -423,6 +400,7 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let poll_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
+        if shutdown.signal().is_some() { return 0; }
         let mut fds = vec![
             rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
             rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
@@ -466,7 +444,15 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
             eprintln!("dispatch failed: {e}");
             return 1;
         }
-        state.present_if_needed();
+        if state.pending_present {
+            let pixels = state.compose();
+            if let Err(error) = output.present_pixels(&pixels, w, h) {
+                eprintln!("present failed: {error}");
+                return 1;
+            }
+            state.pending_present = false;
+            state.presented(now_ms());
+        }
         if let Err(e) = display.flush_clients() {
             eprintln!("flush failed: {e}");
             return 1;
@@ -514,3 +500,6 @@ fn spawn_app(mode: &str) -> std::io::Result<App> {
 }
 
 mod dispatch_impl;
+
+#[cfg(test)]
+mod tests;

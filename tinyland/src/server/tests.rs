@@ -1,0 +1,222 @@
+use super::*;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use wayland_server::{Client, Resource};
+use wayland_server::protocol::{wl_surface, wl_shm_pool};
+
+struct Fixture {
+    display: Display<State>,
+    state: State,
+    client: Client,
+    socket: UnixStream,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let display = Display::new().unwrap();
+        let mut dh = display.handle();
+        let (socket, server) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let client = dh.insert_client(server, Arc::new(UdsClientData)).unwrap();
+        let state = State::new(dh, (2, 1), Keyboard::new().unwrap());
+        Self { display, state, client, socket }
+    }
+
+    fn surface(&mut self) -> wl_surface::WlSurface {
+        let surface = self.client.create_resource::<wl_surface::WlSurface, (), State>(&self.state.dh, 4, ()).unwrap();
+        self.state.surfaces.insert(surface.id(), SurfaceData::new(surface.clone()));
+        surface
+    }
+
+    fn request(&mut self, object: &impl Resource, opcode: u16, args: &[u32]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(object.id().protocol_id().to_ne_bytes());
+        bytes.extend((((8 + args.len() * 4) as u32) << 16 | opcode as u32).to_ne_bytes());
+        for arg in args { bytes.extend(arg.to_ne_bytes()); }
+        self.socket.write_all(&bytes).unwrap();
+        self.display.dispatch_clients(&mut self.state).unwrap();
+        self.display.flush_clients().unwrap();
+        let mut response = Vec::new();
+        match self.socket.read_to_end(&mut response) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("read response: {error}"),
+        }
+        response
+    }
+
+    fn buffer(&mut self, bytes: &[u8]) -> wl_buffer::WlBuffer {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(bytes.len() as u64).unwrap();
+        std::os::unix::fs::FileExt::write_all_at(&file, bytes, 0).unwrap();
+        let buffer = self.client.create_resource::<wl_buffer::WlBuffer, (), State>(&self.state.dh, 1, ()).unwrap();
+        self.state.buffers.insert(buffer.id(), (buffer.clone(), ShmBufferData {
+            file: Arc::new(file), offset: 0, width: 2, height: 1, stride: 8, format: ShmFormat::Xrgb8888,
+        }));
+        buffer
+    }
+
+    fn toplevel(&mut self, surface: &wl_surface::WlSurface) -> wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface {
+        use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
+        let xdg = self.client.create_resource::<xdg_surface::XdgSurface, (), State>(&self.state.dh, 1, ()).unwrap();
+        self.state.xdg_surfaces.insert(xdg.id(), XdgSurfaceData::new(xdg.clone(), surface.id()));
+        let top = self.client.create_resource::<xdg_toplevel::XdgToplevel, (), State>(&self.state.dh, 1, ()).unwrap();
+        let mut data = ToplevelData::new(top.clone(), xdg.clone(), surface.id());
+        data.last_configure = 7;
+        self.state.toplevels.insert(top.id(), data);
+        xdg
+    }
+}
+
+#[test]
+fn synchronized_child_waits_for_parent_and_preserves_uncommitted_state() {
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    f.state.surfaces.get_mut(&parent.id()).unwrap().children.push(child.id());
+    f.state.surfaces.get_mut(&child.id()).unwrap().parent = Some(parent.id());
+    let buffer = f.buffer(&[1; 8]);
+    f.request(&child, 1, &[buffer.id().protocol_id(), 0, 0]);
+    f.request(&child, 6, &[]);
+    assert!(f.state.surfaces[&child.id()].pixels.is_none());
+    let pending = f.buffer(&[2; 8]);
+    f.request(&child, 1, &[pending.id().protocol_id(), 0, 0]);
+    f.request(&parent, 6, &[]);
+    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [1; 8]);
+    assert!(f.state.surfaces[&child.id()].pending.buffer.is_some());
+    f.request(&child, 6, &[]);
+    f.request(&parent, 6, &[]);
+    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [2; 8]);
+}
+
+#[test]
+fn release_allows_client_reuse_without_changing_retained_pixels() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let buffer = f.buffer(&[1, 2, 3, 255, 4, 5, 6, 255]);
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    let release = f.request(&surface, 6, &[]);
+    assert_eq!(&release[..4], &buffer.id().protocol_id().to_ne_bytes());
+    f.state.buffers[&buffer.id()].1.file.set_len(0).unwrap();
+    f.request(&buffer, 0, &[]);
+    assert_eq!(f.state.surfaces[&surface.id()].pixels.as_ref().unwrap().bytes,
+        [1, 2, 3, 255, 4, 5, 6, 255]);
+}
+
+#[test]
+fn frame_callbacks_wait_for_commit_and_successful_presentation() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    f.request(&xdg, 4, &[7]);
+    let buffer = f.buffer(&[1; 8]);
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    let pending = f.request(&surface, 3, &[2]);
+    assert!(pending.is_empty());
+    f.state.presented(100);
+    assert!(f.state.surfaces[&surface.id()].callbacks.is_empty());
+    f.request(&surface, 6, &[]);
+    assert_eq!(f.state.surfaces[&surface.id()].callbacks.len(), 1);
+    f.state.compose();
+    assert_eq!(f.state.surfaces[&surface.id()].callbacks.len(), 1);
+    f.state.presented(123);
+    assert!(f.state.surfaces[&surface.id()].callbacks.is_empty());
+    f.display.flush_clients().unwrap();
+    let mut response = Vec::new();
+    let _ = f.socket.read_to_end(&mut response);
+    assert_eq!(&response[..12], &[2u32.to_ne_bytes(), (12u32 << 16).to_ne_bytes(), 123u32.to_ne_bytes()].concat());
+}
+
+#[test]
+fn invalid_configure_serial_posts_protocol_error() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    let response = f.request(&xdg, 4, &[6]);
+    assert_eq!(&response[..4], &1u32.to_ne_bytes());
+    assert!(String::from_utf8_lossy(&response).contains("unknown configure serial"));
+}
+
+#[test]
+fn invalid_stride_disconnects_client_instead_of_creating_buffer() {
+    let mut f = Fixture::new();
+    let pool = f.client.create_resource::<wl_shm_pool::WlShmPool, (), State>(&f.state.dh, 1, ()).unwrap();
+    let file = tempfile::tempfile().unwrap();
+    file.set_len(16).unwrap();
+    f.state.pools.insert(pool.id(), ShmPoolData::new(file, 16).unwrap());
+    let response = f.request(&pool, 0, &[2, 0, 2, 2, 4, 1]);
+    assert!(String::from_utf8_lossy(&response).contains("stride smaller than row"));
+    assert!(f.state.buffers.is_empty());
+}
+
+#[test]
+fn destroying_child_detaches_parent_and_clears_keyboard_focus() {
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    f.state.surfaces.get_mut(&parent.id()).unwrap().children.push(child.id());
+    f.state.surfaces.get_mut(&child.id()).unwrap().parent = Some(parent.id());
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    let mut seat = SeatData::new(seat);
+    seat.keyboard_focus = Some(child.id());
+    f.state.seats.push(seat);
+    f.request(&child, 0, &[]);
+    assert!(!f.state.surfaces.contains_key(&child.id()));
+    assert!(f.state.surfaces[&parent.id()].children.is_empty());
+    assert!(f.state.seats[0].keyboard_focus.is_none());
+}
+
+#[test]
+fn premultiplied_argb_blends_over_existing_pixels_and_clips() {
+    let mut fb = vec![100, 80, 60, 255, 100, 80, 60, 255];
+    blit_rows(&mut fb, 2, 1, &[20, 30, 40, 128, 20, 30, 40, 128], 2, 1, -1, 0, ShmFormat::Argb8888);
+    assert_eq!(fb, [69, 69, 69, 255, 100, 80, 60, 255]);
+    blit_rows(&mut fb, 2, 1, &[255; 8], 2, 1, i32::MAX, i32::MAX, ShmFormat::Xrgb8888);
+    assert_eq!(fb[4..], [100, 80, 60, 255]);
+}
+
+#[test]
+fn buffer_commit_before_configure_ack_is_a_protocol_error() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    f.toplevel(&surface);
+    let buffer = f.buffer(&[1; 8]);
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    let response = f.request(&surface, 6, &[]);
+    assert!(String::from_utf8_lossy(&response).contains("buffer committed before configure ack"));
+}
+
+#[test]
+fn subsurface_parent_cycle_is_rejected_without_recursion() {
+    use wayland_server::protocol::wl_subcompositor;
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, child.id().protocol_id(), parent.id().protocol_id()]);
+    let response = f.request(&sub, 1, &[3, parent.id().protocol_id(), child.id().protocol_id()]);
+    assert!(String::from_utf8_lossy(&response).contains("subsurface parent cycle"));
+}
+
+#[test]
+fn positioner_rejects_nonpositive_size_without_panicking() {
+    let mut f = Fixture::new();
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&base, 1, &[2]);
+    let mut bytes = Vec::new();
+    for word in [2u32, 16u32 << 16 | 1, 0, 4] { bytes.extend(word.to_ne_bytes()); }
+    f.socket.write_all(&bytes).unwrap();
+    f.display.dispatch_clients(&mut f.state).unwrap();
+    f.display.flush_clients().unwrap();
+    let mut response = Vec::new();
+    let _ = f.socket.read_to_end(&mut response);
+    assert!(String::from_utf8_lossy(&response).contains("positioner size must be positive"));
+}
+
+#[test]
+fn app_owner_kills_and_reaps_child_on_early_return() {
+    let child = std::process::Command::new("sh").args(["-c", "kill -STOP $$"]).spawn().unwrap();
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    drop(App(Some(child)));
+    assert!(matches!(rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()), Err(rustix::io::Errno::CHILD)));
+}

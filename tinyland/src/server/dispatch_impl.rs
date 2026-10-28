@@ -4,8 +4,7 @@ use crate::shell::{ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat};
 use crate::surface::SurfaceData;
 use std::os::unix::io::OwnedFd;
-use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
-use wayland_server::backend::ObjectId;
+use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
     wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_region, wl_seat,
@@ -106,23 +105,14 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
             wl_surface::Request::Attach { buffer, x, y } => {
                 if let Some(s) = state.surfaces.get_mut(&id) {
                     s.pending.buffer = Some(buffer.map(|b| b.id()));
-                    s.pending.offset = (x, y);
+                    let _ = (x, y);
                 }
             }
-            wl_surface::Request::Damage { .. } => {
-                if let Some(s) = state.surfaces.get_mut(&id) {
-                    s.pending.damage_full = true;
-                }
-            }
-            wl_surface::Request::DamageBuffer { .. } => {
-                if let Some(s) = state.surfaces.get_mut(&id) {
-                    s.pending.damage_full = true;
-                }
-            }
+            wl_surface::Request::Damage { .. } | wl_surface::Request::DamageBuffer { .. } => {}
             wl_surface::Request::Frame { callback: cb_id } => {
                 let cb = data_init.init(cb_id, ());
                 if let Some(s) = state.surfaces.get_mut(&id) {
-                    s.callbacks.push(cb);
+                    s.pending.callbacks.push(cb);
                 }
             }
             wl_surface::Request::SetOpaqueRegion { .. } => {}
@@ -148,14 +138,9 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                     );
                     return;
                 }
-                if let Some(s) = state.surfaces.get_mut(&id) {
-                    s.pending.scale = scale;
-                }
             }
             wl_surface::Request::Offset { x, y } => {
-                if let Some(s) = state.surfaces.get_mut(&id) {
-                    s.pending.offset = (x, y);
-                }
+                let _ = (x, y);
             }
             wl_surface::Request::Destroy => {}
             _ => {}
@@ -170,6 +155,12 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
     ) {
         let id = resource.id();
         if let Some(s) = state.surfaces.remove(&id) {
+            if let Some(parent) = s.parent {
+                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.children.retain(|child| child != &id); }
+            }
+            for seat in &mut state.seats {
+                if seat.keyboard_focus.as_ref() == Some(&id) { seat.keyboard_focus = None; }
+            }
             for child in s.children {
                 if let Some(c) = state.surfaces.get_mut(&child) {
                     c.parent = None;
@@ -177,6 +168,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
             }
         }
         state.toplevels.retain(|_, t| t.surface != id);
+        state.pending_present = true;
     }
 }
 
@@ -216,6 +208,14 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                 }
                 let sub = data_init.init(id, ());
                 let sub_id = sub.id();
+                let mut ancestor = Some(parent_id.clone());
+                while let Some(id) = ancestor {
+                    if id == surf_id {
+                        _resource.post_error(wl_subcompositor::Error::BadSurface as u32, "subsurface parent cycle");
+                        return;
+                    }
+                    ancestor = state.surfaces.get(&id).and_then(|surface| surface.parent.clone());
+                }
                 let valid = match (state.surfaces.get(&surf_id), state.surfaces.get(&parent_id)) {
                     (Some(s), Some(p)) => !s.has_role && !p.is_popup,
                     _ => false,
@@ -251,10 +251,6 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
     }
 }
 
-fn _resource_client_surface(state: &State, surf_id: &ObjectId) -> wl_surface::WlSurface {
-    state.surfaces.get(surf_id).map(|s| s.resource.clone()).expect("surface gone")
-}
-
 impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
     fn request(
         state: &mut Self,
@@ -272,7 +268,7 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
         match request {
             wl_subsurface::Request::SetPosition { x, y } => {
                 if let Some(s) = state.surfaces.get_mut(&surf_id) {
-                    s.subsurface_pos = (x, y);
+                    s.pending_pos = Some((x, y));
                 }
             }
             wl_subsurface::Request::SetSync => {
@@ -300,9 +296,14 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
         _data: &(),
     ) {
         if let Some(surf_id) = state.subsurfaces.remove(&resource.id()) {
-            if let Some(s) = state.surfaces.get_mut(&surf_id) {
-                s.parent = None;
+            let parent = state.surfaces.get_mut(&surf_id).and_then(|surface| {
+                surface.cached = None;
+                surface.parent.take()
+            });
+            if let Some(parent) = parent {
+                if let Some(parent) = state.surfaces.get_mut(&parent) { parent.children.retain(|child| child != &surf_id); }
             }
+            state.pending_present = true;
         }
     }
 }
@@ -342,17 +343,12 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
                     }
                 };
                 let file = std::fs::File::from(fd as OwnedFd);
-                // SAFETY: the read-only mapping is retained by the pool and reads use validated buffer ranges.
-                let mmap = match unsafe { memmap2::MmapOptions::new().len(pool_size).map(&file) } {
-                    Ok(m) => m,
-                    Err(_) => {
-                        _resource.post_error(wl_shm::Error::InvalidFd as u32, "mmap failed".to_string());
-                        return;
-                    }
+                let pool_data = match shm::ShmPoolData::new(file, pool_size as i32) {
+                    Ok(pool) => pool,
+                    Err(error) => { _resource.post_error(wl_shm::Error::InvalidFd as u32, error); return; }
                 };
                 let pool = data_init.init(id, ());
-                let pool_id = pool.id();
-                state.pools.insert(pool_id, crate::shm::ShmPoolData { file, mmap, size: size as i64 });
+                state.pools.insert(pool.id(), pool_data);
             }
             _ => {}
         }
@@ -413,7 +409,7 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                     buf_id,
                     (
                         buf,
-                        ShmBufferData { pool: pool_id, offset, width, height, stride, format: fmt },
+                        ShmBufferData { file: state.pools[&pool_id].file.clone(), offset, width, height, stride, format: fmt },
                     ),
                 );
             }
@@ -462,16 +458,7 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
         _data: &(),
     ) {
         state.buffers.remove(&resource.id());
-        for s in state.surfaces.values_mut() {
-            if s.current.buffer.as_ref() == Some(&resource.id()) {
-                s.current.buffer = None;
-            }
-            if let Some(Some(b)) = s.pending.buffer.as_ref().map(|b| b.as_ref()) {
-                if b == &resource.id() {
-                    s.pending.buffer = None;
-                }
-            }
-        }
+
     }
 }
 
@@ -540,7 +527,7 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let seat = data_init.init(resource, ());
-        seat.capabilities(wl_seat::Capability::Pointer | wl_seat::Capability::Keyboard);
+        seat.capabilities(wl_seat::Capability::Keyboard);
         seat.name("seat0".to_string());
         state.seats.push(SeatData::new(seat));
         let _ = client;
@@ -859,6 +846,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
+            xdg_wm_base::Request::CreatePositioner { id } => { data_init.init(id, ()); }
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 route_xdg_wm_base_get_surface(state, resource, id, surface, data_init);
             }
@@ -931,22 +919,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
                 if let Some(x) = state.xdg_surfaces.get_mut(&xsurf_id) {
                     x.has_toplevel = true;
                 }
-                if let Some(s) = state.surfaces.get_mut(&surf_id) {
-                    s.is_toplevel = true;
-                }
-                let serial = state.next_serial();
-                let (w, h) = state.out_size;
-                use wayland_protocols::xdg::shell::server::xdg_toplevel::State as TopState;
-                top.configure(
-                    w as i32,
-                    h as i32,
-                    vec![TopState::Maximized as u8, TopState::Fullscreen as u8, TopState::Activated as u8],
-                );
-                resource.configure(serial);
-                if let Some(t) = state.toplevels.get_mut(&top_id) {
-                    t.last_configure = serial;
-                    t.fullscreen = true;
-                }
+
             }
             xdg_surface::Request::GetPopup { id, parent, .. } => {
                 let xsurf_id = resource.id();
@@ -974,7 +947,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
                 }
                 let serial = state.next_serial();
                 resource.configure(serial);
-                log::warn!("xdg_popup mapped at parent origin (kiosk simplification)");
+                popup.popup_done();
             }
             xdg_surface::Request::SetWindowGeometry { x: gx, y: gy, width, height } => {
                 let xsurf_id = resource.id();
@@ -998,7 +971,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
                 let mut mapped_now = false;
                 for t in state.toplevels.values_mut() {
                     if t.surface == surf_id {
-                        if serial == 0 || serial > t.last_configure {
+                        if serial == 0 || serial != t.last_configure || serial == t.acked_configure {
                             resource.post_error(
                                 xdg_surface::Error::InvalidSerial as u32,
                                 "unknown configure serial".to_string(),
@@ -1027,6 +1000,24 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         let id = resource.id();
         if let Some(x) = state.xdg_surfaces.remove(&id) {
             state.toplevels.retain(|_, t| t.surface != x.surface);
+        }
+    }
+}
+
+impl Dispatch<xdg_positioner::XdgPositioner, ()> for State {
+    fn request(
+        _state: &mut Self, _client: &Client, resource: &xdg_positioner::XdgPositioner,
+        request: xdg_positioner::Request, _data: &(), _dh: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_positioner::Request::SetSize { width, height } if width <= 0 || height <= 0 => {
+                resource.post_error(xdg_positioner::Error::InvalidInput as u32, "positioner size must be positive");
+            }
+            xdg_positioner::Request::SetAnchorRect { width, height, .. } if width <= 0 || height <= 0 => {
+                resource.post_error(xdg_positioner::Error::InvalidInput as u32, "anchor rectangle must be positive");
+            }
+            _ => {}
         }
     }
 }

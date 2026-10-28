@@ -1,4 +1,5 @@
 mod input;
+mod shutdown;
 mod output;
 mod selection;
 mod server;
@@ -13,6 +14,10 @@ fn usage() -> &'static str {
 
 fn main() {
     env_logger::init();
+    let shutdown = match shutdown::Shutdown::new() {
+        Ok(shutdown) => shutdown,
+        Err(error) => { eprintln!("signal setup: {error}"); std::process::exit(1); }
+    };
     let mut args = std::env::args().skip(1);
     let mut mode = "smoke";
     let mut drm_device: PathBuf = PathBuf::from("/dev/dri/card0");
@@ -44,12 +49,20 @@ fn main() {
     }
 
     let code = match mode {
-        "drm-proof" => output::drm_proof(&drm_device, width, height),
-        "wayland-pixels" | "smoke" => server::run(mode, &drm_device, width, height),
+        "drm-proof" => output::drm_proof(&drm_device, width, height, &shutdown),
+        "wayland-pixels" | "smoke" => server::run(mode, &drm_device, width, height, &shutdown),
         _ => {
             eprintln!("unknown mode");
             1
         }
     };
+    let signal = shutdown.signal();
+    drop(shutdown);
+    if let Some(signal) = signal {
+        if let Err(error) = signal_hook::low_level::emulate_default_handler(signal) {
+            eprintln!("restore signal {signal}: {error}");
+        }
+        std::process::exit(128 + signal);
+    }
     std::process::exit(code);
 }
