@@ -145,13 +145,18 @@ pub fn discover_keyboards() -> Result<Vec<Device>, String> {
     Ok(devices)
 }
 
-pub fn read_keys(device: &mut Device) -> Result<Vec<(u16, bool)>, String> {
+pub fn read_keys(device: &mut Device) -> Result<Vec<(u16, bool)>, std::io::Error> {
     match device.fetch_events() {
         Ok(events) => Ok(events.filter(|event| event.event_type() == EventType::KEY && event.value() != 2)
             .map(|event| (event.code(), event.value() != 0)).collect()),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-        Err(e) => Err(format!("read keyboard: {e}")),
+        Err(e) => Err(e),
     }
+}
+
+/// True when the read error means the device is gone (unplugged).
+pub fn is_gone(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error())
 }
 
 #[cfg(test)]
@@ -174,6 +179,16 @@ mod tests {
         let mut keyboard = Keyboard::new().unwrap();
         assert_ne!(keyboard.update(KeyCode::KEY_LEFTSHIFT.code(), true)[0], 0);
         assert_eq!(keyboard.reset_stuck(), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn gone_matches_unplug_errno_only() {
+        let gone = std::io::Error::from_raw_os_error(rustix::io::Errno::NODEV.raw_os_error());
+        assert!(is_gone(&gone));
+        assert!(!is_gone(&std::io::Error::from(std::io::ErrorKind::WouldBlock)));
+        assert!(!is_gone(&std::io::Error::from_raw_os_error(
+            rustix::io::Errno::INVAL.raw_os_error()
+        )));
     }
 
     #[test]

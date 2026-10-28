@@ -908,10 +908,25 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                 }
             }
         }
-        for (_, device) in &mut inputs {
+        let mut lost = Vec::new();
+        for (position, (_, device)) in inputs.iter_mut().enumerate() {
             match input::read_keys(device) {
                 Ok(keys) => for (code, down) in keys { state.key(code, down); },
+                Err(error) if input::is_gone(&error) => {
+                    eprintln!("input device lost: {error}");
+                    lost.push(position);
+                }
                 Err(error) => { eprintln!("{error}"); return 1; }
+            }
+        }
+        if !lost.is_empty() {
+            for position in lost.into_iter().rev() {
+                inputs.remove(position);
+            }
+            state.keyboard.reset_stuck();
+            eprintln!("TINYLAND_INPUT_LOST remaining={}", inputs.len());
+            if inputs.is_empty() {
+                return 1;
             }
         }
         if let Err(error) = app.reap() { eprintln!("{error}"); return 1; }
