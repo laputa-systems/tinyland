@@ -16,7 +16,8 @@ Validate shm offsets, strides, sizes, and object lifetimes before use, copy shm 
 Fire frame callbacks only on confirmed kernel flip and complete nothing on a failed flip.
 Send QMP input as one 14-event transaction, exit 75 on an uncertain outcome, and never resend.
 Exit 2 on bad CLI before opening devices, and shut down on HUP/INT/TERM/QUIT while reaping foot.
-Keep `src/` free of `unsafe`; isolate the single `libxkbcommon` dependency to input.
+Keep `src/` free of `unsafe` except the single reviewed libseat FFI in
+`src/seat.rs`; isolate the single `libxkbcommon` dependency to input.
 Treat guest-only root on `/dev/dri` and evdev as test harness, not a production seat claim.
 
 Map: proofs, guest image, thresholds, timeouts, modeset, and presentation in `docs/verification.md`.

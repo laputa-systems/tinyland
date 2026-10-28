@@ -24,6 +24,16 @@ Use libseat built seatd-only (`-Dlibseat-logind=disabled
 No automatic fallback when broker connection fails. Daemon loss never falls
 back to direct open.
 
+`src/seat.rs` is the single `unsafe` module: it links libseat at build
+time (`#[link(name = "seat", kind = "dylib")]`) and declares the eight
+used symbols against the pinned 0.9.3 header (all present in the guest's
+0.8.0). The listener and its state are boxed because libseat keeps the
+listener pointer past the open call; both stay on the owning thread.
+`Session::open` enforces `LIBSEAT_BACKEND=seatd` before touching the
+library. Dispatch runs every main-loop iteration with timeout 0; any
+dispatch error is fatal. The enable path runs only from the suspended
+state, so the initial activation event never double-opens devices.
+
 Seams in tree:
 
 - `src/output.rs`: `DrmOutput::open_from_file` takes broker `OwnedFd`.
@@ -77,10 +87,15 @@ validated compatible output; multimonitor discovery is out of scope.
 Musl binary is static; `readelf -d` shows no `NEEDED` beyond `ld-musl`.
 `libxkbcommon.a` via `-Lnative=.work/guest-root/usr/lib` and
 `XKB_CONFIG_ROOT=.work/guest-root/usr/share/X11/xkb` are proof-only build
-inputs. Release uses system `libxkbcommon` link path and installed XKB data
+inputs. The seat build links libseat dynamically (static musl cannot
+dlopen), so the binary carries `libseat.so.1`, `libelogind.so.0`,
+`libcap.so.2`, and `libgcc_s.so.1` atop the loader; XKB stays statically
+linked. Release uses the system `libseat` link path and installed XKB data
 (`/usr/share/X11/xkb` from `xkeyboard-config`). `TINYLAND_XKB_ROOT` or
 `XKB_CONFIG_ROOT` overrides include path at runtime. Installed artifact must
-run without source checkout or `.work`.
+run without source checkout or `.work`. Host builds need the system
+libseat dev package (`apk add libseat-dev` on Alpine) for
+`.cargo/config.toml`'s `/usr/lib` search path.
 
 ## Gates for `qemu-tinyland-foot`
 
@@ -95,6 +110,12 @@ run without source checkout or `.work`.
 4. Measured dependencies: actual ELF closure shows which packages leave the
    image. Foot keeps pixman, wayland client and cursor, fontconfig, fonts.
    Remove only unreachable packages.
+
+`make seat` proves gates 1 and the device half of 2 in tinyland's own
+guest (Alpine foot 1.17.2, C seatd 0.8.0): denial marker, seat open,
+brokered devices, post-input marker with confirmed presentation. The exact
+Laputa foot/image chain, lifecycle qualification, and dependency
+measurement land with the `qemu-tinyland-foot` Laputa profile.
 
 ## Sequencing
 

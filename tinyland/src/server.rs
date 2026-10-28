@@ -822,6 +822,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
+    let mut suspended = false;
     loop {
         if shutdown.signal().is_some() { return 0; }
         let poll_timeout = match output.as_ref().and_then(|o| o.flip_deadline()) {
@@ -876,11 +877,13 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     eprintln!("seat disable failed: {error}");
                     return 1;
                 }
-            } else if broker.take_enabled() {
+                suspended = true;
+            } else if broker.take_enabled() && suspended {
                 match open_brokered_devices(broker, device, width, height, &mut output, &mut drm_id, &mut inputs) {
                     Ok(()) => {
                         state.keyboard.reset_stuck();
                         state.pending_present = true;
+                        suspended = false;
                     }
                     Err(error) => {
                         eprintln!("seat resume failed: {error}");

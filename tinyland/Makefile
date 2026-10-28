@@ -1,6 +1,6 @@
 QEMU ?= qemu-system-x86_64
 
-.PHONY: smoke drm-proof wayland-pixels check test audit drm-parity negative
+.PHONY: smoke seat drm-proof wayland-pixels check test audit drm-parity negative
 
 check:
 	cargo check --locked
@@ -18,6 +18,10 @@ wayland-pixels:
 
 smoke:
 	bash harness/smoke.sh
+
+seat:
+	bash harness/build-guest.sh 2>&1 | tail -n 5
+	bash harness/seat-proof.sh
 
 audit:
 	bash harness/audit.sh

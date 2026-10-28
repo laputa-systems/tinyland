@@ -1,6 +1,8 @@
 #!/bin/sh
 mount -o remount,rw /
 mkdir -p /dev/pts /dev/shm /tmp
+chown 0:0 /tmp
+chmod 1777 /tmp
 mount -t devpts none /dev/pts
 export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
 modprobe evdev
@@ -9,6 +11,11 @@ export XDG_RUNTIME_DIR=/tmp
 MODE="${TINYLAND_MODE:-drm-proof}"
 export TINYLAND_FAULT="${TINYLAND_FAULT:-none}"
 echo "TINYLAND_BOOT mode=$MODE fault=$TINYLAND_FAULT" > /dev/console
+if [ "$MODE" = seat ]; then
+  /usr/local/bin/seat-proof 2>&1 | tee /dev/ttyS1 > /dev/console
+  echo TINYLAND_POWERING_OFF > /dev/console
+  poweroff -f
+fi
 if [ "$MODE" = drm-proof ]; then
   set -- /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768 --socket wayland-0
 else

@@ -10,7 +10,8 @@ mkdir -p "$ROOT/usr/local/bin"
 cp target/x86_64-unknown-linux-musl/release/tinyland "$ROOT/usr/local/bin/tinyland"
 cp guest/init "$ROOT/init"
 cp guest/test-app "$ROOT/usr/local/bin/guest-test"
-chmod +x "$ROOT/init" "$ROOT/usr/local/bin/guest-test"
+cp guest/seat-proof "$ROOT/usr/local/bin/seat-proof"
+chmod +x "$ROOT/init" "$ROOT/usr/local/bin/guest-test" "$ROOT/usr/local/bin/seat-proof"
 cp "$ROOT/boot/vmlinuz-virt" .work/vmlinuz-virt
 cp "$ROOT/boot/initramfs-virt" .work/initramfs-virt
 echo 'building disk image'

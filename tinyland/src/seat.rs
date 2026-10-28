@@ -1,19 +1,29 @@
 //! Brokered seat devices through the system libseat client, seatd-only.
 //!
-//! libseat.so.1 is opened at runtime so the static musl binary keeps no
-//! client-library link dependency. LIBSEAT_BACKEND must select seatd;
-//! any other backend, a missing library, or a lost daemon is a hard
-//! startup or runtime error, never a silent direct-open fallback.
+//! Links libseat at build time (host provides libseat-dev, the guest image
+//! provides libseat). LIBSEAT_BACKEND must select seatd; any other backend,
+//! a failed open, or a lost daemon is a hard error, never a silent
+//! direct-open fallback.
 //!
-//! This is the only module in src/ that uses unsafe. The surface is one
-//! dlopen handle, seven resolved symbols, and two listener callbacks.
-//! All raw pointers stay inside Session; Session is !Send and !Sync.
+//! This is the only module in src/ that uses unsafe. The surface is eight
+//! declared libseat symbols and two listener callbacks. All raw pointers
+//! stay inside Session; Session is !Send and !Sync.
 
 use core::ffi::{c_char, c_int, c_void};
 use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const RTLD_NOW: c_int = 2;
+#[link(name = "seat", kind = "dylib")]
+extern "C" {
+    fn libseat_open_seat(listener: *const SeatListener, userdata: *mut c_void) -> *mut Libseat;
+    fn libseat_disable_seat(seat: *mut Libseat) -> c_int;
+    fn libseat_close_seat(seat: *mut Libseat) -> c_int;
+    fn libseat_open_device(seat: *mut Libseat, path: *const c_char, fd: *mut c_int) -> c_int;
+    fn libseat_close_device(seat: *mut Libseat, device_id: c_int) -> c_int;
+    fn libseat_seat_name(seat: *mut Libseat) -> *const c_char;
+    fn libseat_get_fd(seat: *mut Libseat) -> c_int;
+    fn libseat_dispatch(seat: *mut Libseat, timeout: c_int) -> c_int;
+}
 
 #[repr(C)]
 struct Libseat {
@@ -21,36 +31,10 @@ struct Libseat {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct SeatListener {
     enable_seat: Option<unsafe extern "C" fn(*mut Libseat, *mut c_void)>,
     disable_seat: Option<unsafe extern "C" fn(*mut Libseat, *mut c_void)>,
-}
-
-extern "C" {
-    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> c_int;
-    fn dlerror() -> *const c_char;
-}
-
-type OpenSeatFn = unsafe extern "C" fn(*const SeatListener, *mut c_void) -> *mut Libseat;
-type IntFn = unsafe extern "C" fn(*mut Libseat) -> c_int;
-type OpenDeviceFn = unsafe extern "C" fn(*mut Libseat, *const c_char, *mut c_int) -> c_int;
-type CloseDeviceFn = unsafe extern "C" fn(*mut Libseat, c_int) -> c_int;
-type GetFdFn = unsafe extern "C" fn(*mut Libseat) -> c_int;
-type DispatchFn = unsafe extern "C" fn(*mut Libseat, c_int) -> c_int;
-type SeatNameFn = unsafe extern "C" fn(*mut Libseat) -> *const c_char;
-
-#[derive(Clone, Copy, Debug)]
-struct Fns {
-    open_seat: OpenSeatFn,
-    disable_seat: IntFn,
-    close_seat: IntFn,
-    open_device: OpenDeviceFn,
-    close_device: CloseDeviceFn,
-    get_fd: GetFdFn,
-    dispatch: DispatchFn,
-    seat_name: SeatNameFn,
 }
 
 #[derive(Debug)]
@@ -76,34 +60,14 @@ fn last_error(context: &str) -> String {
     format!("{context}: {}", std::io::Error::last_os_error())
 }
 
-fn dl_error(context: &str) -> String {
-    // SAFETY: dlerror returns a valid string or null; copy it immediately.
-    let detail = unsafe {
-        let p = dlerror();
-        if p.is_null() {
-            "unknown loader error".to_string()
-        } else {
-            core::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    };
-    format!("{context}: {detail}")
-}
-
-fn cstr(bytes: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(bytes.len() + 1);
-    v.extend_from_slice(bytes);
-    v.push(0);
-    v
-}
-
-/// An open libseat session. Owns the dlopen handle, the listener state,
-/// and the session pointer in drop order: seat closes before its state.
+/// An open libseat session. Owns the listener, its state, and the session
+/// pointer. The listener and state are boxed: libseat keeps the listener
+/// pointer, so both must outlive the session at stable addresses.
 #[derive(Debug)]
 pub struct Session {
     seat: *mut Libseat,
-    fns: Fns,
+    _listener: Box<SeatListener>,
     state: Box<ListenerState>,
-    lib: *mut c_void,
     fd: OwnedFd,
 }
 
@@ -115,14 +79,13 @@ impl Drop for Session {
         // Best effort: the daemon may already be gone.
         // SAFETY: seat was returned by open_seat and not yet closed.
         unsafe {
-            (self.fns.close_seat)(self.seat);
-            dlclose(self.lib);
+            libseat_close_seat(self.seat);
         }
     }
 }
 
 impl Session {
-    /// Require the seatd backend, load libseat, and open the seat.
+    /// Require the seatd backend and open the seat.
     pub fn open() -> Result<Self, String> {
         match std::env::var("LIBSEAT_BACKEND") {
             Ok(selected) if selected == "seatd" => {}
@@ -132,78 +95,31 @@ impl Session {
                 ));
             }
         }
-        // SAFETY: NUL-terminated literal; RTLD_NOW resolves everything now.
-        let lib = unsafe { dlopen(c"libseat.so.1".as_ptr(), RTLD_NOW) };
-        if lib.is_null() {
-            return Err(dl_error("dlopen libseat.so.1"));
-        }
-        let fns: Fns;
-        // SAFETY: NUL-terminated literals; each symbol is checked before use.
-        unsafe {
-            let load = |name: &core::ffi::CStr| -> Result<*mut c_void, String> {
-                let p = dlsym(lib, name.as_ptr());
-                if p.is_null() {
-                    return Err(dl_error(&format!("dlsym {}", name.to_string_lossy())));
-                }
-                Ok(p)
-            };
-            let table = Fns {
-                open_seat: core::mem::transmute::<*mut c_void, OpenSeatFn>(
-                    load(c"libseat_open_seat")?,
-                ),
-                disable_seat: core::mem::transmute::<*mut c_void, IntFn>(
-                    load(c"libseat_disable_seat")?,
-                ),
-                close_seat: core::mem::transmute::<*mut c_void, IntFn>(
-                    load(c"libseat_close_seat")?,
-                ),
-                open_device: core::mem::transmute::<*mut c_void, OpenDeviceFn>(
-                    load(c"libseat_open_device")?,
-                ),
-                close_device: core::mem::transmute::<*mut c_void, CloseDeviceFn>(
-                    load(c"libseat_close_device")?,
-                ),
-                get_fd: core::mem::transmute::<*mut c_void, GetFdFn>(
-                    load(c"libseat_get_fd")?,
-                ),
-                dispatch: core::mem::transmute::<*mut c_void, DispatchFn>(
-                    load(c"libseat_dispatch")?,
-                ),
-                seat_name: core::mem::transmute::<*mut c_void, SeatNameFn>(
-                    load(c"libseat_seat_name")?,
-                ),
-            };
-            fns = table;
-        }
         let mut state = Box::new(ListenerState {
             enabled: AtomicBool::new(false),
             disabled: AtomicBool::new(false),
         });
-        let listener = SeatListener {
+        let listener = Box::new(SeatListener {
             enable_seat: Some(enable_cb),
             disable_seat: Some(disable_cb),
-        };
-        // SAFETY: listener outlives the call; state outlives the session.
+        });
+        // SAFETY: both boxes outlive the session; libseat only reads the
+        // listener through dispatch on this thread.
         let seat = unsafe {
-            (fns.open_seat)(
-                &listener,
+            libseat_open_seat(
+                &*listener,
                 (&mut *state as *mut ListenerState).cast::<c_void>(),
             )
         };
         if seat.is_null() {
-            // SAFETY: seat was never opened; only the library handle leaks
-            // on this path, closed here.
-            unsafe {
-                dlclose(lib);
-            }
             return Err(last_error("libseat_open_seat"));
         }
         // SAFETY: get_fd returns a borrowed daemon fd; dup our own copy.
-        let raw = unsafe { (fns.get_fd)(seat) };
+        let raw = unsafe { libseat_get_fd(seat) };
         if raw < 0 {
+            // SAFETY: seat was just opened and is still ours.
             unsafe {
-                (fns.close_seat)(seat);
-                dlclose(lib);
+                libseat_close_seat(seat);
             }
             return Err(last_error("libseat_get_fd"));
         }
@@ -213,7 +129,7 @@ impl Session {
         let name: String;
         // SAFETY: seat is open; the name is owned by the session.
         unsafe {
-            let p = (fns.seat_name)(seat);
+            let p = libseat_seat_name(seat);
             name = if p.is_null() {
                 "?".into()
             } else {
@@ -223,9 +139,8 @@ impl Session {
         eprintln!("TINYLAND_SEAT_OPEN seat={name}");
         Ok(Self {
             seat,
-            fns,
+            _listener: listener,
             state,
-            lib,
             fd,
         })
     }
@@ -238,7 +153,7 @@ impl Session {
     /// Dispatch pending seat events without waiting. Daemon loss is fatal.
     pub fn dispatch(&self) -> Result<(), String> {
         // SAFETY: seat is open; timeout 0 never blocks.
-        let n = unsafe { (self.fns.dispatch)(self.seat, 0) };
+        let n = unsafe { libseat_dispatch(self.seat, 0) };
         if n < 0 {
             return Err(last_error("libseat_dispatch"));
         }
@@ -258,7 +173,7 @@ impl Session {
     /// Acknowledge a disable event after all seat devices are dropped.
     pub fn acknowledge_disable(&self) -> Result<(), String> {
         // SAFETY: seat is open; caller dropped every device first.
-        let r = unsafe { (self.fns.disable_seat)(self.seat) };
+        let r = unsafe { libseat_disable_seat(self.seat) };
         if r != 0 {
             return Err(last_error("libseat_disable_seat"));
         }
@@ -272,15 +187,13 @@ impl Session {
         if raw.contains(&0) {
             return Err(format!("device path has NUL: {}", path.display()));
         }
-        let arg = cstr(raw);
+        let mut arg = Vec::with_capacity(raw.len() + 1);
+        arg.extend_from_slice(raw);
+        arg.push(0);
         let mut out: c_int = -1;
         // SAFETY: arg is NUL-terminated; out receives the new fd.
         let id = unsafe {
-            (self.fns.open_device)(
-                self.seat,
-                arg.as_ptr() as *const c_char,
-                &mut out,
-            )
+            libseat_open_device(self.seat, arg.as_ptr() as *const c_char, &mut out)
         };
         if id < 0 {
             return Err(format!(
@@ -300,7 +213,7 @@ impl Session {
     /// Release the broker side of a device whose fd was already dropped.
     pub fn close_device(&self, id: i32, origin: &str) -> Result<(), String> {
         // SAFETY: id came from open_device on this session.
-        let r = unsafe { (self.fns.close_device)(self.seat, id) };
+        let r = unsafe { libseat_close_device(self.seat, id) };
         if r != 0 {
             return Err(last_error(&format!("libseat_close_device {origin}")));
         }
@@ -334,33 +247,18 @@ mod tests {
     }
 
     #[test]
-    fn open_without_library_is_a_hard_error() {
+    fn open_without_daemon_is_a_hard_error() {
         let _guard = ENV_LOCK.lock().unwrap();
-        if dlopen_present() {
-            return;
-        }
         let saved = std::env::var_os("LIBSEAT_BACKEND");
         unsafe {
             std::env::set_var("LIBSEAT_BACKEND", "seatd");
+            std::env::remove_var("SEATD_SOCK");
         }
         let err = Session::open().unwrap_err();
         assert!(err.contains("libseat"), "unexpected: {err}");
         match saved {
             Some(v) => unsafe { std::env::set_var("LIBSEAT_BACKEND", v) },
             None => unsafe { std::env::remove_var("LIBSEAT_BACKEND") },
-        }
-    }
-
-    fn dlopen_present() -> bool {
-        // SAFETY: literal only; never dereferenced.
-        let probe = c"libseat.so.1";
-        unsafe {
-            let h = dlopen(probe.as_ptr(), RTLD_NOW);
-            if h.is_null() {
-                return false;
-            }
-            dlclose(h);
-            true
         }
     }
 }
