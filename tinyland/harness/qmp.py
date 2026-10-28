@@ -3,6 +3,7 @@
 import json
 import socket
 import sys
+import time
 
 
 def main():
@@ -45,6 +46,18 @@ def main():
         r = send("system_powerdown")
     elif command == "quit":
         r = send("quit")
+    elif command == "input":
+        for code in ["l", "a", "p", "u", "t", "a", "ret"]:
+            for down in [True, False]:
+                try:
+                    r = send("input-send-event", {"events": [{"type": "key", "data": {
+                        "key": {"type": "qcode", "data": code}, "down": down}}]})
+                except (OSError, EOFError, RuntimeError, ValueError) as error:
+                    print(f"QMP input outcome indeterminate: {error}; do not resend", file=sys.stderr)
+                    return 75
+                if "error" in r:
+                    raise RuntimeError(f"input rejected: {r}")
+                time.sleep(0.04)
     else:
         raise RuntimeError(f"unknown command {command}")
     if "error" in r:
@@ -53,4 +66,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

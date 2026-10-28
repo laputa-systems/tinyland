@@ -540,11 +540,9 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let seat = data_init.init(resource, ());
-        seat.capabilities(wl_seat::Capability::Pointer);
+        seat.capabilities(wl_seat::Capability::Pointer | wl_seat::Capability::Keyboard);
         seat.name("seat0".to_string());
-        if state.seats.is_empty() {
-            state.seats.push(SeatData::new(seat));
-        }
+        state.seats.push(SeatData::new(seat));
         let _ = client;
     }
 }
@@ -562,7 +560,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         match request {
             wl_seat::Request::GetPointer { id } => {
                 let ptr = data_init.init(id, ());
-                if let Some(seat) = state.seats.first_mut() {
+                if let Some(seat) = state.seats.iter_mut().find(|seat| seat.resource == *resource) {
                     seat.pointers.push(ptr.clone());
                 }
                 if let Some(focus) = state
@@ -580,9 +578,15 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
             }
             wl_seat::Request::GetKeyboard { id } => {
                 let kb = data_init.init(id, ());
-                log::warn!("keyboard requested but input arrives in S3; object created without keymap");
-                if let Some(seat) = state.seats.first_mut() {
+                use std::os::fd::AsFd;
+                kb.keymap(wl_keyboard::KeymapFormat::XkbV1, state.keyboard.keymap.as_fd(), state.keyboard.keymap_size);
+                kb.repeat_info(25, 600);
+                if let Some(seat) = state.seats.iter_mut().find(|seat| seat.resource == *resource) {
                     seat.keyboards.push(kb);
+                }
+                if let Some(focus) = state.toplevels.values().find(|top| top.mapped).map(|top| top.surface.clone()) {
+                    let serial = state.next_serial();
+                    state.send_keyboard_enter(&focus, serial);
                 }
             }
             wl_seat::Request::GetTouch { id } => {

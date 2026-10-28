@@ -42,6 +42,8 @@ else
   echo "(packages cached)"
 fi
 
+apk --root "$ROOT" --arch "$ARCH" --allow-untrusted --usermode add libxkbcommon-static=1.7.0-r0
+
 echo "building tinyland (musl)"
 cargo build --locked --target x86_64-unknown-linux-musl 2>&1 | tail -n 3
 BIN="target/x86_64-unknown-linux-musl/debug/tinyland"
@@ -55,6 +57,8 @@ mount -o remount,rw / 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /tmp
 mount -t devpts none /dev/pts 2>/dev/null || true
 export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
+modprobe evdev
+mdev -s
 export XDG_RUNTIME_DIR=/tmp
 MODE="${TINYLAND_MODE:-drm-proof}"
 echo "TINYLAND_BOOT mode=$MODE" > /dev/console
@@ -76,7 +80,11 @@ if [ "$MODE" = "drm-proof" ]; then
   wait $TPID
   echo "TINYLAND_DONE rc=$?" > /dev/console
 elif [ "$MODE" = "wayland-pixels" ] || [ "$MODE" = "smoke" ]; then
-  ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) > /dev/console 2>&1 &
+  if [ "$MODE" = "smoke" ]; then
+    ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) 2>&1 | tee /dev/ttyS1 > /dev/console &
+  else
+    ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) > /dev/console 2>&1 &
+  fi
   CPID=$!
   sleep 120
   wait "$CPID"

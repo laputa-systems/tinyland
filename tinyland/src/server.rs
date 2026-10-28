@@ -1,4 +1,4 @@
-use crate::input::SeatData;
+use crate::input::{self, Keyboard, SeatData};
 use crate::output::DrmOutput;
 use crate::selection::SelectionState;
 use crate::shell::{ToplevelData, XdgSurfaceData};
@@ -29,6 +29,7 @@ pub struct State {
     output: DrmOutput,
     out_size: (u32, u32),
     serial: u32,
+    keyboard: Keyboard,
     surfaces: HashMap<ObjectId, SurfaceData>,
     toplevels: HashMap<ObjectId, ToplevelData>,
     xdg_surfaces: HashMap<ObjectId, XdgSurfaceData>,
@@ -141,10 +142,8 @@ impl State {
                 }
             }
         }
-        for seat in &self.seats {
-            let _ = seat;
-        }
         self.send_pointer_enter(surf_id, serial);
+        self.send_keyboard_enter(surf_id, serial);
         self.pending_present = true;
         if !self.mapped_logged {
             self.mapped_logged = true;
@@ -165,6 +164,33 @@ impl State {
             for ptr in &seat.pointers {
                 ptr.enter(serial, &resource, 0.0, 0.0);
                 ptr.frame();
+            }
+        }
+    }
+
+    fn send_keyboard_enter(&mut self, surf_id: &ObjectId, serial: u32) {
+        let surface = &self.surfaces[surf_id].resource;
+        let [depressed, latched, locked, group] = self.keyboard.modifiers();
+        for seat in &mut self.seats {
+            if seat.resource.client() != surface.client() { continue; }
+            seat.keyboard_focus = Some(surf_id.clone());
+            for keyboard in &seat.keyboards {
+                keyboard.enter(serial, surface, Vec::new());
+                keyboard.modifiers(serial, depressed, latched, locked, group);
+            }
+        }
+    }
+
+    fn key(&mut self, code: u16, down: bool) {
+        let serial = self.next_serial();
+        let [depressed, latched, locked, group] = self.keyboard.update(code, down);
+        for seat in &self.seats {
+            if seat.keyboard_focus.is_none() { continue; }
+            for keyboard in &seat.keyboards {
+                keyboard.key(serial, now_ms(), code as u32, if down {
+                    wayland_server::protocol::wl_keyboard::KeyState::Pressed
+                } else { wayland_server::protocol::wl_keyboard::KeyState::Released });
+                keyboard.modifiers(serial, depressed, latched, locked, group);
             }
         }
     }
@@ -358,11 +384,20 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
     eprintln!("TINYLAND_SOCKET {sock_name:?}");
     eprintln!("TINYLAND_COMPOSITOR_READY");
 
+    let keyboard = match Keyboard::new() {
+        Ok(keyboard) => keyboard,
+        Err(error) => { eprintln!("keyboard init: {error}"); return 1; }
+    };
+    let mut devices = match input::discover_keyboards() {
+        Ok(devices) => devices,
+        Err(error) => { eprintln!("keyboard discovery: {error}"); return 1; }
+    };
     let mut state = State {
         dh: dh.clone(),
         output,
         out_size: (w, h),
         serial: 0,
+        keyboard,
         surfaces: HashMap::new(),
         toplevels: HashMap::new(),
         xdg_surfaces: HashMap::new(),
@@ -379,20 +414,22 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
         ready_logged: false,
     };
 
-    let app_mode = mode.to_string();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        spawn_app(&app_mode);
-    });
+    let mut app = match spawn_app(mode) {
+        Ok(app) => app,
+        Err(error) => { eprintln!("foot spawn failed: {error}"); return 1; }
+    };
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let poll_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
-        let mut fds = [
+        let mut fds = vec![
             rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
             rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
         ];
+        for device in &devices {
+            fds.push(rustix::event::PollFd::new(device, rustix::event::PollFlags::IN));
+        }
         match rustix::event::poll(&mut fds, Some(&poll_timeout)) {
             Ok(_) => {}
             Err(e) => {
@@ -403,6 +440,14 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
                 return 1;
             }
         }
+        drop(fds);
+        for device in &mut devices {
+            match input::read_keys(device) {
+                Ok(keys) => for (code, down) in keys { state.key(code, down); },
+                Err(error) => { eprintln!("{error}"); return 1; }
+            }
+        }
+        if let Err(error) = app.reap() { eprintln!("{error}"); return 1; }
         loop {
             match socket.accept() {
                 Ok(Some(stream)) => {
@@ -429,10 +474,34 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
     }
 }
 
-fn spawn_app(mode: &str) {
+struct App(Option<std::process::Child>);
+
+impl App {
+    fn reap(&mut self) -> Result<(), String> {
+        if let Some(child) = &mut self.0 {
+            if let Some(status) = child.try_wait().map_err(|e| format!("foot wait: {e}"))? {
+                eprintln!("TINYLAND_CHILD_EXIT status={status}");
+                self.0 = None;
+                if !status.success() { return Err(format!("foot exited: {status}")); }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            if let Err(error) = child.kill() { eprintln!("foot cleanup kill: {error}"); }
+            if let Err(error) = child.wait() { eprintln!("foot cleanup wait: {error}"); }
+        }
+    }
+}
+
+fn spawn_app(mode: &str) -> std::io::Result<App> {
     let test_arg = if mode == "wayland-pixels" { "wayland-pixels" } else { "smoke" };
     eprintln!("TINYLAND_SPAWN_FOOT mode={test_arg}");
-    let res = std::process::Command::new("foot")
+    let child = std::process::Command::new("foot")
         .arg("/usr/local/bin/guest-test")
         .arg(test_arg)
         .env("XDG_RUNTIME_DIR", "/tmp")
@@ -440,14 +509,8 @@ fn spawn_app(mode: &str) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
-        .spawn();
-    match res {
-        Ok(mut child) => match child.wait() {
-            Ok(status) => eprintln!("TINYLAND_CHILD_EXIT status={status}"),
-            Err(e) => eprintln!("foot wait failed: {e}"),
-        },
-        Err(e) => eprintln!("foot spawn failed: {e}"),
-    }
+        .spawn()?;
+    Ok(App(Some(child)))
 }
 
 mod dispatch_impl;

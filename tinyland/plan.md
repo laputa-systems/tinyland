@@ -4,12 +4,13 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0, S1, S2. `make wayland-pixels` exits 0: real foot 1.17.2-r0,
-1280x800 atomic scanout, nonblack 0.959, magenta 0.001289, no protocol error,
-QMP quit reaps QEMU. Pool growth regression passes.
-Red: none. Next: S3 evdev keyboard + xkb keymap + full input smoke.
-Steering: serial implementation; protocol tracing isolated ignored shm pool resize
-as the S2 blocker. Growth is implemented; no further S2 retries are needed.
+Accepted: S0–S3. `make smoke` exits 0: real QMP input through evdev and
+wl_keyboard yields `GUEST_GOT_LINE: laputa` + `GUEST_TEXT_OK`; 1280x800 atomic
+scanout, nonblack 0.959, magenta 0.000842. Console, compositor, QEMU, PNG
+artifacts are in `.work/`; QMP quit reaps QEMU. All 12 Rust tests pass.
+Red: none. Next: S4 protocol/lifetime hardening, negative proofs, dependency audit.
+Steering: one writer; actual guest input and rendering are now proven. Harden the
+observed protocol and lifecycle boundaries before final completion review.
 
 ## Charter
 
@@ -53,7 +54,7 @@ Delegated (executor decides, smallest reversible assumption, log it):
 
 - Tree: `plan.md` + `rust-toolchain.toml` only, zero commits. Known red: none yet; executor re-records before S1.
 - Verified 2026-10-28: cage exists and builds on wlroots+xkbcommon (behavioral ref only); `wayland-server` 0.31.14 default backend is Rust; `drm` 0.15.0 bypasses libdrm; laputa repo exists with `boot/ docs/ guest/ system/` dirs; active toolchain `nightly-2026-09-15`; QEMU 11.1.2; `/dev/kvm` + `/dev/dri/card0` present; `foot` absent on host (guest-only).
-- Not verified: foot's exact global-version table; Laputa harness file contents at executor's read time. Executor pins foot source and reads harness files before designing S3.
+- Verified for S3: foot 1.17.2 source requires compositor 4, subcompositor 1, shm 1, xdg shell 1, seat 5; positional command is supported. Laputa reference harness and QMP failure semantics were read before input implementation.
 - Loop timings: `cargo --version` 0.023s; `git status` 0.001s. `cargo check/test`, QEMU boot unmeasured (no code). Time them in S0. Host load ~16.5 on 32 cores at preflight; if `perf-gate-ready -s` reports busy, perf numbers are deferred, never gating.
 
 ## Sequence
