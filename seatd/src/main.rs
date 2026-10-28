@@ -42,12 +42,19 @@ fn main() {
                 );
                 std::process::exit(1);
             } else if !opts.unlink_existing_socket {
-                log_error!("Socket file found at socket path {path}, refusing to start");
+                if admit::probe_live(&path) {
+                    log_error!("Live daemon owns socket path {path}, refusing to start");
+                } else {
+                    log_error!("Stale socket file found at socket path {path}, refusing to start (use -z only after verifying no live daemon)");
+                }
+                std::process::exit(1);
+            } else if admit::probe_live(&path) {
+                log_error!("Live daemon owns socket path {path}, -z refuses to steal it");
                 std::process::exit(1);
             } else {
-                log_info!("Removing leftover socket at {path}");
+                log_info!("Removing stale socket at {path}");
                 if let Err(e) = admit::unlink_path(&path) {
-                    log_error!("Could not remove leftover socket: {e}");
+                    log_error!("Could not remove stale socket: {e}");
                     std::process::exit(1);
                 }
             }
