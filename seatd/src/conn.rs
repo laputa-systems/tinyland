@@ -185,9 +185,9 @@ impl Ring {
         };
         self.copy_out(&mut bytes[..size]);
         let count = size / mem::size_of::<RawFd>();
-        for i in 0..count {
+        for &fd in fds.iter().take(count) {
             unsafe {
-                libc::close(fds[i]);
+                libc::close(fd);
             }
         }
         self.consume(count * mem::size_of::<RawFd>());

@@ -132,16 +132,13 @@ impl Server {
 
     fn handle_listen(&mut self) {
         let listen_fd = self.listen_fd.as_ref().unwrap().as_raw_fd();
-        match admit::accept_client(listen_fd) {
-            Some((fd, creds)) => {
-                self.clients.push(ClientSlot {
-                    conn: Conn::new(fd),
-                    client: Client::fresh(creds.pid, creds.uid, creds.gid),
-                    dead: false,
-                });
-                self.dirty = true;
-            }
-            None => {}
+        if let Some((fd, creds)) = admit::accept_client(listen_fd) {
+            self.clients.push(ClientSlot {
+                conn: Conn::new(fd),
+                client: Client::fresh(creds.pid, creds.uid, creds.gid),
+                dead: false,
+            });
+            self.dirty = true;
         }
     }
 

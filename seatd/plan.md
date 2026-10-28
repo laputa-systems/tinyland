@@ -4,11 +4,12 @@
 
 - Goal: Rust seatd on Linux, libseat-compatible; supervised foreground daemon.
 - Base: fork HEAD `bc0e96f` (2026-10-25). C baseline green (3/3).
-- Accepted: R0–R6 on `master` (`712c49d`; 66 tests green x3, libseat diff OK, oracle transcripts byte-identical).
-- Red: R7 storm tests hang (daemon accepts, never answers first OPEN in test-spawned context; identical manual spawn works). Uncommitted WIP in `harness/storm.rs` + a debug edit in its `spawn_rust`.
-- Parked: N1 real-VT, N2 real-device qualification, N3 compositor smoke.
-- Next: clean strays, revert the `spawn_rust` debug edit, reproduce one storm test alone with daemon debug log, fix, then finish R7 (doc/diffs.md, clippy) and R8.
-- Resume: `git status --short` to see R7 WIP; first command `cargo test --offline --test storm storm_switch`.
+- Accepted: R0–R6. R7 functional checks pass: 69 tests, raw oracle golden, unmodified C libseat differential, Clippy with warnings denied.
+- Fixed: the apparent OPEN_SEAT timeout waited for ENABLE_SEAT on an inactive client. Storms then reproduced stale client indices after disconnect; compaction now remaps seat references. Test children are reaped on panic.
+- Pending: idle CPU/wakeup gate, deferred because `perf-gate-ready` reports a busy host. No release or performance-parity claim.
+- Next: R8 delivery, oracle isolation, both musl builds, docs, and completion review. Finish idle gate when the host is ready.
+- Parked: N1 real-VT, N2 real-device qualification, N3 compositor smoke. The unidentified R4 single-test failure remains unclassified.
+- Resume: `cargo test --offline --locked`; build the oracle first with `harness/libseat_diff.sh` if absent.
 
 ## Charter
 
@@ -51,7 +52,7 @@ Delegated (reversible, no contract change, logged in commit body):
 - Base `bc0e96f`; C suite green: linked_list, connection, poller 3/3 via `uvx meson setup` + `ninja test`.
 - Loop, timed 2026-10-28 under the pinned toolchain: meson setup 0.7s; ninja build 0.2s; ninja test 0.2s; `cc -c` 0.05s; cargo cold 4–5s; cargo incremental 0.14s; per-module `cargo test` in seconds.
 - Foundation proven: exact `u16/u16` NE header layout, socketpair SCM_RIGHTS round-trip with CLOEXEC/NONBLOCK, DRM/EVIOC/HIDIOC ioctl numbers from libc without libdrm (`FOUNDATION-OK` under pinned toolchain).
-- Known red: none. `.work/` ignored via `.gitignore`.
+- `.work/` is ignored through `.git/info/exclude`.
 
 ## Sequence
 

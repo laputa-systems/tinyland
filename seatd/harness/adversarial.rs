@@ -45,7 +45,7 @@ fn spawn_daemon(sock: &str, args: &[&str], capture_stderr: bool) -> (Daemon, Opt
     unsafe {
         libc::close(r);
     }
-    assert_eq!((n, one), (1, [b'\n']), "readiness byte");
+    assert_eq!((n, one), (1, *b"\n"), "readiness byte");
     (Daemon { child, sock: sock.to_string() }, None)
 }
 

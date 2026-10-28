@@ -99,7 +99,7 @@ fn send_error(conn: &mut Conn, code: i32) -> Result<(), i32> {
         size: 4,
     };
     conn.put(&hdr.encode())?;
-    conn.put(&(code as i32).to_ne_bytes())?;
+    conn.put(&code.to_ne_bytes())?;
     Ok(())
 }
 
@@ -131,7 +131,7 @@ fn send_disable(conn: &mut Conn) -> Result<(), i32> {
 
 pub fn seat_add_client(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
 ) -> Result<(), i32> {
     if slots[idx].client.seat.is_some() {
@@ -152,7 +152,7 @@ pub fn seat_add_client(
 
 fn seat_add_client_assign(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -197,7 +197,7 @@ fn seat_add_client_assign(
 
 fn seat_open_client(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -210,9 +210,7 @@ fn seat_open_client(
     }
     let session = slots[idx].client.session;
     if seat.vt_bound {
-        if let Err(e) = fx.vt_open(session) {
-            return Err(e);
-        }
+        fx.vt_open(session)?;
     }
     for dev in 0..slots[idx].client.devices.len() {
         if device::activate_device(slots, idx, dev, fx).is_err() {
@@ -233,16 +231,13 @@ fn seat_open_client(
     Ok(())
 }
 
-fn seat_activate(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut dyn Effect) -> Result<(), i32> {
+fn seat_activate(seat: &mut Seat, slots: &mut [ClientSlot], fx: &mut dyn Effect) -> Result<(), i32> {
     if seat.active_client.is_some() {
         return Ok(());
     }
     let next: Option<usize> = if seat.next_client.is_some() {
-        let n = seat.next_client.take();
-        n
-    } else if seat.clients.is_empty() {
-        return Err(errno_last());
-    } else if seat.vt_bound && seat.cur_vt == -1 {
+        seat.next_client.take()
+    } else if seat.clients.is_empty() || (seat.vt_bound && seat.cur_vt == -1) {
         return Err(errno_last());
     } else if seat.vt_bound {
         let mut found = None;
@@ -267,7 +262,7 @@ fn seat_activate(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut dyn Effe
 
 pub fn seat_remove_client(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) {
@@ -285,12 +280,9 @@ pub fn seat_remove_client(
     }
     let state = slots[idx].client.state;
     let session = slots[idx].client.session;
-    if seat.vt_bound {
-        if was_current && seat.active_client.is_none() {
-            let _ = fx.vt_close(session);
-        } else if !was_current && state != ClientState::Closed {
-            let _ = fx.vt_close(session);
-        }
+    if seat.vt_bound && ((was_current && seat.active_client.is_none())
+        || (!was_current && state != ClientState::Closed)) {
+        let _ = fx.vt_close(session);
     }
     slots[idx].client.state = ClientState::Closed;
     slots[idx].client.seat = None;
@@ -298,7 +290,7 @@ pub fn seat_remove_client(
 
 fn seat_disable_client(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -312,15 +304,13 @@ fn seat_disable_client(
         }
     }
     slots[idx].client.state = ClientState::PendingDisable;
-    if let Err(e) = send_disable(&mut slots[idx].conn) {
-        return Err(e);
-    }
+    send_disable(&mut slots[idx].conn)?;
     Ok(())
 }
 
 fn seat_ack_disable_client(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -338,7 +328,7 @@ fn seat_ack_disable_client(
 
 fn seat_set_next_session(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     session: i32,
     fx: &mut dyn Effect,
@@ -357,9 +347,7 @@ fn seat_set_next_session(
         return Ok(());
     }
     if seat.vt_bound {
-        if let Err(e) = fx.vt_switch(seat.cur_vt, session) {
-            return Err(e);
-        }
+        fx.vt_switch(seat.cur_vt, session)?;
         return Ok(());
     }
     let mut target = None;
@@ -378,7 +366,7 @@ fn seat_set_next_session(
     }
 }
 
-pub fn seat_vt_activate(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut dyn Effect) {
+pub fn seat_vt_activate(seat: &mut Seat, slots: &mut [ClientSlot], fx: &mut dyn Effect) {
     if !seat.vt_bound {
         return;
     }
@@ -392,7 +380,7 @@ pub fn seat_vt_activate(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut d
     }
 }
 
-pub fn seat_vt_release(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut dyn Effect) {
+pub fn seat_vt_release(seat: &mut Seat, slots: &mut [ClientSlot], fx: &mut dyn Effect) {
     if !seat.vt_bound {
         return;
     }
@@ -408,7 +396,7 @@ pub fn seat_vt_release(seat: &mut Seat, slots: &mut Vec<ClientSlot>, fx: &mut dy
 
 fn handle_open_seat(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -434,7 +422,7 @@ fn handle_open_seat(
 
 fn handle_close_seat(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -448,7 +436,7 @@ fn handle_close_seat(
 
 fn handle_open_device(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     size: usize,
     fx: &mut dyn Effect,
@@ -513,7 +501,7 @@ fn memchr_nul(path: &[u8]) -> usize {
 }
 
 fn handle_close_device(
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     size: usize,
     fx: &mut dyn Effect,
@@ -541,7 +529,7 @@ fn handle_close_device(
 
 fn handle_switch_session(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     size: usize,
     fx: &mut dyn Effect,
@@ -564,7 +552,7 @@ fn handle_switch_session(
 
 fn handle_disable_seat(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     fx: &mut dyn Effect,
 ) -> Result<(), i32> {
@@ -579,7 +567,7 @@ fn handle_disable_seat(
     Ok(())
 }
 
-fn handle_ping(slots: &mut Vec<ClientSlot>, idx: usize) -> Result<(), i32> {
+fn handle_ping(slots: &mut [ClientSlot], idx: usize) -> Result<(), i32> {
     send_simple(&mut slots[idx].conn, SERVER_PONG).map_err(|_| -1)?;
     Ok(())
 }
@@ -591,7 +579,7 @@ pub enum Outcome {
 
 pub fn handle_opcode(
     seat: &mut Seat,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     opcode: u16,
     size: usize,
@@ -685,7 +673,7 @@ mod tests {
 
     fn send(
         seat: &mut Seat,
-        slots: &mut Vec<ClientSlot>,
+        slots: &mut [ClientSlot],
         idx: usize,
         peer: &mut Conn,
         opcode: u16,
@@ -726,7 +714,7 @@ mod tests {
 
     fn open_seat(
         seat: &mut Seat,
-        slots: &mut Vec<ClientSlot>,
+        slots: &mut [ClientSlot],
         idx: usize,
         peer: &mut Conn,
         fx: &mut dyn Effect,
@@ -736,7 +724,7 @@ mod tests {
 
     fn open_drain(
         seat: &mut Seat,
-        slots: &mut Vec<ClientSlot>,
+        slots: &mut [ClientSlot],
         idx: usize,
         peer: &mut Conn,
         fx: &mut dyn Effect,
@@ -845,10 +833,10 @@ mod tests {
         let (a, mut pa) = add_client(&mut slots);
         assert!(matches!(open_drain(&mut seat, &mut slots, a, &mut pa, &mut fx, true), Outcome::Done));
         for req in [
-            vec![5u16.to_ne_bytes().to_vec(), b"/x\0\0".to_vec()].concat(),
-            vec![9u16.to_ne_bytes().to_vec(), b"/dev/nullX".to_vec()].concat(),
-            vec![9u16.to_ne_bytes().to_vec()].concat(),
-            vec![0u16.to_ne_bytes().to_vec()].concat(),
+            [5u16.to_ne_bytes().to_vec(), b"/x\0\0".to_vec()].concat(),
+            [9u16.to_ne_bytes().to_vec(), b"/dev/nullX".to_vec()].concat(),
+            [9u16.to_ne_bytes().to_vec()].concat(),
+            [0u16.to_ne_bytes().to_vec()].concat(),
         ] {
             let (c, mut pc) = add_client(&mut slots);
             assert!(matches!(
@@ -877,8 +865,8 @@ mod tests {
     #[test]
     fn session_device_ids_are_client_scoped() {
         let (mut seat, mut slots, mut fx) = setup(false, 0);
-        let (a, _) = add_client(&mut slots);
-        let (b, _) = add_client(&mut slots);
+        let (_a, _) = add_client(&mut slots);
+        let (_b, _) = add_client(&mut slots);
         slots[0].client.state = ClientState::Active;
         slots[0].client.seat = Some(0);
         seat.clients.push(0);

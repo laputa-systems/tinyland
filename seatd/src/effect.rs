@@ -34,10 +34,8 @@ impl Effect for RealEffect {
             if fd < 0 {
                 return Err(errno_now());
             }
-            if dev_type == DeviceType::Drm {
-                if sys::drm_set_master(fd).is_err() {
-                    crate::log_error!("Could not make device fd drm master, continuing");
-                }
+            if dev_type == DeviceType::Drm && sys::drm_set_master(fd).is_err() {
+                crate::log_error!("Could not make device fd drm master, continuing");
             }
             if let Err(e) = validate_opened(fd, path) {
                 libc::close(fd);

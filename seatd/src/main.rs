@@ -75,7 +75,7 @@ fn main() {
     log_info!("seatd started");
 
     if opts.readiness != -1 {
-        let buf: [u8; 1] = [b'\n'];
+        let buf: [u8; 1] = *b"\n";
         let n = unsafe { libc::write(opts.readiness, buf.as_ptr() as *const _, 1) };
         if n != 1 {
             let e = os_error();

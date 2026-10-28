@@ -73,14 +73,10 @@ pub fn parse(argv: &[String], prog: &str) -> Result<Options, i32> {
             continue;
         }
         let mut chars = bytes[1..].iter();
-        loop {
-            let c: u8 = match chars.next() {
-                Some(c) => *c,
-                None => break,
-            };
+        while let Some(&c) = chars.next() {
             let needs_arg = matches!(c, b'n' | b'u' | b'g' | b'l');
             let optarg: Option<String> = if needs_arg {
-                let rest: Vec<u8> = chars.by_ref().map(|c| *c).collect();
+                let rest: Vec<u8> = chars.by_ref().copied().collect();
                 if !rest.is_empty() {
                     Some(String::from_utf8_lossy(&rest).into_owned())
                 } else {

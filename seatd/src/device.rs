@@ -5,7 +5,7 @@ use crate::wire::MAX_SEAT_DEVICES;
 use rustix::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
-pub fn find_device(slots: &Vec<ClientSlot>, idx: usize, device_id: i32) -> Result<usize, i32> {
+pub fn find_device(slots: &[ClientSlot], idx: usize, device_id: i32) -> Result<usize, i32> {
     if device_id == 0 {
         return Err(libc::EINVAL);
     }
@@ -18,7 +18,7 @@ pub fn find_device(slots: &Vec<ClientSlot>, idx: usize, device_id: i32) -> Resul
 }
 
 pub fn deactivate_device(
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     dev: usize,
     fx: &mut dyn Effect,
@@ -38,7 +38,7 @@ pub fn deactivate_device(
     r
 }
 
-pub fn close_device(slots: &mut Vec<ClientSlot>, idx: usize, dev: usize, fx: &mut dyn Effect) {
+pub fn close_device(slots: &mut [ClientSlot], idx: usize, dev: usize, fx: &mut dyn Effect) {
     let dev_rc = slots[idx].client.devices[dev].ref_cnt;
     if dev_rc > 1 {
         slots[idx].client.devices[dev].ref_cnt -= 1;
@@ -57,7 +57,7 @@ pub fn close_device(slots: &mut Vec<ClientSlot>, idx: usize, dev: usize, fx: &mu
 }
 
 pub fn activate_device(
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     dev: usize,
     fx: &mut dyn Effect,
@@ -76,7 +76,7 @@ pub fn activate_device(
 
 pub fn open_device(
     active_client: Option<usize>,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     path: &str,
     fx: &mut dyn Effect,
@@ -90,7 +90,7 @@ pub fn open_device(
 
 pub fn open_device_resolved(
     active_client: Option<usize>,
-    slots: &mut Vec<ClientSlot>,
+    slots: &mut [ClientSlot],
     idx: usize,
     sanitized: &str,
     dev_type: DeviceType,
@@ -120,7 +120,7 @@ pub fn open_device_resolved(
     if count >= MAX_SEAT_DEVICES {
         return Err(libc::EMFILE);
     }
-    let fd = fx.open_device(&sanitized, dev_type)?;
+    let fd = fx.open_device(sanitized, dev_type)?;
     slots[idx].client.devices.push(SeatDevice {
         device_id,
         fd: Some(fd),
@@ -168,12 +168,11 @@ mod tests {
                     ),
                     0
                 );
-                let mut slots = Vec::new();
-                slots.push(ClientSlot {
+                let mut slots = vec![ClientSlot {
                     conn: Conn::new(OwnedFd::from_raw_fd(fds[0])),
                     client: Client::fresh(1, 1, 1),
                     dead: false,
-                });
+                }];
                 slots[0].client.state = ClientState::Active;
                 slots[0].client.seat = Some(0);
                 let mut seat = Seat::new("seat0", false);

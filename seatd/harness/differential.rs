@@ -1,11 +1,22 @@
-// R3: raw-protocol differential. Replays identical scripts against the C
-// oracle daemon and the Rust port and asserts byte-identical transcripts
-// (opcodes, bodies, fd presence). Device-fd transfer needs real devices and
-// stays in N2; transport-level FD semantics are covered in R1.
 use seatd::conn::Conn;
 use seatd::wire::*;
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::process::{Child, Command, Stdio};
+
+struct Daemon(Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let Err(e) = self.0.kill() {
+            if e.kind() != std::io::ErrorKind::InvalidInput {
+                eprintln!("kill daemon: {e}");
+            }
+        }
+        if let Err(e) = self.0.wait() {
+            eprintln!("wait daemon: {e}");
+        }
+    }
+}
 
 fn oracle_bin() -> String {
     ".work/tmp/oracle/seatd".to_string()
@@ -22,7 +33,7 @@ fn unlink(path: &str) {
     }
 }
 
-fn spawn(bin: &str, sock: &str) -> Child {
+fn spawn(bin: &str, sock: &str) -> Daemon {
     unlink(sock);
     let mut cmd = Command::new(bin);
     cmd.arg("-l")
@@ -32,7 +43,7 @@ fn spawn(bin: &str, sock: &str) -> Child {
         .stderr(Stdio::null())
         .env("SEATD_VTBOUND", "0")
         .env("SEATD_SOCK", sock);
-    let child = cmd.spawn().expect("spawn daemon");
+    let child = Daemon(cmd.spawn().expect("spawn daemon"));
     for _ in 0..50 {
         let c = unsafe {
             let cstr = std::ffi::CString::new(sock).unwrap();
@@ -51,7 +62,6 @@ fn spawn(bin: &str, sock: &str) -> Child {
 
 fn connect(sock: &str) -> Conn {
     unsafe {
-        let cstr = std::ffi::CString::new(sock).unwrap();
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         let bytes = sock.as_bytes();
@@ -139,21 +149,17 @@ impl ScriptConn {
                 Err(e) => panic!("read {e}"),
             }
             if self.conn.pending() == 0 {
-                let mut pfd = unsafe {
-                    let mut p = libc::pollfd {
-                        fd: self.conn.raw_fd(),
-                        events: libc::POLLHUP | libc::POLLERR,
-                        revents: 0,
-                    };
-                    p
+                let mut pfd = libc::pollfd {
+                    fd: self.conn.raw_fd(),
+                    events: libc::POLLHUP | libc::POLLERR,
+                    revents: 0,
                 };
                 unsafe {
                     libc::poll(&mut pfd, 1, 0);
                 }
                 if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    match self.conn.read() {
-                        Ok(0) => return None,
-                        _ => {}
+                    if let Ok(0) = self.conn.read() {
+                        return None;
                     }
                 }
             }
@@ -210,9 +216,8 @@ impl ScriptConn {
                 libc::poll(&mut pfd, 1, 0);
             }
             if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                match self.conn.read() {
-                    Ok(0) => return,
-                    _ => {}
+                if let Ok(0) = self.conn.read() {
+                    return;
                 }
             }
         }
@@ -223,7 +228,6 @@ impl ScriptConn {
 fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
     let mut out = Vec::new();
 
-    // D1: ping lifecycle around one seat.
     {
         let mut c = ScriptConn { conn: connect(sock) };
         c.send(CLIENT_PING, &[]);
@@ -238,7 +242,6 @@ fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
         t.push(c.recv().unwrap());
         out.push(t);
     }
-    // D2: error codes.
     {
         let mut c = ScriptConn { conn: connect(sock) };
         c.send(CLIENT_OPEN_SEAT, &[]);
@@ -259,7 +262,6 @@ fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
         t.push(c.recv().unwrap());
         out.push(t);
     }
-    // D3: two-client switch event ordering.
     {
         let mut a = ScriptConn { conn: connect(sock) };
         let mut b = ScriptConn { conn: connect(sock) };
@@ -279,7 +281,6 @@ fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
         t.extend(a.recv_all(1));
         out.push(t);
     }
-    // D4: malformed frames destroy the connection.
     for (opcode, body) in [
         (999u16, vec![]),
         (CLIENT_OPEN_SEAT, vec![1u8]),
@@ -299,11 +300,10 @@ fn run_scripts(sock: &str) -> Vec<Vec<Msg>> {
         c.expect_eof();
         out.push(vec![]);
     }
-    // D5: double open destroys (after serving the first).
     {
         let mut c = ScriptConn { conn: connect(sock) };
         c.send(CLIENT_OPEN_SEAT, &[]);
-        let mut t = c.recv_all(2);
+        let t = c.recv_all(2);
         c.send(CLIENT_OPEN_SEAT, &[]);
         c.expect_eof();
         out.push(t);
@@ -316,14 +316,13 @@ fn check_pair() {
         "missing C oracle; rebuild with harness/libseat_diff.sh");
     let rust_sock = ".work/tmp/diff-rust.sock";
     let oracle_sock = ".work/tmp/oracle.sock";
-    let mut rust = spawn(&rust_bin(), rust_sock);
+    let rust = spawn(&rust_bin(), rust_sock);
     let rust_t = run_scripts(rust_sock);
-    rust.kill().ok();
-    rust.wait().ok();
-    let mut oracle = spawn(&oracle_bin(), oracle_sock);
+    drop(rust);
+    let oracle = spawn(&oracle_bin(), oracle_sock);
     let oracle_t = run_scripts(oracle_sock);
-    oracle.kill().ok();
-    oracle.wait().ok();
+    drop(oracle);
+    assert_eq!(format!("{oracle_t:#?}\n"), include_str!("protocol.golden"));
     assert_eq!(rust_t.len(), oracle_t.len());
     assert_eq!(rust_t[0].len(), 6, "D1 must carry six messages");
     assert!(rust_t[1].iter().any(|m| m.opcode == SERVER_ERROR));
