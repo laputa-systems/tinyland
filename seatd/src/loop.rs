@@ -225,11 +225,24 @@ impl Server {
     }
 
     fn sweep_dead(&mut self) {
-        let before = self.clients.len();
-        self.clients.retain(|c| !c.dead);
-        if self.clients.len() != before {
-            self.dirty = true;
+        let removed: Vec<usize> = self.clients.iter().enumerate()
+            .filter_map(|(i, c)| c.dead.then_some(i)).collect();
+        if removed.is_empty() {
+            return;
         }
+        for &idx in &removed {
+            self.destroy_client(idx);
+        }
+        self.clients.retain(|c| !c.dead);
+        let remap = |idx: usize| idx - removed.partition_point(|old| *old < idx);
+        for seat in &mut self.seats {
+            for idx in &mut seat.clients {
+                *idx = remap(*idx);
+            }
+            seat.active_client = seat.active_client.map(remap);
+            seat.next_client = seat.next_client.map(remap);
+        }
+        self.dirty = true;
     }
 
     pub fn poll_once(&mut self) -> io::Result<()> {
@@ -271,8 +284,6 @@ impl Server {
         }
         let base = if self.listen_fd.is_some() { 2 } else { 1 };
         for i in 0..self.clients.len() {
-            // A client accepted during this dispatch has no pollfd yet;
-            // it is picked up on the next rebuild.
             if base + i >= self.pollfds.len() {
                 continue;
             }
