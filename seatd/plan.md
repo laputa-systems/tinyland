@@ -4,9 +4,11 @@
 
 - Goal: Rust seatd on Linux, libseat-compatible; supervised foreground daemon.
 - Base: fork HEAD `bc0e96f` (2026-10-25). C baseline green (3/3).
-- Accepted: none. Red: none. Parked: none.
-- Next: R0. Resume: run the one-line prompt in the preflight report.
-- First command: `cargo build --offline`.
+- Accepted: R0–R6 on `master` (`712c49d`; 66 tests green x3, libseat diff OK, oracle transcripts byte-identical).
+- Red: R7 storm tests hang (daemon accepts, never answers first OPEN in test-spawned context; identical manual spawn works). Uncommitted WIP in `harness/storm.rs` + a debug edit in its `spawn_rust`.
+- Parked: N1 real-VT, N2 real-device qualification, N3 compositor smoke.
+- Next: clean strays, revert the `spawn_rust` debug edit, reproduce one storm test alone with daemon debug log, fix, then finish R7 (doc/diffs.md, clippy) and R8.
+- Resume: `git status --short` to see R7 WIP; first command `cargo test --offline --test storm storm_switch`.
 
 ## Charter
 
