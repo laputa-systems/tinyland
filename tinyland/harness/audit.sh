@@ -15,6 +15,6 @@ cat .work/tmp/linker.txt
 if rg -n '\bunsafe\b' src; then
   echo 'FAIL: unexpected unsafe code requires inventory review'; exit 1
 fi
-wc -l src/*.rs src/server/*.rs
+wc -l src/*.rs src/server/*.rs tests/*.rs
 wc -c "$BINARY"
 echo AUDIT_OK

@@ -4,12 +4,23 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0–S3 functional guest proof. S4/S5 reopened: legacy modeset
-parity, restricted fallback, package hashes, confirmed presentation, live guest
-negatives, and completion review remain required. Earlier status overstated
-completion. Existing real pixels/input and 25 unit tests are valid evidence.
-Method: finish each missing boundary with a focused check, then run the full
-acceptance commands and the repository completion review. No push.
+Accepted: S0–S4 implementation and local proof complete on Linux x86_64 KVM.
+`make smoke`, `make wayland-pixels`, and `make drm-parity` pass. Atomic and
+legacy complete screenshots are byte-identical; legacy full input smoke passes.
+Callbacks follow confirmed kernel page flips. The rootfs and all 44 add-on
+APKs have committed hashes; fresh-root install and boot pass. Four live guest
+negative cases reject missing input, black scanout, missing marker, and crash.
+`make test`: 27 Rust unit tests, one CLI integration test, four Python tests pass.
+`make audit`: no forbidden libraries or application unsafe; 2,798 Rust lines
+including tests, release binary 3,661,528 bytes. No push.
+S0 recorded loop: check 0.08s incremental, test build 8.4s at skeleton revision.
+S5 remains open for completion of independent review. The reviewer identified
+a subtree-depth bypass, reproduced and fixed, then failed twice because its
+session lacks authorized hardware-key authentication. Local review and docs
+refresh are complete; no independent P1/P2-clean verdict is claimed.
+Needs owner: restore reviewer authentication or specify an approved review route.
+Current build timings are unmeasured on the busy host; no timing gate is defined.
+Verification commands and limits: `docs/verification.md`.
 
 ## Charter
 
@@ -87,7 +98,7 @@ KVM only; an `ARCH` assignment does not select another guest.
 Authorized: read Laputa/cage/dwl/wayland-rs/drm-rs sources; create pinned Alpine guest image; run QEMU with KVM locally; open `/dev/dri`+evdev as root inside guest only; add Rust deps within perf gates; write under repo + `.work/`.
 Forbidden: push; modify Laputa or its deps; import Smithay/wlroots/libdrm/Mesa/EGL/GBM; claim unsupported hosts work; resend input after ambiguous QMP failure; fake pixels/clients/screenshots.
 Non-goals: tiling/tags, multimonitor, XWayland, DMA-BUF, GPU rendering, animations, plugins, portals, display manager, production seat mediation.
-Contract changes: toolchain pinned to `nightly-2026-09-15` (user direction, not stable); guest-only root in test harness (not production design). No API contract yet (no code).
+Contract changes: toolchain pinned to `nightly-2026-09-15` (user direction, not stable); guest-only root in test harness (not production design). The seat advertises keyboard only; presentation completion uses kernel flip events. Invalid CLI options return usage status 2.
 
 ## Reference
 
