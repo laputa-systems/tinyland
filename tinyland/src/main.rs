@@ -7,39 +7,6 @@ mod shm;
 mod surface;
 
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-
-static CHILD: OnceLock<Mutex<Option<std::process::Child>>> = OnceLock::new();
-
-pub fn remember_child(child: std::process::Child) {
-    let slot = CHILD.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = Some(child);
-}
-
-pub fn reap_child() -> bool {
-    let slot = match CHILD.get() {
-        Some(s) => s,
-        None => return false,
-    };
-    let mut guard = slot.lock().unwrap();
-    if let Some(child) = guard.as_mut() {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                eprintln!("TINYLAND_CHILD_EXIT status={status}");
-                guard.take();
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                eprintln!("child wait failed: {e}");
-                true
-            }
-        }
-    } else {
-        true
-    }
-}
-
 fn usage() -> &'static str {
     "usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N]"
 }

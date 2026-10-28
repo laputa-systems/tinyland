@@ -76,19 +76,10 @@ if [ "$MODE" = "drm-proof" ]; then
   wait $TPID
   echo "TINYLAND_DONE rc=$?" > /dev/console
 elif [ "$MODE" = "wayland-pixels" ] || [ "$MODE" = "smoke" ]; then
-  /usr/local/bin/tinyland --smoke --width 1024 --height 768 > /tmp/compositor.log 2>&1 &
+  ( /usr/local/bin/tinyland --"$MODE" --width 1024 --height 768; echo "TINYLAND_EXIT rc=$?" ) > /dev/console 2>&1 &
   CPID=$!
-  sleep 2
-  export XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0
-  /usr/local/bin/guest-test "$MODE" > /dev/console 2>&1 &
-  GPID=$!
-  wait $GPID
-  GRC=$?
-  echo "TINYLAND_GUEST_DONE rc=$GRC" > /dev/console
-  cat /tmp/compositor.log > /dev/console
-  kill $CPID 2>/dev/null || true
-  wait $CPID 2>/dev/null || true
-  echo "TINYLAND_DONE rc=$GRC" > /dev/console
+  sleep 120
+  wait "$CPID"
 fi
 echo "TINYLAND_POWERING_OFF" > /dev/console
 sleep 1
@@ -129,21 +120,20 @@ mkdir -p "$ROOT/etc" "$ROOT/boot"
 if [ -f "$ROOT/boot/vmlinuz-virt" ]; then
   cp "$ROOT/boot/vmlinuz-virt" .work/vmlinuz-virt
 fi
-if ls "$ROOT"/boot/initramfs-virt 1>/dev/null 2>&1; then
+if [ -f "$ROOT/boot/initramfs-virt" ]; then
   cp "$ROOT"/boot/initramfs-virt .work/initramfs-virt
 fi
 
 echo "recording installed versions"
 if [ -f "$ROOT/lib/apk/db/installed" ]; then
-  grep -a -E "^(P:V:)" "$ROOT/lib/apk/db/installed" | sort > .work/guest-packages.txt || true
-  grep -a -E "^P:" "$ROOT/lib/apk/db/installed" | sort >> .work/guest-packages.txt || true
+  rg -a "^(P:|V:)" "$ROOT/lib/apk/db/installed" | sort > .work/guest-packages.txt || true
+  rg -a "^P:" "$ROOT/lib/apk/db/installed" | sort >> .work/guest-packages.txt || true
 fi
-FOOT_VER="$(grep -a -A1 '^P:foot$' "$ROOT/lib/apk/db/installed" | grep -a '^V:' | head -n 1 || true)"
+FOOT_VER="$(rg -a -A1 '^P:foot$' "$ROOT/lib/apk/db/installed" | rg -a '^V:' | head -n 1 || true)"
 echo "guest foot: $FOOT_VER"
 
 echo "building disk image"
 rm -f "$IMG"
 truncate -s 1G "$IMG"
 mkfs.ext4 -q -d "$ROOT" "$IMG"
-ls -la .work/
 echo "BUILD_GUEST_OK"

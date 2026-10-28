@@ -7,8 +7,23 @@ pub enum ShmFormat {
 }
 
 pub struct ShmPoolData {
+    pub file: std::fs::File,
     pub mmap: memmap2::Mmap,
     pub size: i64,
+}
+
+impl ShmPoolData {
+    pub fn resize(&mut self, size: i32) -> Result<(), String> {
+        if size as i64 <= self.size {
+            return Err("pool resize must grow".into());
+        }
+        // SAFETY: the mapping is read-only, owned by this pool, and only validated buffer ranges are read.
+        let mmap = unsafe { memmap2::MmapOptions::new().len(size as usize).map(&self.file) }
+            .map_err(|e| format!("resize mmap: {e}"))?;
+        self.mmap = mmap;
+        self.size = size as i64;
+        Ok(())
+    }
 }
 
 pub struct ShmBufferData {
@@ -103,5 +118,24 @@ mod tests {
     #[test]
     fn rejects_huge_dimensions() {
         assert!(validate_buffer(i64::MAX, 0, 9000, 2, 36000).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn grown_pool_accepts_buffers_in_the_extended_range() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(2304).unwrap();
+        // SAFETY: the test owns the file and keeps its size at least the mapping length.
+        let mmap = unsafe { memmap2::MmapOptions::new().len(2304).map(&file) }.unwrap();
+        let mut pool = ShmPoolData { file, mmap, size: 2304 };
+        pool.file.set_len(12096).unwrap();
+        pool.resize(12096).unwrap();
+        assert_eq!(pool.mmap.len(), 12096);
+        assert!(validate_buffer(pool.size, 9600, 9, 16, 36).is_ok());
+        assert!(pool.resize(2304).is_err());
     }
 }

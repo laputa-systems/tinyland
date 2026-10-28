@@ -70,19 +70,25 @@ def main():
     path, min_frac = sys.argv[1], float(sys.argv[2])
     px, w, h, ch = read_png_rgb(path)
     n = w * h
+    magenta = 0
     nonblack = 0
     total_rgb = 0
     for i in range(n):
         r = px[i * ch]
         g = px[i * ch + 1] if ch > 1 else 0
         b = px[i * ch + 2] if ch > 1 else 0
+        if r > 180 and b > 180 and g < 120:
+            magenta += 1
         total_rgb += r + g + b
         if r + g + b > 24:
             nonblack += 1
     frac = nonblack / n
-    print(f"SCREENSHOT {w}x{h} nonblack_frac={frac:.3f} avg_rgb={total_rgb / n:.1f}")
+    print(f"SCREENSHOT {w}x{h} nonblack_frac={frac:.3f} avg_rgb={total_rgb / n:.1f} magenta_frac={magenta / n:.6f}")
     if frac < min_frac:
         print(f"FAIL: nonblack {frac:.3f} < {min_frac}")
+        return 1
+    if len(sys.argv) > 3 and magenta / n < float(sys.argv[3]):
+        print("FAIL: missing magenta marker")
         return 1
     print("SCREENSHOT_OK")
     return 0

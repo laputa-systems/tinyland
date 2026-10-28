@@ -342,6 +342,7 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
                     }
                 };
                 let file = std::fs::File::from(fd as OwnedFd);
+                // SAFETY: the read-only mapping is retained by the pool and reads use validated buffer ranges.
                 let mmap = match unsafe { memmap2::MmapOptions::new().len(pool_size).map(&file) } {
                     Ok(m) => m,
                     Err(_) => {
@@ -351,7 +352,7 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
                 };
                 let pool = data_init.init(id, ());
                 let pool_id = pool.id();
-                state.pools.insert(pool_id, crate::shm::ShmPoolData { mmap, size: size as i64 });
+                state.pools.insert(pool_id, crate::shm::ShmPoolData { file, mmap, size: size as i64 });
             }
             _ => {}
         }
@@ -417,8 +418,10 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                 );
             }
             wl_shm_pool::Request::Resize { size } => {
-                if size <= 0 {
-                    resource.post_error(0u32, "non-positive resize".to_string());
+                if let Some(pool) = state.pools.get_mut(&resource.id()) {
+                    if let Err(error) = pool.resize(size) {
+                        resource.post_error(wl_shm::Error::InvalidFd as u32, error);
+                    }
                 }
             }
             wl_shm_pool::Request::Destroy => {}

@@ -4,11 +4,12 @@
 
 Goal: one Rust binary drives real foot pixels in QEMU and receives real QMP-injected input.
 Base: empty repo, no commits; toolchain `nightly-2026-09-15` active; QEMU 11.1.2, `/dev/kvm` present.
-Accepted: S0 (skeleton, check 0.08s incr / test-build 8.4s), S1
-(drm-proof exit 0: 1280x800 teal, avg_rgb 383.0, atomic path, quit teardown).
-Red: none. Next: S2 guest verification (server code compiles, unit tests
-green; wayland-pixels harness + foot spawn still to prove in QEMU).
-Resume: run `make smoke` status via S-item acceptance below; steer after each accepted slice.
+Accepted: S0, S1, S2. `make wayland-pixels` exits 0: real foot 1.17.2-r0,
+1280x800 atomic scanout, nonblack 0.959, magenta 0.001289, no protocol error,
+QMP quit reaps QEMU. Pool growth regression passes.
+Red: none. Next: S3 evdev keyboard + xkb keymap + full input smoke.
+Steering: serial implementation; protocol tracing isolated ignored shm pool resize
+as the S2 blocker. Growth is implemented; no further S2 retries are needed.
 
 ## Charter
 

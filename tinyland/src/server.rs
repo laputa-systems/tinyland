@@ -19,7 +19,9 @@ struct UdsClientData;
 
 impl ClientData for UdsClientData {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: wayland_server::backend::DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, reason: wayland_server::backend::DisconnectReason) {
+        eprintln!("TINYLAND_CLIENT_DISCONNECTED {reason:?}");
+    }
 }
 
 pub struct State {
@@ -385,7 +387,6 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
-    let mut child_reaped = false;
     let poll_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
         let mut fds = [
@@ -425,9 +426,6 @@ pub fn run(mode: &str, device: &std::path::Path, width: u32, height: u32) -> i32
             eprintln!("flush failed: {e}");
             return 1;
         }
-        if !child_reaped {
-            child_reaped = crate::reap_child();
-        }
     }
 }
 
@@ -441,10 +439,13 @@ fn spawn_app(mode: &str) {
         .env("WAYLAND_DISPLAY", "wayland-0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
         .spawn();
     match res {
-        Ok(child) => crate::remember_child(child),
+        Ok(mut child) => match child.wait() {
+            Ok(status) => eprintln!("TINYLAND_CHILD_EXIT status={status}"),
+            Err(e) => eprintln!("foot wait failed: {e}"),
+        },
         Err(e) => eprintln!("foot spawn failed: {e}"),
     }
 }
