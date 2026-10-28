@@ -36,7 +36,7 @@ impl Keyboard {
                 }
             }
         }
-        if !context.include_path_append_default() { return Err("XKB include paths unavailable".into()); }
+        let _ = context.include_path_append_default();
         let keymap = xkb::Keymap::new_from_names(
             &context, "evdev", "pc105", "us", "", Some(String::new()), xkb::KEYMAP_COMPILE_NO_FLAGS,
         ).ok_or("compile US XKB keymap")?;
