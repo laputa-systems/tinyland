@@ -14,15 +14,22 @@ and network access disabled. A fresh root was installed and booted successfully.
 
 `make drm-proof` verifies real atomic scanout. `make wayland-pixels` verifies
 real foot shared-memory pixels. `make smoke` additionally injects `laputa`
-and Enter through QMP. The guest program runs inside foot and must report
-`GUEST_TEXT_OK` after reading that line. QMP queues all 14 press and release
-events in one transaction, preventing repeats caused by delayed key-up.
+and Enter through QMP. The guest program runs inside foot, prints a
+non-magenta prompt, and must report `GUEST_TEXT_OK` after reading that line.
+Only after successful input does it print a magenta `POST_INPUT_MARKER` to the
+terminal. The screenshot magenta check therefore proves a post-input terminal
+update followed by confirmed presentation, closing input to foot to guest to
+changed pixels to presentation to screenshot. QMP queues all 14 press and
+release events in one transaction, preventing repeats caused by delayed key-up.
 An uncertain response exits 75 and is never retried. Explicit rejection is a
 separate failure. `harness/test-qmp.py` exercises these transport outcomes.
 
 `make drm-parity` compares the complete decoded atomic and legacy DRM
-screenshots byte for byte, then runs the full input smoke through legacy
-fallback. The guest uses strace to return ENOSYS from the atomic capability
+screenshots byte for byte to prove atomic-versus-legacy modesetting parity,
+then runs the full input smoke through legacy fallback. Both modesetting
+paths share the subsequent `page_flip` presentation path, so the comparison
+is modeset parity rather than two independent presentation implementations.
+The guest uses strace to return ENOSYS from the atomic capability
 ioctl. The trace, explicit unsupported-capability diagnostic, and legacy
 path log establish that fallback actually ran. The injection ordinal includes
 the logger's initial terminal ioctl. A changed ordinal fails the proof guard.
@@ -37,11 +44,14 @@ records actual flip completion. A failed or missing flip does not complete
 callbacks. Client shm is copied at commit, so buffer release never leaves
 scanout dependent on client-writable memory.
 
-`make negative` boots four real guest sessions. Withheld input must time out.
+`make negative` boots five real guest sessions. Withheld input must time out.
 A terminal rendered completely black must fail the nonblack check. A terminal
-without the magenta marker must fail the marker check. Killing the compositor
-must fail the process-liveness check. These live failures replace the earlier
-artifact-only negative tests. Each case checks its specific failure reason.
+without the magenta marker must fail the marker check. A frozen terminal that
+reports input success without a post-input update must also fail the marker
+check, proving the screenshot requires changed pixels after input. Killing
+the compositor must fail the process-liveness check. These live failures
+replace the earlier artifact-only negative tests. Each case checks its
+specific failure reason.
 
 `harness/check-proof.sh` requires mapping, confirmed presentation, input
 confirmation for smoke, and no protocol error or early exit. The screenshot
@@ -57,10 +67,13 @@ screenshot and QMP quit, then kills and reaps a child that remains alive.
 
 `make test` runs the Rust suite plus QMP and package-lock tests. Rust coverage
 includes shm validation and lifetimes, retained pixels after release, surface
-commit and restacking transactions, configure serials, destruction, bounded
-subtree reparenting, callbacks, keyboard modifiers, clipboard focus, child
-reaping, shutdown signals, and malformed CLI options. Invalid CLI arguments
-return usage status 2 before opening devices.
+commit and restacking transactions, three-level subsurface position ordering,
+configure serials, destruction, bounded subtree reparenting, callbacks,
+keyboard modifiers, logical-seat focus isolation across two clients and two
+toplevels, clipboard focus, per-client and global memory budgets with
+fallible allocation, collection bounds, child reaping, shutdown signals,
+scale and transform subset handling, and malformed CLI options. Invalid CLI
+arguments return usage status 2 before opening devices.
 
 `make audit` checks the full feature tree and the release binary's dynamic
 section, reports source lines and executable bytes, and rejects application
@@ -76,10 +89,14 @@ death. Fatal signals use kernel descriptor cleanup; foot observes the closed
 Wayland connection. The compositor acquires no terminal mode.
 
 The seat advertises keyboard input only, with a US keymap. Clipboard offers
-follow focus and forward transfer descriptors to the source. Drag operations
-are cancelled and popups dismissed. The kiosk uses one fullscreen toplevel,
-scale 1, normal transform, and ARGB8888 or XRGB8888 shm. Global versions in
-`src/server.rs` are authoritative; outgoing events respect bound versions.
+follow the single logical focus and forward transfer descriptors to the
+source. Drag operations are cancelled and popups dismissed. The kiosk uses
+one fullscreen toplevel, renders scale 1 with normal transform, and accepts
+but ignores other positive scales and valid non-normal transforms as a
+documented foot-focused limitation. Only non-positive scales and unknown
+transform values are protocol errors. ARGB8888 or XRGB8888 shm is supported.
+Global versions in `src/server.rs` are authoritative; outgoing events respect
+bound versions.
 
 On a fresh checkout, run `bash harness/build-guest.sh` before Rust tests to
 prepare the native library and XKB data. Proof commands build the release

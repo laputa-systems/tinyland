@@ -12,6 +12,6 @@ spec.loader.exec_module(module)
 atomic = module.read_png_rgb('.work/drm-proof.png')
 legacy = module.read_png_rgb('.work/drm-proof-atomic-unsupported.png')
 assert atomic == legacy, 'atomic and legacy scanout pixels differ'
-print('DRM_PARITY_OK: complete atomic and legacy screenshots are identical')
+print('DRM_PARITY_OK: atomic-versus-legacy modesetting parity, identical screenshots via shared page-flip presentation')
 PY
 bash harness/run-proof.sh smoke atomic-unsupported
