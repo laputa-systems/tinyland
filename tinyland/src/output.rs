@@ -88,6 +88,34 @@ pub struct DrmOutput {
     mode_path: &'static str,
 }
 
+fn select_compatible_crtc(
+    card: &Card,
+    res: &drm::control::ResourceHandles,
+    con: &connector::Info,
+) -> Result<drm::control::crtc::Handle, String> {
+    if let Some(enc_handle) = con.current_encoder() {
+        if let Ok(enc) = card.get_encoder(enc_handle) {
+            if let Some(crtc) = enc.crtc() {
+                if res.crtcs().contains(&crtc) {
+                    return Ok(crtc);
+                }
+            }
+        }
+    }
+    for enc_handle in con.encoders() {
+        if let Ok(enc) = card.get_encoder(*enc_handle) {
+            let compatible = res.filter_crtcs(enc.possible_crtcs());
+            if let Some(crtc) = compatible.into_iter().find(|crtc| res.crtcs().contains(crtc)) {
+                return Ok(crtc);
+            }
+        }
+    }
+    res.crtcs()
+        .first()
+        .copied()
+        .ok_or_else(|| "no crtc".to_string())
+}
+
 impl DrmOutput {
     pub fn open(device: &Path, want_w: u32, want_h: u32) -> Result<Self, String> {
         let card = std::sync::Arc::new(Card::open(device).map_err(|e| format!("open {}: {e}", device.display()))?);
@@ -119,6 +147,7 @@ impl DrmOutput {
             .find(|c| c.state() == connector::State::Connected)
             .or_else(|| connectors.first())
             .ok_or("no connector")?;
+        let con_handle = con.handle();
         let mode = con
             .modes()
             .first()
@@ -138,7 +167,8 @@ impl DrmOutput {
             ));
         }
 
-        let crtc = res.crtcs().first().copied().ok_or("no crtc")?;
+        let crtc = select_compatible_crtc(card.as_ref(), &res, con)?;
+        eprintln!("TINYLAND_CRTC_SELECTED connector={con_handle:?} crtc={crtc:?}");
         let front = ScanoutBuffer::new(card.clone(), w, h)?;
         let back = ScanoutBuffer::new(card.clone(), w, h)?;
         eprintln!("TINYLAND_SCANOUT format=XRGB8888 buffers=2 size={w}x{h}");
@@ -146,7 +176,7 @@ impl DrmOutput {
             card, buffers: [front, back], front: 0, crtc,
             width: w, height: h, mode_path: "unset",
         };
-        out.modeset(&mode, con.handle(), atomic_ok)?;
+        out.modeset(&mode, con_handle, atomic_ok)?;
         Ok(out)
     }
 
@@ -169,11 +199,7 @@ impl DrmOutput {
                 Err(error) => return Err(format!("atomic modeset: {error}")),
             }
         }
-        let res = self
-            .card
-            .resource_handles()
-            .map_err(|e| format!("resources: {e}"))?;
-        let crtc_h = res.crtcs().first().copied().ok_or("no crtc")?;
+        let crtc_h = self.crtc;
         self.card
             .set_crtc(crtc_h, Some(self.buffers[self.front].fb), (0, 0), &[con], Some(*mode))
             .map_err(|e| format!("legacy set_crtc: {e}"))?;
@@ -192,7 +218,7 @@ impl DrmOutput {
             .card
             .resource_handles()
             .map_err(|error| AtomicError::new("resources", error))?;
-        let crtc_h = res.crtcs().first().copied().ok_or_else(|| AtomicError::new("crtc", std::io::Error::other("no crtc")))?;
+        let crtc_h = self.crtc;
         let planes = self.card.plane_handles().map_err(|error| AtomicError::new("planes", error))?;
         let mut primary: Option<drm::control::plane::Handle> = None;
         for p in &planes {
