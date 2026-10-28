@@ -44,9 +44,11 @@ authenticate users or provide login, power, or supervision management. See
 	*info*.
 
 *-z*
-	Refuse to start if the socket path already exists. This option cannot be
-	combined with *-u* or *-g*. Without *-z*, seatd removes an existing socket
-	at the path before binding. It refuses to remove a non-socket file.
+	Refuse to start if anything already exists at the socket path. This
+	option cannot be combined with *-u* or *-g*. Without *-z*, seatd probes
+	the existing socket: a live daemon is never stolen from, a non-socket
+	file is never removed, and only a stale socket left by a dead daemon is
+	reclaimed before binding.
 
 # ENVIRONMENT
 

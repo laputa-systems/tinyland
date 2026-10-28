@@ -45,11 +45,11 @@ fn main() {
                 if admit::probe_live(&path) {
                     log_error!("Live daemon owns socket path {path}, refusing to start");
                 } else {
-                    log_error!("Stale socket file found at socket path {path}, refusing to start (use -z only after verifying no live daemon)");
+                    log_error!("Socket file found at socket path {path}, refusing to start");
                 }
                 std::process::exit(1);
             } else if admit::probe_live(&path) {
-                log_error!("Live daemon owns socket path {path}, -z refuses to steal it");
+                log_error!("Live daemon owns socket path {path}, refusing to steal it");
                 std::process::exit(1);
             } else {
                 log_info!("Removing stale socket at {path}");

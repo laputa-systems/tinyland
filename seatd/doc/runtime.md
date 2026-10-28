@@ -11,8 +11,9 @@ path. The socket directory must exist and be controlled by the administrator
 or supervisor.
 
 Use `-u user` and `-g group` to set socket ownership. Supplying either option
-sets the socket mode to `0770`. Without either option, the mode is determined
-by the process umask. `-u` and `-g` cannot be combined with `-z`.
+sets the socket mode to `0770`. Without either option, seatd still restricts
+new sockets to `0770` (restrictive umask around bind plus explicit chmod
+before listen). `-u` and `-g` cannot be combined with `-z`.
 
 Socket access grants access to the daemon's seat operations. Seatd records
 peer credentials but does not use them for authorization. Every connected
@@ -32,9 +33,12 @@ The daemon runs in the foreground. It logs at `info` by default. The `-n fd`
 option writes one newline and closes the supplied descriptor after the socket
 is ready. This supports supervisors that use the s6 readiness protocol.
 
-At startup, seatd removes a stale socket at the configured path. It refuses to
-remove a non-socket file. Use `-z` to refuse startup when any socket already
-occupies the path. `-z` is mutually exclusive with `-u` and `-g`.
+At startup, seatd probes an existing socket at the configured path: a live
+daemon is never stolen from and a non-socket file is never removed; only
+a stale socket left by a dead daemon is reclaimed (concurrent startups
+are serialized with a lock file). Use `-z` to refuse startup when
+anything already occupies the path. `-z` is mutually exclusive with
+`-u` and `-g`.
 
 ## Select VT behavior
 

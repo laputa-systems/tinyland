@@ -25,8 +25,11 @@ Recover in this order:
 2. Start the replacement daemon on the same socket path.
 3. Restart clients so they reconnect and reopen every device.
 
-A normal start replaces the leftover socket. With `-z`, remove the stale socket
-from the administrator-controlled directory before restarting.
+A normal start reclaims only a stale socket left by a dead daemon; it
+refuses to steal the pathname from a live daemon and never removes a
+non-socket file. With `-z`, any existing socket or file at the path
+refuses startup; remove a stale socket from the
+administrator-controlled directory before restarting with `-z`.
 
 Input descriptors successfully revoked before the crash remain revoked.
 Clients must close every reference and reopen evdev and hidraw devices after
