@@ -967,6 +967,11 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         if !lost.is_empty() {
             let gone = std::mem::take(&mut lost);
             for position in gone.into_iter().rev() {
+                // Close on the daemon too: it caches open fds per path and
+                // would otherwise hand back the dead one on reopen.
+                if let Some((Some(id), _)) = inputs.get(position) {
+                    let _ = broker.as_ref().map(|b| b.close_device(*id, "input"));
+                }
                 inputs.remove(position);
             }
             state.keyboard.reset_stuck();
