@@ -29,6 +29,13 @@ impl Card {
     fn from_file(file: File) -> Self {
         Card(file)
     }
+
+    fn receive_flip_events(&self) -> std::io::Result<drm::control::Events> {
+        match self.receive_events() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(drm::control::Events::with_event_buf([0; 1024], 0)),
+            result => result,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -418,7 +425,7 @@ impl DrmOutput {
             Some(flight) => (flight.back, flight.deadline),
             None => return Ok(None),
         };
-        let events = self.card.receive_events().map_err(|error| format!("page flip events: {error}"))?;
+        let events = self.card.receive_flip_events().map_err(|error| format!("page flip events: {error}"))?;
         for event in events {
             if let drm::control::Event::PageFlip(event) = event {
                 if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
@@ -475,6 +482,27 @@ pub fn drm_proof(device: &Path, width: u32, height: u32, shutdown: &crate::shutd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonblocking_page_flip_poll_waits_for_an_event() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let card = Card(File::from(OwnedFd::from(reader)));
+        assert_eq!(card.receive_flip_events().unwrap().count(), 0);
+        let event: Vec<u8> = [2u32, 32, 0, 0, 1, 0, 7, 39].into_iter().flat_map(u32::to_ne_bytes).collect();
+        writer.write_all(&event).unwrap();
+        let events: Vec<_> = card.receive_flip_events().unwrap().collect();
+        assert_eq!(events.len(), 1);
+        let drm::control::Event::PageFlip(event) = &events[0] else { panic!("expected page flip") };
+        assert_eq!(event.frame, 7);
+        assert_eq!(u32::from(event.crtc), 39);
+        let invalid = Card(File::open(".").unwrap());
+        assert_eq!(invalid.receive_flip_events().err().unwrap().kind(), std::io::ErrorKind::IsADirectory);
+    }
 
     #[test]
     fn only_unsupported_atomic_failures_allow_legacy_fallback() {
