@@ -823,6 +823,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     let mut suspended = false;
+    let mut vt_chord: Option<u16> = None;
     loop {
         if shutdown.signal().is_some() { return 0; }
         let poll_timeout = match output.as_ref().and_then(|o| o.flip_deadline()) {
@@ -886,6 +887,13 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                         suspended = false;
                         eprintln!("TINYLAND_SEAT_ENABLED");
                         seat_marker("laputa-seat-enabled");
+                        if let Some(code) = vt_chord.take() {
+                            // Left/right variants plus the function key: only
+                            // the actually stuck ones change any state.
+                            for release in [29, 97, 56, 100, code] {
+                                state.key(release, false);
+                            }
+                        }
                     }
                     Err(error) => {
                         eprintln!("seat resume failed: {error}");
@@ -919,9 +927,10 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
 
                         // Grabbed keyboards hide the combo from the console,
                         // so the compositor must hand the switch to the
-                        // privileged broker itself. Forwarding stays intact:
-                        // releases rebalance every client, and the reset
-                        // keeps this side clean for what comes next.
+                        // privileged broker itself. Forwarding stays intact
+                        // for the fast path; releases dropped while suspended
+                        // are replayed on resume, and the reset keeps this
+                        // side clean for what comes next.
                         if down {
                             if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
                                 if let Some(broker) = broker.as_ref() {
@@ -929,6 +938,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                                     if let Err(error) = broker.switch_session(vt) {
                                         eprintln!("seat switch failed: {error}");
                                     }
+                                    vt_chord = Some(code);
                                     state.keyboard.reset_stuck();
                                 }
                             }
