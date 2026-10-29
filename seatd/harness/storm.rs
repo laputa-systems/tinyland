@@ -257,6 +257,7 @@ fn storm_slow_reader_gets_everything() {
 fn proc_times(pid: u32) -> (u64, u64, u64) {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let f: Vec<&str> = s.rsplit(')').next().unwrap().split_whitespace().collect();
+    assert_ne!(f[0], "Z", "daemon exited during idle measurement");
     let utime: u64 = f[11].parse().unwrap();
     let stime: u64 = f[12].parse().unwrap();
     let st = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
