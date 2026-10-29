@@ -824,6 +824,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     let mut suspended = false;
     let mut vt_chord: Option<u16> = None;
+    let mut lost = Vec::new();
     loop {
         if shutdown.signal().is_some() { return 0; }
         let poll_timeout = match output.as_ref().and_then(|o| o.flip_deadline()) {
@@ -879,6 +880,9 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     return 1;
                 }
                 suspended = true;
+                // A suspend owns every device; an unplug verdict reached
+                // just before it is moot and its index is stale.
+                lost.clear();
             } else if broker.take_enabled() && suspended {
                 match open_brokered_devices(broker, device, width, height, &mut output, &mut drm_id, &mut inputs) {
                     Ok(()) => {
@@ -918,7 +922,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                 }
             }
         }
-        let mut lost = Vec::new();
+        lost.clear();
         for (position, (_, device)) in inputs.iter_mut().enumerate() {
             match input::read_keys(device) {
                 Ok(keys) => {
@@ -946,14 +950,23 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     }
                 },
                 Err(error) if input::is_gone(&error) => {
-                    eprintln!("input device lost: {error}");
+                    // Revoke lands in the kernel before its disable
+                    // notification arrives; drain first so a suspend wins
+                    // over an unplug verdict, and a lost broker still
+                    // fails closed here.
+                    if let Err(error) = broker.as_ref().map_or(Ok(()), |b| b.dispatch_wait(100)) {
+                        eprintln!("seat dispatch failed: {error}");
+                        return 1;
+                    }
                     lost.push(position);
+                    break;
                 }
                 Err(error) => { eprintln!("{error}"); return 1; }
             }
         }
         if !lost.is_empty() {
-            for position in lost.into_iter().rev() {
+            let gone = std::mem::take(&mut lost);
+            for position in gone.into_iter().rev() {
                 inputs.remove(position);
             }
             state.keyboard.reset_stuck();

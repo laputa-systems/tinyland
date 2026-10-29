@@ -196,6 +196,20 @@ impl Session {
         Ok(())
     }
 
+    /// Dispatch with a bounded wait, for the revoke race: the kernel
+    /// reports a revoked device as gone before the daemon's disable
+    /// notification arrives, so drain first and let a suspend win over
+    /// an unplug verdict. Daemon loss is fatal here too.
+    pub fn dispatch_wait(&self, timeout_ms: i32) -> Result<(), String> {
+        daemon_liveness(self.fd.as_fd())?;
+        // SAFETY: seat is open; timeout bounds the block below.
+        let n = unsafe { libseat_dispatch(self.seat, timeout_ms) };
+        if n < 0 {
+            return Err(last_error("libseat_dispatch"));
+        }
+        Ok(())
+    }
+
     /// Ask the broker to switch sessions. On a VT-bound seat the session
     /// number is the VT number, so this is how a compositor whose keyboards
     /// are grabbed hands a Ctrl+Alt+Fn switch to the privileged broker.
