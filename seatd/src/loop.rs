@@ -122,9 +122,11 @@ impl Server {
                     self.running = false;
                 }
                 libc::SIGUSR1 => {
+                    crate::log_info!("VT release signal received");
                     session::seat_vt_release(&mut self.seats[0], &mut self.clients, &mut self.fx);
                 }
                 libc::SIGUSR2 => {
+                    crate::log_info!("VT acquire signal received");
                     session::seat_vt_activate(&mut self.seats[0], &mut self.clients, &mut self.fx);
                 }
                 _ => {}

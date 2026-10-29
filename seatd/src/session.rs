@@ -191,6 +191,7 @@ fn seat_add_client_assign(
     }
     slots[idx].client.seat = Some(0);
     seat.clients.insert(0, idx);
+    crate::log_info!("VT open: client={0} session={1}", idx, slots[idx].client.session);
     Ok(())
 }
 
@@ -346,6 +347,7 @@ fn seat_set_next_session(
         return Ok(());
     }
     if seat.vt_bound {
+        crate::log_info!("VT switch requested: {0} -> {1}", seat.cur_vt, session);
         fx.vt_switch(seat.cur_vt, session)?;
         return Ok(());
     }
@@ -373,9 +375,12 @@ pub fn seat_vt_activate(seat: &mut Seat, slots: &mut [ClientSlot], fx: &mut dyn 
         Ok(v) => seat.cur_vt = v,
         Err(_) => return,
     }
+    crate::log_info!("VT acquire on {0}, active={1:?}", seat.cur_vt, seat.active_client);
     let _ = fx.vt_ack(seat.cur_vt, false);
     if seat.active_client.is_none() {
-        let _ = seat_activate(seat, slots, fx);
+        if let Err(e) = seat_activate(seat, slots, fx) {
+            crate::log_error!("VT acquire found no session on vt {0}: {1}", seat.cur_vt, std::io::Error::from_raw_os_error(e));
+        }
     }
 }
 
@@ -386,6 +391,7 @@ pub fn seat_vt_release(seat: &mut Seat, slots: &mut [ClientSlot], fx: &mut dyn E
     if let Ok(v) = fx.current_vt() {
         seat.cur_vt = v;
     }
+    crate::log_info!("VT release on {0}, active={1:?}", seat.cur_vt, seat.active_client);
     if let Some(active) = seat.active_client {
         let _ = seat_disable_client(seat, slots, active, fx);
     }
