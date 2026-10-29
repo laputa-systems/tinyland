@@ -7,9 +7,10 @@ Create a disposable guest root from the cached Tinyland Alpine root. These comma
 ```sh
 exclude=$(git rev-parse --git-path info/exclude)
 rg -qxF '.work/' "$exclude" || printf '\n.work/\n' >> "$exclude"
+tinyland=$(cd ../tinyland && pwd)
 mkdir -p .work/tmp .work/apk-cache .work/prepared-guest
 export TMPDIR="$PWD/.work/tmp"
-cp -a --reflink=auto /home/josh/d/tinyland/.work/guest-root/. .work/prepared-guest/
+cp -a --reflink=auto $tinyland/.work/guest-root/. .work/prepared-guest/
 apk --root "$PWD/.work/prepared-guest" \
   --keys-dir "$PWD/.work/prepared-guest/etc/apk/keys" \
   --repositories-file "$PWD/.work/prepared-guest/etc/apk/repositories" \
@@ -19,7 +20,7 @@ apk --root "$PWD/.work/prepared-guest" \
 Copy the cached Laputa compositor and libraries into the guest. The Alpine packages provide foot, eudev, libseat, and the remaining compositor dependencies. The Laputa archives supply dwl, wlroots, display information, libinput, and Wayland versions used by the proof.
 
 ```sh
-packages=/home/josh/d/laputa-systems/laputa/.out/mirror/packages/x86_64
+packages="$(cd .. && pwd)/.out/mirror/packages/x86_64"
 tar -xzf "$packages/dwl-minimal/dwl-minimal-0.9-1-6124ce719c95.tar.gz" \
   -C .work/prepared-guest usr/bin/dwl
 tar -xzf "$packages/wlroots0.20/wlroots0.20-0.20.2-1-5a10430d3ebf.tar.gz" \
@@ -38,8 +39,8 @@ Run each mode with the cached kernel and initramfs and the seatd binary to quali
 ```sh
 for mode in transition shutdown compositor; do
   harness/vm-qualification.sh "$mode" .work/prepared-guest \
-    /home/josh/d/tinyland/.work/vmlinuz-virt \
-    /home/josh/d/tinyland/.work/initramfs-virt \
+    $tinyland/.work/vmlinuz-virt \
+    $tinyland/.work/initramfs-virt \
     target/x86_64-unknown-linux-musl/release/seatd
 done
 ```
