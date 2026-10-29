@@ -884,6 +884,8 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                         state.keyboard.reset_stuck();
                         state.pending_present = true;
                         suspended = false;
+                        eprintln!("TINYLAND_SEAT_ENABLED");
+                        seat_marker("laputa-seat-enabled");
                     }
                     Err(error) => {
                         eprintln!("seat resume failed: {error}");
@@ -1020,7 +1022,16 @@ fn disable_seat_devices(
     }
     broker.acknowledge_disable()?;
     eprintln!("TINYLAND_SEAT_DISABLED");
+    seat_marker("laputa-seat-disabled");
     Ok(())
+}
+
+/// Record a seat suspend/resume transition where the guest proof can wait
+/// on it. Best effort: a missing runtime dir must not fail the session.
+fn seat_marker(name: &str) {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let _ = std::fs::write(std::path::Path::new(&dir).join(name), b"1\n");
+    }
 }
 
 fn validate_runtime_dir() -> Result<String, String> {
