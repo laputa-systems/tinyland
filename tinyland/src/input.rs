@@ -159,14 +159,14 @@ pub fn is_gone(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error())
 }
 
-/// VT number requested by a key press under the given depressed modifiers.
-/// Evdev F1..F12 are codes 59..68; the modifier word is xkb depressed state
-/// in core order (Shift, Lock, Control, Mod1..), so Ctrl+Alt is 0x0c.
-/// Returns None unless the chord is complete: Ctrl and Alt held while a
-/// function key goes down.
 pub fn vt_switch_target(code: u16, depressed: u32) -> Option<i32> {
-    if (59..=68).contains(&code) && depressed & 0x0c == 0x0c {
-        Some((code - 58) as i32)
+    if depressed & 0x0c != 0x0c {
+        return None;
+    }
+    if (KeyCode::KEY_F1.code()..=KeyCode::KEY_F10.code()).contains(&code) {
+        Some(i32::from(code - KeyCode::KEY_F1.code()) + 1)
+    } else if (KeyCode::KEY_F11.code()..=KeyCode::KEY_F12.code()).contains(&code) {
+        Some(i32::from(code - KeyCode::KEY_F11.code()) + 11)
     } else {
         None
     }
@@ -212,6 +212,8 @@ mod tests {
         assert_eq!(vt_switch_target(KeyCode::KEY_F2.code(), keyboard.modifiers()[0]), None);
         keyboard.update(KeyCode::KEY_LEFTALT.code(), true);
         assert_eq!(vt_switch_target(KeyCode::KEY_F2.code(), keyboard.modifiers()[0]), Some(2));
+        assert_eq!(vt_switch_target(KeyCode::KEY_F10.code(), keyboard.modifiers()[0]), Some(10));
+        assert_eq!(vt_switch_target(KeyCode::KEY_F11.code(), keyboard.modifiers()[0]), Some(11));
         assert_eq!(vt_switch_target(KeyCode::KEY_F12.code(), keyboard.modifiers()[0]), Some(12));
         assert_eq!(vt_switch_target(KeyCode::KEY_A.code(), keyboard.modifiers()[0]), None);
         keyboard.update(KeyCode::KEY_LEFTCTRL.code(), false);
