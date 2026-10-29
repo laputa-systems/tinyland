@@ -5,7 +5,7 @@
 //! a failed open, or a lost daemon is a hard error, never a silent
 //! direct-open fallback.
 //!
-//! This is the only module in src/ that uses unsafe. The surface is eight
+//! This is the only module in src/ that uses unsafe. The surface is nine
 //! declared libseat symbols and two listener callbacks. All raw pointers
 //! stay inside Session; Session is !Send and !Sync.
 
@@ -23,6 +23,7 @@ extern "C" {
     fn libseat_seat_name(seat: *mut Libseat) -> *const c_char;
     fn libseat_get_fd(seat: *mut Libseat) -> c_int;
     fn libseat_dispatch(seat: *mut Libseat, timeout: c_int) -> c_int;
+    fn libseat_switch_session(seat: *mut Libseat, session: c_int) -> c_int;
 }
 
 #[repr(C)]
@@ -191,6 +192,19 @@ impl Session {
         let n = unsafe { libseat_dispatch(self.seat, 0) };
         if n < 0 {
             return Err(last_error("libseat_dispatch"));
+        }
+        Ok(())
+    }
+
+    /// Ask the broker to switch sessions. On a VT-bound seat the session
+    /// number is the VT number, so this is how a compositor whose keyboards
+    /// are grabbed hands a Ctrl+Alt+Fn switch to the privileged broker.
+    /// Failure leaves the session unaffected by design.
+    pub fn switch_session(&self, session: i32) -> Result<(), String> {
+        // SAFETY: seat is open; the daemon validates the session number.
+        let r = unsafe { libseat_switch_session(self.seat, session) };
+        if r != 0 {
+            return Err(last_error("libseat_switch_session"));
         }
         Ok(())
     }

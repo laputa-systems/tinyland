@@ -913,7 +913,28 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         let mut lost = Vec::new();
         for (position, (_, device)) in inputs.iter_mut().enumerate() {
             match input::read_keys(device) {
-                Ok(keys) => for (code, down) in keys { state.key(code, down); },
+                Ok(keys) => {
+                    for (code, down) in keys {
+                        state.key(code, down);
+
+                        // Grabbed keyboards hide the combo from the console,
+                        // so the compositor must hand the switch to the
+                        // privileged broker itself. Forwarding stays intact:
+                        // releases rebalance every client, and the reset
+                        // keeps this side clean for what comes next.
+                        if down {
+                            if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
+                                if let Some(broker) = broker.as_ref() {
+                                    eprintln!("TINYLAND_VT_SWITCH vt={vt}");
+                                    if let Err(error) = broker.switch_session(vt) {
+                                        eprintln!("seat switch failed: {error}");
+                                    }
+                                    state.keyboard.reset_stuck();
+                                }
+                            }
+                        }
+                    }
+                },
                 Err(error) if input::is_gone(&error) => {
                     eprintln!("input device lost: {error}");
                     lost.push(position);
