@@ -51,6 +51,52 @@ Softpipe desktop ceiling is **3.3 compat** (measured above), below
 Ghostty's required **4.3 core**. virgl is unavailable on this host.
 The only 4.3-capable software path is llvmpipe, which needs LLVM.
 
+Exact-attribs reproducer (packaged `mesa-26.2.4-2` payloads + musl,
+container-musl `cc`, run under the packaged `ld-musl`): requesting
+precisely Ghostty's context attribs (4.3, core profile, surfaceless)
+fails with `GHOSTTY_ATTRIBS_FAILED error=0x3009` (`EGL_BAD_MATCH`),
+exit 3. Ghostty's source requests these attribs and fails closed with
+`OpenGLOutdated` below 4.3, so the packaged renderer init cannot
+succeed on this stack. Reproduce without the PM: extract the mesa,
+musl, libdrm, wayland-libs-client, expat, and libffi payloads into
+`eglroot/`, compile the program below with the container musl `cc`
+against it, and run it under `eglroot/usr/lib/ld-musl-x86_64.so.1`
+with `LD_LIBRARY_PATH`/`GBM_BACKENDS_PATH` pointed at `eglroot`:
+
+```c
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <stdio.h>
+int main(void) {
+    PFNEGLGETPLATFORMDISPLAYEXTPROC get =
+        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    if (!get) { printf("NO_GET_PLATFORM_DISPLAY\n"); return 1; }
+    EGLDisplay dpy = get(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+    EGLint major = 0, minor = 0;
+    if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, &major, &minor)) {
+        printf("NO_EGL_DISPLAY 0x%x\n", eglGetError()); return 2;
+    }
+    eglBindAPI(EGL_OPENGL_API);
+    /* Exactly what Ghostty requests (src/renderer/OpenGL.zig). */
+    static const EGLint ghostty_attribs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 4,
+        EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+        EGL_NONE,
+    };
+    EGLContext ctx = eglCreateContext(dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ghostty_attribs);
+    if (ctx == EGL_NO_CONTEXT) {
+        printf("GHOSTTY_ATTRIBS_FAILED error=0x%x\n", eglGetError());
+        return 3;
+    }
+    printf("GHOSTTY_ATTRIBS_OK (unexpected on softpipe)\n");
+    return 0;
+}
+```
+
+The null-attrib max-version probe in the mesa proof is the standing
+ceiling check.
+
 ## Decision (recorded with numbers; no LLVM committed)
 
 - Preferred remains virgl where a host supports it (no guest LLVM,
