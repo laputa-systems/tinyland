@@ -2,7 +2,6 @@ use evdev::{Device, EventType, KeyCode};
 use std::fs::File;
 use std::io::Write;
 use wayland_server::protocol::{wl_keyboard, wl_seat};
-use xkbcommon::xkb;
 
 #[derive(Debug)]
 pub struct SeatData {
@@ -18,64 +17,88 @@ impl SeatData {
 }
 
 pub struct Keyboard {
-    state: xkb::State,
+    machine: kbvm::state_machine::StateMachine,
+    state: kbvm::state_machine::State,
+    components: kbvm::Components,
+    #[allow(dead_code)]
+    lookup: kbvm::lookup::LookupTable,
     pub keymap: File,
     pub keymap_size: u32,
 }
 
 impl Keyboard {
     pub fn new() -> Result<Self, String> {
-        let mut context = xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES);
-        if let Some(root) = std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")) {
-            let path = std::path::PathBuf::from(root);
+        let mut builder = kbvm::xkb::Context::builder();
+        if let Some(root) = std::env::var_os("TINYLAND_XKB_ROOT") {
+            let path = std::path::PathBuf::from(&root);
             if path.exists() {
-                if context.include_path_append(path.as_path()) {
-                    eprintln!("TINYLAND_XKB_ROOT {}", path.display());
-                } else {
-                    return Err("XKB include path append failed".into());
-                }
+                builder.prepend_path(&path);
+                eprintln!("TINYLAND_XKB_ROOT {}", path.display());
+            } else {
+                return Err(format!("TINYLAND_XKB_ROOT {} missing", path.display()));
             }
         }
-        let _ = context.include_path_append_default();
-        let keymap = xkb::Keymap::new_from_names(
-            &context, "evdev", "pc105", "us", "", Some(String::new()), xkb::KEYMAP_COMPILE_NO_FLAGS,
+        let context = builder.build();
+        let groups = [kbvm::xkb::rmlvo::Group { layout: "us", variant: "" }];
+        let keymap = context.keymap_from_names(
+            kbvm::xkb::diagnostic::WriteToLog,
+            Some("evdev"),
+            Some("pc105"),
+            Some(&groups),
+            Some(&[]),
         );
-        let keymap = match keymap {
-            Some(keymap) => keymap,
-            None => {
-                let system = std::path::Path::new("/usr/share/X11/xkb/rules/evdev");
-                return Err(format!(
-                    "compile US XKB keymap (override={:?}, system-rules-present={})",
-                    std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")),
-                    system.exists(),
-                ));
-            }
-        };
-        let mut text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1).into_bytes();
-        text.push(0);
+        if keymap.keys().count() == 0 {
+            let system = std::path::Path::new("/usr/share/X11/xkb/rules/evdev");
+            return Err(format!(
+                "compile US XKB keymap (override={:?}, system-rules-present={})",
+                std::env::var_os("TINYLAND_XKB_ROOT").or_else(|| std::env::var_os("XKB_CONFIG_ROOT")),
+                system.exists(),
+            ));
+        }
+        let text = format!("{}\n", keymap.format());
+        let mut bytes = text.into_bytes();
+        bytes.push(0);
         let mut file = File::from(rustix::fs::memfd_create("tinyland-keymap", rustix::fs::MemfdFlags::CLOEXEC)
             .map_err(|e| format!("keymap memfd: {e}"))?);
-        file.write_all(&text).map_err(|e| format!("keymap write: {e}"))?;
-        Ok(Self { state: xkb::State::new(&keymap), keymap: file, keymap_size: text.len() as u32 })
+        file.write_all(&bytes).map_err(|e| format!("keymap write: {e}"))?;
+        let size = bytes.len() as u32;
+        let agent = keymap.to_builder();
+        let machine = agent.build_state_machine();
+        let lookup = agent.build_lookup_table();
+        let state = machine.create_state();
+        Ok(Self { machine, state, components: kbvm::Components::default(), lookup, keymap: file, keymap_size: size })
     }
 
     pub fn update(&mut self, code: u16, down: bool) -> [u32; 4] {
-        self.state.update_key((code as u32 + 8).into(), if down { xkb::KeyDirection::Down } else { xkb::KeyDirection::Up });
+        let key = kbvm::Keycode::from_evdev(u32::from(code));
+        let direction = if down {
+            kbvm::state_machine::Direction::Down
+        } else {
+            kbvm::state_machine::Direction::Up
+        };
+        let mut events = Vec::new();
+        self.machine.handle_key(&mut self.state, &mut events, key, direction);
+        for event in events {
+            self.components.apply_event(event);
+        }
         self.modifiers()
     }
 
     pub fn modifiers(&self) -> [u32; 4] {
-        [self.state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
-         self.state.serialize_mods(xkb::STATE_MODS_LATCHED),
-         self.state.serialize_mods(xkb::STATE_MODS_LOCKED),
-         self.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE)]
+        [self.components.mods_pressed.0, self.components.mods_latched.0, self.components.mods_locked.0, self.components.group.0]
+    }
+
+    #[allow(dead_code)]
+    pub fn key_utf8(&self, xkb_code: u32) -> String {
+        let evdev = xkb_code.saturating_sub(8);
+        let key = kbvm::Keycode::from_evdev(evdev);
+        self.lookup.lookup(self.components.group, self.components.mods, key).into_iter().flat_map(|p| p.char()).collect()
     }
 
     #[allow(dead_code)]
     pub fn reset_stuck(&mut self) -> [u32; 4] {
-        for code in 0..256u16 {
-            self.state.update_key((code as u32 + 8).into(), xkb::KeyDirection::Up);
-        }
+        self.state = self.machine.create_state();
+        self.components = kbvm::Components::default();
         self.modifiers()
     }
 }
@@ -179,12 +202,12 @@ mod tests {
     #[test]
     fn shift_changes_text_and_releases_its_modifier() {
         let mut keyboard = Keyboard::new().unwrap();
-        let a = (KeyCode::KEY_A.code() as u32 + 8).into();
-        assert_eq!(keyboard.state.key_get_utf8(a), "a");
+        let a = KeyCode::KEY_A.code() as u32 + 8;
+        assert_eq!(keyboard.key_utf8(a), "a");
         assert_ne!(keyboard.update(KeyCode::KEY_LEFTSHIFT.code(), true)[0], 0);
-        assert_eq!(keyboard.state.key_get_utf8(a), "A");
+        assert_eq!(keyboard.key_utf8(a), "A");
         assert_eq!(keyboard.update(KeyCode::KEY_LEFTSHIFT.code(), false)[0], 0);
-        assert_eq!(keyboard.state.key_get_utf8(a), "a");
+        assert_eq!(keyboard.key_utf8(a), "a");
     }
 
     #[test]

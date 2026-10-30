@@ -67,9 +67,11 @@ On a fresh checkout run `bash harness/build-guest.sh` first: it prepares
 the native library and XKB data that `.cargo/config.toml` points at.
 
 Host builds link libseat (`apk add libseat-dev` on Alpine); the musl
-binary links it dynamically alongside the static XKB data, so the guest
-carries libseat, libelogind, libcap, and libgcc. `make audit` allows
-`unsafe` only in `src/seat.rs`, the reviewed libseat FFI surface.
+binary links it dynamically with pure-Rust KBVM for XKB and no
+libxkbcommon link, so the guest carries libseat, libelogind, libcap,
+and libgcc plus XKB data lookups. `make audit` allows
+`unsafe` only in `src/seat.rs`, the reviewed libseat FFI surface,
+and rejects any libxkbcommon link or runtime xkbcommon crate.
 
 `make seat` runs the brokered proof in `harness/seat-proof.sh`: seatd
 mediates as root while tinyland and foot run as the unprivileged `tiny`
