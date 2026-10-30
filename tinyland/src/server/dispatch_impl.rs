@@ -202,8 +202,8 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
         let id = resource.id();
         if let Some(s) = state.surfaces.remove(&id) {
             let client = s.resource.client().map(|client| client.id());
-            let current = s.content.as_ref().map(|content| content.charged_bytes()).unwrap_or(0);
-            let cached = s.cached.as_ref().and_then(|cached| cached.content.as_ref()).and_then(|content| content.as_ref()).map(|content| content.charged_bytes()).unwrap_or(0);
+            let current = s.pixels.as_ref().map(|pixels| pixels.bytes.len()).unwrap_or(0);
+            let cached = s.cached.as_ref().and_then(|cached| cached.pixels.as_ref()).and_then(|pixels| pixels.as_ref()).map(|pixels| pixels.bytes.len()).unwrap_or(0);
             if let Some(client) = client {
                 if current > 0 {
                     state.release_bytes(client.clone(), current);
@@ -397,9 +397,9 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                     let cached_bytes = surface
                         .cached
                         .as_ref()
-                        .and_then(|cached| cached.content.as_ref())
-                        .and_then(|content| content.as_ref())
-                        .map(|content| content.charged_bytes())
+                        .and_then(|cached| cached.pixels.as_ref())
+                        .and_then(|pixels| pixels.as_ref())
+                        .map(|pixels| pixels.bytes.len())
                         .unwrap_or(0);
                     let client = surface.resource.client().map(|client| client.id());
                     surface.cached = None;
@@ -585,8 +585,6 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
         _data: &(),
     ) {
         state.buffers.remove(&resource.id());
-        state.dmabuf_buffers.remove(&resource.id());
-        state.unreleased_dmabufs.remove(&resource.id());
 
     }
 }

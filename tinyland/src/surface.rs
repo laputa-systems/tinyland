@@ -1,36 +1,6 @@
-use crate::dmabuf::DmabufBuffer;
 use crate::shm::SurfacePixels;
-use std::sync::Arc;
 use wayland_server::{backend::ObjectId, Resource};
-use wayland_server::protocol::{wl_buffer, wl_callback, wl_surface};
-
-#[derive(Debug, Clone)]
-pub enum SurfaceContent {
-    Shm(SurfacePixels),
-    Dmabuf(DmabufContent),
-}
-
-#[derive(Debug, Clone)]
-pub struct DmabufContent {
-    pub buffer: wl_buffer::WlBuffer,
-    pub data: Arc<DmabufBuffer>,
-}
-
-impl SurfaceContent {
-    pub fn charged_bytes(&self) -> usize {
-        match self {
-            SurfaceContent::Shm(pixels) => pixels.bytes.len(),
-            SurfaceContent::Dmabuf(_) => 0,
-        }
-    }
-
-    pub fn dmabuf_id(&self) -> Option<ObjectId> {
-        match self {
-            SurfaceContent::Shm(_) => None,
-            SurfaceContent::Dmabuf(content) => Some(content.buffer.id()),
-        }
-    }
-}
+use wayland_server::protocol::{wl_callback, wl_surface};
 
 #[derive(Debug, Default)]
 pub struct PendingState {
@@ -40,13 +10,13 @@ pub struct PendingState {
 
 #[derive(Debug, Default)]
 pub struct SurfaceUpdate {
-    pub content: Option<Option<SurfaceContent>>,
+    pub pixels: Option<Option<SurfacePixels>>,
     pub callbacks: Vec<wl_callback::WlCallback>,
 }
 
 impl SurfaceUpdate {
     pub fn merge(&mut self, mut newer: Self) {
-        if newer.content.is_some() { self.content = newer.content; }
+        if newer.pixels.is_some() { self.pixels = newer.pixels; }
         self.callbacks.append(&mut newer.callbacks);
     }
 }
@@ -58,7 +28,7 @@ pub struct SurfaceData {
     pub cached: Option<SurfaceUpdate>,
     pub cached_pos: Option<(i32, i32)>,
     pub cached_stacking: Option<Vec<ObjectId>>,
-    pub content: Option<SurfaceContent>,
+    pub pixels: Option<SurfacePixels>,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub parent: Option<ObjectId>,
     pub stacking: Vec<ObjectId>,
@@ -75,7 +45,7 @@ impl SurfaceData {
         let id = resource.id();
         Self {
             resource, pending: PendingState::default(), cached: None, cached_pos: None,
-            cached_stacking: None, content: None,
+            cached_stacking: None, pixels: None,
             callbacks: Vec::new(), parent: None, stacking: vec![id], pending_stacking: None,
             subsurface_pos: (0, 0), pending_pos: None, subsurface_sync: true,
             has_role: false, is_popup: false,
@@ -83,7 +53,7 @@ impl SurfaceData {
     }
 
     pub fn apply(&mut self, mut update: SurfaceUpdate) {
-        if let Some(content) = update.content { self.content = content; }
+        if let Some(pixels) = update.pixels { self.pixels = pixels; }
         self.callbacks.append(&mut update.callbacks);
     }
 }
