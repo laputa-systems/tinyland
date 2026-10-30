@@ -1,3 +1,4 @@
+mod dmabuf;
 mod input;
 mod seat;
 mod selection;

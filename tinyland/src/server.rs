@@ -1,15 +1,17 @@
+use crate::dmabuf::{DmabufBuffer, DmabufFeedback, DmabufParams};
 use crate::input::{self, Keyboard, SeatData};
-use crate::output::DrmOutput;
+use crate::output::{DrmOutput, ScanoutError};
 use crate::seat::Session;
 use crate::selection::SelectionState;
 use crate::shell::{ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
-use crate::surface::{SurfaceData, SurfaceUpdate};
-use std::collections::HashMap;
+use crate::surface::{DmabufContent, SurfaceContent, SurfaceData, SurfaceUpdate};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::os::unix::io::AsFd;
 use evdev::Device;
 use std::sync::Arc;
+use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
 use wayland_server::backend::{ClientData, ClientId, ObjectId};
 use wayland_server::protocol::{
@@ -38,6 +40,12 @@ pub struct State {
     subsurfaces: HashMap<ObjectId, ObjectId>,
     pools: HashMap<ObjectId, ShmPoolData>,
     buffers: HashMap<ObjectId, (wl_buffer::WlBuffer, ShmBufferData)>,
+    dmabuf_buffers: HashMap<ObjectId, (wl_buffer::WlBuffer, Arc<DmabufBuffer>)>,
+    dmabuf_params: HashMap<ObjectId, DmabufParams>,
+    dmabuf_feedbacks: HashSet<ObjectId>,
+    dmabuf_feedback: Option<DmabufFeedback>,
+    unreleased_dmabufs: HashMap<ObjectId, (wl_buffer::WlBuffer, Arc<DmabufBuffer>)>,
+    unscanned_logged: bool,
     seats: Vec<SeatData>,
     outputs: Vec<(ClientId, wl_output::WlOutput)>,
     regions: HashMap<ObjectId, Vec<(i32, i32, i32, i32)>>,
@@ -57,6 +65,8 @@ pub const MAX_MIME_TYPES_PER_SOURCE: usize = 32;
 pub const MAX_SURFACES_PER_CLIENT: usize = 128;
 pub const MAX_TOPLEVELS_PER_CLIENT: usize = 32;
 pub const MAX_BUFFERS_PER_CLIENT: usize = 64;
+pub const MAX_DMABUF_PARAMS_PER_CLIENT: usize = 16;
+pub const MAX_DMABUF_FEEDBACKS_PER_CLIENT: usize = 8;
 pub const MAX_POOLS_PER_CLIENT: usize = 16;
 pub const MAX_SOURCES_PER_CLIENT: usize = 32;
 pub const MAX_DEVICES_PER_CLIENT: usize = 16;
@@ -78,6 +88,12 @@ impl State {
         subsurfaces: HashMap::new(),
         pools: HashMap::new(),
         buffers: HashMap::new(),
+        dmabuf_buffers: HashMap::new(),
+        dmabuf_params: HashMap::new(),
+        dmabuf_feedbacks: HashSet::new(),
+        dmabuf_feedback: None,
+        unreleased_dmabufs: HashMap::new(),
+        unscanned_logged: false,
         seats: Vec::new(),
         outputs: Vec::new(),
         regions: HashMap::new(),
@@ -106,8 +122,8 @@ impl State {
     fn current_bytes(&self, surf_id: &ObjectId) -> usize {
         self.surfaces
             .get(surf_id)
-            .and_then(|surface| surface.pixels.as_ref())
-            .map(|pixels| pixels.bytes.len())
+            .and_then(|surface| surface.content.as_ref())
+            .map(|content| content.charged_bytes())
             .unwrap_or(0)
     }
 
@@ -115,9 +131,9 @@ impl State {
         self.surfaces
             .get(surf_id)
             .and_then(|surface| surface.cached.as_ref())
-            .and_then(|cached| cached.pixels.as_ref())
-            .and_then(|pixels| pixels.as_ref())
-            .map(|pixels| pixels.bytes.len())
+            .and_then(|cached| cached.content.as_ref())
+            .and_then(|content| content.as_ref())
+            .map(|content| content.charged_bytes())
             .unwrap_or(0)
     }
 
@@ -171,6 +187,7 @@ impl State {
     fn count_client_buffers(&self, client: &ClientId) -> usize {
         self.buffers
             .keys()
+            .chain(self.dmabuf_buffers.keys())
             .filter(|id| {
                 self.dh
                     .get_client((*id).clone())
@@ -178,6 +195,10 @@ impl State {
                     .unwrap_or(false)
             })
             .count()
+    }
+
+    fn count_client_objects<'a>(&self, ids: impl Iterator<Item = &'a ObjectId>, client: &ClientId) -> usize {
+        ids.filter(|id| self.dh.get_client((*id).clone()).map(|c| c.id() == *client).unwrap_or(false)).count()
     }
 
     fn count_client_pools(&self, client: &ClientId) -> usize {
@@ -256,7 +277,19 @@ impl State {
             self.surfaces[surf_id].resource.post_error(0u32, "too many outstanding frame callbacks");
             return;
         }
-        let pixels = match pending.buffer {
+        let content = match pending.buffer {
+            Some(Some(id)) if self.dmabuf_buffers.contains_key(&id) => {
+                let (buffer, data) = &self.dmabuf_buffers[&id];
+                let content = SurfaceContent::Dmabuf(DmabufContent { buffer: buffer.clone(), data: data.clone() });
+                self.unreleased_dmabufs.insert(id.clone(), (buffer.clone(), data.clone()));
+                if let Some(client) = client_id.clone() {
+                    let old = if is_sync { old_cached } else { old_current };
+                    if old > 0 {
+                        self.release_bytes(client, old);
+                    }
+                }
+                Some(Some(content))
+            }
             Some(Some(id)) => {
                 let needed = match self.buffers.get(&id) {
                     Some((_, data)) => (data.width as usize).checked_mul(data.height as usize).and_then(|n| n.checked_mul(4)),
@@ -299,7 +332,7 @@ impl State {
                                 self.release_bytes(client, (-net) as usize);
                             }
                         }
-                        Some(Some(pixels))
+                        Some(Some(SurfaceContent::Shm(pixels)))
                     }
                     Err(error) => { self.surfaces[surf_id].resource.post_error(0u32, error); return; }
                 }
@@ -315,7 +348,7 @@ impl State {
             }
             None => None,
         };
-        let update = SurfaceUpdate { pixels, callbacks: pending.callbacks };
+        let update = SurfaceUpdate { content, callbacks: pending.callbacks };
         if self.synchronized(surf_id) {
             self.surfaces.get_mut(surf_id).unwrap().cached.get_or_insert_with(SurfaceUpdate::default).merge(update);
             if let Some(order) = pending_stacking {
@@ -343,7 +376,7 @@ impl State {
         }
         self.flush_applied(surf_id);
         if let Some(top_id) = self.toplevel_for_surface(surf_id) {
-            if self.surfaces[surf_id].pixels.is_none() {
+            if self.surfaces[surf_id].content.is_none() {
                 let top = self.toplevels.get_mut(&top_id).unwrap();
                 if top.mapped {
                     top.mapped = false;
@@ -368,7 +401,7 @@ impl State {
             .surfaces
             .get(id)
             .and_then(|s| s.cached.as_ref())
-            .is_some_and(|cached| cached.pixels.is_some());
+            .is_some_and(|cached| cached.content.is_some());
         let cached = self.surfaces.get_mut(id).unwrap().cached.take();
         let cached_stacking = self.surfaces.get_mut(id).unwrap().cached_stacking.take();
         let had_cached = cached.is_some() || cached_stacking.is_some();
@@ -402,7 +435,7 @@ impl State {
                 .surfaces
                 .get(&child_id)
                 .and_then(|s| s.cached.as_ref())
-                .is_some_and(|cached| cached.pixels.is_some());
+                .is_some_and(|cached| cached.content.is_some());
             if let Some(child) = self.surfaces.get_mut(&child_id) {
                 if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
                 if let Some(pos) = child.pending_pos.take() { child.subsurface_pos = pos; }
@@ -429,7 +462,7 @@ impl State {
                 .surfaces
                 .get(&child_id)
                 .and_then(|s| s.cached.as_ref())
-                .is_some_and(|cached| cached.pixels.is_some());
+                .is_some_and(|cached| cached.content.is_some());
             if let Some(child) = self.surfaces.get_mut(&child_id) {
                 if let Some(update) = child.cached.take() { child.apply(update); }
                 if let Some(pos) = child.cached_pos.take() { child.subsurface_pos = pos; }
@@ -461,7 +494,7 @@ impl State {
         let (has_buffer, acked_ok) = match (self.surfaces.get(surf_id), self.toplevels.get(&top_id))
         {
             (Some(s), Some(t)) => (
-                s.pixels.is_some(),
+                s.content.is_some(),
                 t.acked_configure >= t.last_configure && t.last_configure > 0,
             ),
             _ => return,
@@ -614,6 +647,43 @@ impl State {
         }
     }
 
+    fn frame(&mut self) -> Frame {
+        if let Some(surface_id) = self.active_surface() {
+            let surface = &self.surfaces[&surface_id];
+            if let Some(SurfaceContent::Dmabuf(content)) = &surface.content {
+                let covers_output = (content.data.width, content.data.height) == self.out_size;
+                let alone = surface.stacking.iter().all(|id| {
+                    id == &surface_id || self.surfaces.get(id).is_none_or(|child| child.content.is_none())
+                });
+                if covers_output && alone {
+                    return Frame::Scanout(content.clone());
+                }
+                if !self.unscanned_logged {
+                    self.unscanned_logged = true;
+                    eprintln!("TINYLAND_DMABUF_NOT_SCANOUT size={}x{} alone={alone}", content.data.width, content.data.height);
+                }
+            }
+        }
+        Frame::Composed(self.compose())
+    }
+
+    fn release_unreferenced_dmabufs(&mut self, scanned_out: &[Arc<DmabufBuffer>]) {
+        let mut referenced: HashSet<ObjectId> = HashSet::new();
+        for surface in self.surfaces.values() {
+            referenced.extend(surface.content.as_ref().and_then(SurfaceContent::dmabuf_id));
+            referenced.extend(
+                surface.cached.as_ref().and_then(|cached| cached.content.as_ref()).and_then(|content| content.as_ref()).and_then(SurfaceContent::dmabuf_id),
+            );
+        }
+        self.unreleased_dmabufs.retain(|id, (buffer, data)| {
+            if referenced.contains(id) || scanned_out.iter().any(|shown| Arc::ptr_eq(shown, data)) {
+                return true;
+            }
+            buffer.release();
+            false
+        });
+    }
+
     fn compose(&self) -> Vec<u8> {
         let (w, h) = self.out_size;
         let mut fb = vec![0; w as usize * h as usize * 4];
@@ -628,7 +698,7 @@ impl State {
         let mut stack = vec![surface];
         while let Some(id) = stack.pop() {
             if let Some(surface) = self.surfaces.get_mut(&id) {
-                if surface.pixels.is_none() { continue; }
+                if surface.content.is_none() { continue; }
                 for callback in surface.callbacks.drain(..) { callback.done(time); }
                 stack.extend(surface.stacking.iter().filter(|child| **child != id).cloned());
             }
@@ -639,14 +709,21 @@ impl State {
         let Some(surface) = self.surfaces.get(surf_id) else { return; };
         let x = ox.saturating_add(surface.subsurface_pos.0);
         let y = oy.saturating_add(surface.subsurface_pos.1);
-        let Some(pixels) = &surface.pixels else { return; };
+        let Some(content) = &surface.content else { return; };
         for id in &surface.stacking {
             if id == surf_id {
-                blit_rows(fb, self.out_size.0, self.out_size.1, &pixels.bytes,
-                    pixels.width, pixels.height, x, y, pixels.format);
+                if let SurfaceContent::Shm(pixels) = content {
+                    blit_rows(fb, self.out_size.0, self.out_size.1, &pixels.bytes,
+                        pixels.width, pixels.height, x, y, pixels.format);
+                }
             } else { self.blit_surface(id, x, y, fb); }
         }
     }
+}
+
+enum Frame {
+    Composed(Vec<u8>),
+    Scanout(DmabufContent),
 }
 
 fn blit_rows(
@@ -791,6 +868,14 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
     dh.create_global::<State, wl_seat::WlSeat, ()>(5, ());
     dh.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
     dh.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
+    let dmabuf_feedback = match out.device_id().and_then(DmabufFeedback::new) {
+        Ok(feedback) => feedback,
+        Err(error) => {
+            eprintln!("dmabuf feedback init failed: {error}");
+            return 1;
+        }
+    };
+    dh.create_global::<State, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()>(4, ());
 
     let socket_name_str = socket_name.to_string_lossy().into_owned();
     let socket = match ListeningSocket::bind(socket_name_str.as_str()) {
@@ -811,6 +896,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         Err(error) => { eprintln!("keyboard init: {error}"); return 1; }
     };
     let mut state = State::new(dh.clone(), (w, h), keyboard);
+    state.dmabuf_feedback = Some(dmabuf_feedback);
 
     let mut app = match spawn_app(mode, runtime_dir.as_str(), sock_name.as_str(), command) {
         Ok(app) => app,
@@ -912,6 +998,8 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     Ok(Some(time)) => {
                         state.pending_present = false;
                         state.presented(time);
+                        out.evict_unused_imports();
+                        state.release_unreferenced_dmabufs(&out.scanned_out());
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -1003,13 +1091,31 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             eprintln!("dispatch failed: {e}");
             return 1;
         }
+        let scanned_out = match output.as_mut() {
+            Some(out) => {
+                out.evict_unused_imports();
+                out.scanned_out()
+            }
+            None => Vec::new(),
+        };
+        state.release_unreferenced_dmabufs(&scanned_out);
         if state.pending_present && !output.as_ref().is_some_and(|o| o.has_pending_flip()) {
             if let Some(out) = output.as_mut() {
-                let pixels = state.compose();
-                if let Err(error) = out.queue_present(&pixels, w, h) {
-                    if shutdown.signal().is_some() { return 0; }
-                    eprintln!("present failed: {error}");
-                    return 1;
+                let result = match state.frame() {
+                    Frame::Composed(pixels) => out.queue_present(&pixels, w, h).map_err(ScanoutError::Present),
+                    Frame::Scanout(content) => out.queue_client_scanout(&content.data).inspect_err(|error| {
+                        if let ScanoutError::Import(message) = error {
+                            content.buffer.post_error(0u32, format!("dmabuf scanout import failed: {message}"));
+                        }
+                    }),
+                };
+                match result {
+                    Ok(()) | Err(ScanoutError::Import(_)) => {}
+                    Err(ScanoutError::Present(error)) => {
+                        if shutdown.signal().is_some() { return 0; }
+                        eprintln!("present failed: {error}");
+                        return 1;
+                    }
                 }
             }
         }
@@ -1164,6 +1270,7 @@ fn spawn_app(mode: &str, runtime_dir: &str, socket_name: &str, command: &[std::f
 }
 
 mod dispatch_impl;
+mod dmabuf_impl;
 
 #[cfg(test)]
 mod tests;

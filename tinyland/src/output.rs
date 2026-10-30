@@ -1,4 +1,5 @@
-use drm::buffer::{Buffer as _, DrmFourcc};
+use crate::dmabuf::DmabufBuffer;
+use drm::buffer::{Buffer as _, DrmFourcc, DrmModifier, PlanarBuffer};
 use drm::control::connector::{self};
 use drm::control::dumbbuffer::DumbBuffer;
 use drm::control::framebuffer;
@@ -7,6 +8,7 @@ use drm::Device;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::Path;
+use std::sync::Arc;
 
 struct Card(File);
 
@@ -93,6 +95,8 @@ pub struct DrmOutput {
     card: std::sync::Arc<Card>,
     buffers: [ScanoutBuffer; 2],
     front: usize,
+    front_client: Option<Arc<DmabufBuffer>>,
+    client_imports: Vec<ClientImport>,
     crtc: drm::control::crtc::Handle,
     width: u32,
     height: u32,
@@ -100,9 +104,42 @@ pub struct DrmOutput {
     in_flight: Option<InFlight>,
 }
 
+enum FlipTarget {
+    Dumb(usize),
+    Client(Arc<DmabufBuffer>),
+}
+
 struct InFlight {
-    back: usize,
+    target: FlipTarget,
     deadline: std::time::Instant,
+}
+
+struct ClientImport {
+    buffer: Arc<DmabufBuffer>,
+    fb: framebuffer::Handle,
+}
+
+#[derive(Debug)]
+pub enum ScanoutError {
+    Import(String),
+    Present(String),
+}
+
+struct ImportedPlane {
+    handle: drm::buffer::Handle,
+    width: u32,
+    height: u32,
+    offset: u32,
+    stride: u32,
+}
+
+impl PlanarBuffer for ImportedPlane {
+    fn size(&self) -> (u32, u32) { (self.width, self.height) }
+    fn format(&self) -> DrmFourcc { DrmFourcc::Xrgb8888 }
+    fn modifier(&self) -> Option<DrmModifier> { None }
+    fn pitches(&self) -> [u32; 4] { [self.stride, 0, 0, 0] }
+    fn handles(&self) -> [Option<drm::buffer::Handle>; 4] { [Some(self.handle), None, None, None] }
+    fn offsets(&self) -> [u32; 4] { [self.offset, 0, 0, 0] }
 }
 
 impl AsFd for DrmOutput {
@@ -210,7 +247,7 @@ impl DrmOutput {
         let back = ScanoutBuffer::new(card.clone(), w, h)?;
         eprintln!("TINYLAND_SCANOUT format=XRGB8888 buffers=2 size={w}x{h}");
         let mut out = DrmOutput {
-            card, buffers: [front, back], front: 0, crtc,
+            card, buffers: [front, back], front: 0, front_client: None, client_imports: Vec::new(), crtc,
             width: w, height: h, mode_path: "unset", in_flight: None,
         };
         if let Some(origin) = origin {
@@ -388,6 +425,57 @@ impl DrmOutput {
         self.present_pixels(&pixels, self.width, self.height)
     }
 
+    pub fn device_id(&self) -> Result<u64, String> {
+        rustix::fs::fstat(self.card.as_ref()).map(|stat| stat.st_rdev).map_err(|error| format!("stat drm device: {error}"))
+    }
+
+    pub fn scanned_out(&self) -> Vec<Arc<DmabufBuffer>> {
+        let in_flight = match &self.in_flight {
+            Some(InFlight { target: FlipTarget::Client(buffer), .. }) => Some(buffer.clone()),
+            _ => None,
+        };
+        self.front_client.iter().cloned().chain(in_flight).collect()
+    }
+
+    pub fn evict_unused_imports(&mut self) {
+        let shown = self.scanned_out();
+        let card = self.card.clone();
+        self.client_imports.retain(|import| {
+            if Arc::strong_count(&import.buffer) > 1 || shown.iter().any(|buffer| Arc::ptr_eq(buffer, &import.buffer)) {
+                return true;
+            }
+            if let Err(error) = card.destroy_framebuffer(import.fb) { eprintln!("destroy client framebuffer: {error}"); }
+            false
+        });
+    }
+
+    fn client_framebuffer(&mut self, buffer: &Arc<DmabufBuffer>) -> Result<framebuffer::Handle, String> {
+        if let Some(import) = self.client_imports.iter().find(|import| Arc::ptr_eq(&import.buffer, buffer)) {
+            return Ok(import.fb);
+        }
+        if (buffer.width, buffer.height) != self.size() {
+            return Err(format!("dmabuf {}x{} does not cover the {}x{} output", buffer.width, buffer.height, self.width, self.height));
+        }
+        let handle = self.card.prime_fd_to_buffer(buffer.fd.as_fd()).map_err(|error| format!("prime import: {error}"))?;
+        let plane = ImportedPlane { handle, width: buffer.width, height: buffer.height, offset: buffer.offset, stride: buffer.stride };
+        let fb = self.card.add_planar_framebuffer(&plane, drm::control::FbCmd2Flags::empty());
+        if let Err(error) = self.card.close_buffer(handle) { eprintln!("close imported gem handle: {error}"); }
+        let fb = fb.map_err(|error| format!("add dmabuf framebuffer: {error}"))?;
+        self.client_imports.push(ClientImport { buffer: buffer.clone(), fb });
+        Ok(fb)
+    }
+
+    pub fn queue_client_scanout(&mut self, buffer: &Arc<DmabufBuffer>) -> Result<(), ScanoutError> {
+        if self.in_flight.is_some() {
+            return Err(ScanoutError::Present("page flip already pending".into()));
+        }
+        let fb = self.client_framebuffer(buffer).map_err(ScanoutError::Import)?;
+        self.card.page_flip(self.crtc, fb, drm::control::PageFlipFlags::EVENT, None)
+            .map_err(|error| ScanoutError::Present(format!("queue client page flip: {error}")))?;
+        self.in_flight = Some(InFlight { target: FlipTarget::Client(buffer.clone()), deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
+        Ok(())
+    }
+
     pub fn has_pending_flip(&self) -> bool {
         self.in_flight.is_some()
     }
@@ -416,21 +504,32 @@ impl DrmOutput {
         self.card.dirty_framebuffer(buffer.fb, &[rect]).map_err(|error| format!("dirty framebuffer: {error}"))?;
         self.card.page_flip(self.crtc, buffer.fb, drm::control::PageFlipFlags::EVENT, None)
             .map_err(|error| format!("queue page flip: {error}"))?;
-        self.in_flight = Some(InFlight { back, deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
+        self.in_flight = Some(InFlight { target: FlipTarget::Dumb(back), deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
         Ok(())
     }
 
     pub fn poll_flip(&mut self) -> Result<Option<u32>, String> {
-        let (back, deadline) = match &self.in_flight {
-            Some(flight) => (flight.back, flight.deadline),
+        let deadline = match &self.in_flight {
+            Some(flight) => flight.deadline,
             None => return Ok(None),
         };
         let events = self.card.receive_flip_events().map_err(|error| format!("page flip events: {error}"))?;
         for event in events {
             if let drm::control::Event::PageFlip(event) = event {
                 if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
-                self.front = back;
-                self.in_flight = None;
+                match self.in_flight.take().map(|flight| flight.target) {
+                    Some(FlipTarget::Dumb(back)) => {
+                        self.front = back;
+                        self.front_client = None;
+                    }
+                    Some(FlipTarget::Client(buffer)) => {
+                        if self.front_client.is_none() {
+                            eprintln!("TINYLAND_CLIENT_SCANOUT size={}x{} stride={}", buffer.width, buffer.height, buffer.stride);
+                        }
+                        self.front_client = Some(buffer);
+                    }
+                    None => {}
+                }
                 eprintln!("TINYLAND_PRESENTED sequence={} time_ms={} path={}", event.frame, event.duration.as_millis(), self.mode_path);
                 return Ok(Some(event.duration.as_millis() as u32));
             }

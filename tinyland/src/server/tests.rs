@@ -1,5 +1,6 @@
 use super::*;
 use crate::shm::SurfacePixels;
+use crate::surface::SurfaceContent;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use wayland_server::{Client, Resource};
@@ -73,6 +74,13 @@ impl Fixture {
     }
 }
 
+fn shm_bytes(state: &State, surface: &wl_surface::WlSurface) -> Vec<u8> {
+    match state.surfaces[&surface.id()].content.as_ref() {
+        Some(SurfaceContent::Shm(pixels)) => pixels.bytes.clone(),
+        other => panic!("expected shm content, found {other:?}"),
+    }
+}
+
 #[test]
 fn synchronized_child_waits_for_parent_and_preserves_uncommitted_state() {
     let mut f = Fixture::new();
@@ -83,15 +91,15 @@ fn synchronized_child_waits_for_parent_and_preserves_uncommitted_state() {
     let buffer = f.buffer(&[1; 8]);
     f.request(&child, 1, &[buffer.id().protocol_id(), 0, 0]);
     f.request(&child, 6, &[]);
-    assert!(f.state.surfaces[&child.id()].pixels.is_none());
+    assert!(f.state.surfaces[&child.id()].content.is_none());
     let pending = f.buffer(&[2; 8]);
     f.request(&child, 1, &[pending.id().protocol_id(), 0, 0]);
     f.request(&parent, 6, &[]);
-    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [1; 8]);
+    assert_eq!(shm_bytes(&f.state, &child), [1; 8]);
     assert!(f.state.surfaces[&child.id()].pending.buffer.is_some());
     f.request(&child, 6, &[]);
     f.request(&parent, 6, &[]);
-    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [2; 8]);
+    assert_eq!(shm_bytes(&f.state, &child), [2; 8]);
 }
 
 #[test]
@@ -104,7 +112,7 @@ fn release_allows_client_reuse_without_changing_retained_pixels() {
     assert_eq!(&release[..4], &buffer.id().protocol_id().to_ne_bytes());
     f.state.buffers[&buffer.id()].1.file.set_len(0).unwrap();
     f.request(&buffer, 0, &[]);
-    assert_eq!(f.state.surfaces[&surface.id()].pixels.as_ref().unwrap().bytes,
+    assert_eq!(shm_bytes(&f.state, &surface),
         [1, 2, 3, 255, 4, 5, 6, 255]);
 }
 
@@ -242,7 +250,7 @@ fn desync_applies_cached_commit_without_consuming_pending_attachment() {
     let uncommitted = f.buffer(&[2; 8]);
     f.request(&child, 1, &[uncommitted.id().protocol_id(), 0, 0]);
     f.request(&subsurface, 5, &[]);
-    assert_eq!(f.state.surfaces[&child.id()].pixels.as_ref().unwrap().bytes, [1; 8]);
+    assert_eq!(shm_bytes(&f.state, &child), [1; 8]);
     assert!(f.state.surfaces[&child.id()].pending.buffer.is_some());
 }
 
@@ -466,12 +474,12 @@ fn logical_focus_is_single_active_toplevel_across_two_clients() {
     let kb_b = client2.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
     f.state.seats[1].keyboards.push(kb_b);
 
-    f.state.surfaces.get_mut(&surface_a.id()).unwrap().pixels = Some(SurfacePixels {
+    f.state.surfaces.get_mut(&surface_a.id()).unwrap().content = Some(SurfaceContent::Shm(SurfacePixels {
         bytes: vec![11; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
-    });
-    f.state.surfaces.get_mut(&surface_b.id()).unwrap().pixels = Some(SurfacePixels {
+    }));
+    f.state.surfaces.get_mut(&surface_b.id()).unwrap().content = Some(SurfaceContent::Shm(SurfacePixels {
         bytes: vec![22; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
-    });
+    }));
 
     f.state.toplevels.get_mut(&top_a).unwrap().mapped = true;
     f.state.set_active(top_a.clone());
@@ -544,12 +552,12 @@ fn two_toplevels_from_same_client_share_one_active_surface() {
     f.state.seats.push(SeatData::new(seat));
     let kb = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
     f.state.seats[0].keyboards.push(kb);
-    f.state.surfaces.get_mut(&first.id()).unwrap().pixels = Some(SurfacePixels {
+    f.state.surfaces.get_mut(&first.id()).unwrap().content = Some(SurfaceContent::Shm(SurfacePixels {
         bytes: vec![33; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
-    });
-    f.state.surfaces.get_mut(&second.id()).unwrap().pixels = Some(SurfacePixels {
+    }));
+    f.state.surfaces.get_mut(&second.id()).unwrap().content = Some(SurfaceContent::Shm(SurfacePixels {
         bytes: vec![44; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
-    });
+    }));
     f.state.toplevels.get_mut(&top_first).unwrap().mapped = true;
     f.state.set_active(top_first.clone());
     assert_eq!(f.state.compose()[0], 33);
@@ -603,7 +611,7 @@ fn per_client_memory_budget_rejects_without_harming_healthy_client() {
     f.request(&offender, 1, &[offender_buffer.id().protocol_id(), 0, 0]);
     let response = f.request(&offender, 6, &[]);
     assert!(String::from_utf8_lossy(&response).contains("memory budget"));
-    assert!(f.state.surfaces.get(&offender.id()).map(|s| s.pixels.is_none()).unwrap_or(true));
+    assert!(f.state.surfaces.get(&offender.id()).map(|s| s.content.is_none()).unwrap_or(true));
     let mut header = Vec::new();
     header.extend(healthy_surface.id().protocol_id().to_ne_bytes());
     header.extend((((8 + 3 * 4) as u32) << 16 | 1).to_ne_bytes());
@@ -617,7 +625,7 @@ fn per_client_memory_budget_rejects_without_harming_healthy_client() {
     socket2.write_all(&commit).unwrap();
     f.display.dispatch_clients(&mut f.state).unwrap();
     f.display.flush_clients().unwrap();
-    assert!(f.state.surfaces[&healthy_surface.id()].pixels.is_some());
+    assert!(f.state.surfaces[&healthy_surface.id()].content.is_some());
     let _ = drain_socket(&mut socket2);
 }
 
@@ -647,4 +655,99 @@ fn scale_and_transform_subset_is_accepted_but_ignored() {
     let bad_transform = h.surface();
     let response = h.request(&bad_transform, 7, &[999]);
     assert!(String::from_utf8_lossy(&response).contains("unknown buffer transform"));
+}
+
+impl Fixture {
+    fn dmabuf(&mut self, width: u32, height: u32) -> (wl_buffer::WlBuffer, Arc<DmabufBuffer>) {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(width as u64 * height as u64 * 4).unwrap();
+        let data = Arc::new(DmabufBuffer { fd: file.into(), width, height, offset: 0, stride: width * 4 });
+        let buffer = self.client.create_resource::<wl_buffer::WlBuffer, (), State>(&self.state.dh, 1, ()).unwrap();
+        self.state.dmabuf_buffers.insert(buffer.id(), (buffer.clone(), data.clone()));
+        (buffer, data)
+    }
+}
+
+fn released(data: &[u8], buffer: &wl_buffer::WlBuffer) -> bool {
+    let mut offset = 0;
+    while offset + 8 <= data.len() {
+        let id = u32::from_ne_bytes(data[offset..offset + 4].try_into().unwrap());
+        let header = u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+        if id == buffer.id().protocol_id() && header & 0xffff == 0 {
+            return true;
+        }
+        offset += (header >> 16).max(8) as usize;
+    }
+    false
+}
+
+#[test]
+fn dmabuf_is_released_only_after_it_is_replaced_and_off_screen() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    f.request(&xdg, 4, &[7]);
+    let (first, first_data) = f.dmabuf(2, 1);
+    f.request(&surface, 1, &[first.id().protocol_id(), 0, 0]);
+    let commit = f.request(&surface, 6, &[]);
+    assert!(!released(&commit, &first), "a committed dmabuf is never released at commit");
+    let Frame::Scanout(content) = f.state.frame() else { panic!("sole full-output dmabuf must scan out") };
+    assert!(Arc::ptr_eq(&content.data, &first_data));
+
+    let (second, second_data) = f.dmabuf(2, 1);
+    f.request(&surface, 1, &[second.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    f.state.release_unreferenced_dmabufs(&[first_data.clone()]);
+    f.display.flush_clients().unwrap();
+    assert!(!released(&drain_socket(&mut f.socket), &first), "the buffer on screen stays with the compositor");
+
+    f.state.release_unreferenced_dmabufs(&[second_data.clone()]);
+    f.display.flush_clients().unwrap();
+    let events = drain_socket(&mut f.socket);
+    assert!(released(&events, &first));
+    assert!(!released(&events, &second));
+}
+
+#[test]
+fn replaced_dmabuf_that_never_reached_the_screen_is_released_immediately() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let (first, _) = f.dmabuf(2, 1);
+    let (second, _) = f.dmabuf(2, 1);
+    f.request(&surface, 1, &[first.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    f.request(&surface, 1, &[second.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    f.state.release_unreferenced_dmabufs(&[]);
+    f.display.flush_clients().unwrap();
+    let events = drain_socket(&mut f.socket);
+    assert!(released(&events, &first));
+    assert!(!released(&events, &second));
+}
+
+#[test]
+fn dmabuf_that_does_not_cover_the_output_composes_without_reading_client_memory() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    f.request(&xdg, 4, &[7]);
+    let (small, _) = f.dmabuf(1, 1);
+    f.request(&surface, 1, &[small.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    let Frame::Composed(pixels) = f.state.frame() else { panic!("partial dmabuf must not scan out") };
+    assert_eq!(pixels, [0; 8]);
+}
+
+#[test]
+fn dmabuf_commits_do_not_charge_the_shm_memory_budget() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let shm = f.buffer(&[1; 8]);
+    f.request(&surface, 1, &[shm.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    assert_eq!(f.state.total_bytes, 8);
+    let (dmabuf, _) = f.dmabuf(2, 1);
+    f.request(&surface, 1, &[dmabuf.id().protocol_id(), 0, 0]);
+    f.request(&surface, 6, &[]);
+    assert_eq!(f.state.total_bytes, 0);
 }

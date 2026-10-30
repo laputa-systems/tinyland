@@ -32,7 +32,18 @@ frame callbacks. Display, socket, DRM, and input are polled together, so
 seat disable, shutdown, and device failure stay responsive during flip
 wait. `TINYLAND_PRESENTED` marks completion. Client shm is copied at commit in
 `src/server.rs`, then the buffer is released, so scanout never depends on
-client-writable memory.
+client shm.
+
+`zwp_linux_dmabuf_v1` v4 advertises XRGB8888 and ARGB8888 with the implicit
+modifier and the DRM device as main and scanout device, so Mesa clients on a
+render-capable GPU (virgl in QEMU) render on it instead of falling back to
+shm. Validation is in `src/dmabuf.rs`. A dmabuf that covers the whole output
+as the active toplevel's only visible surface is imported as a KMS
+framebuffer and flipped directly (`TINYLAND_CLIENT_SCANOUT`); the compositor
+never maps it. The buffer stays unreleased while it is on screen or in
+flight and is released once a later flip replaces it. A dmabuf that cannot
+scan out composes as black (`TINYLAND_DMABUF_NOT_SCANOUT`), and an import
+failure disconnects that client with a protocol error.
 
 QMP input in `harness/qmp.py` sends 7 keys as one 14-event transaction.
 An uncertain send exits 75 and is never retried; an explicit rejection is
