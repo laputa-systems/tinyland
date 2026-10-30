@@ -50,11 +50,27 @@ confirm presentation still meets the existing screenshot gates.
 - Foot profiles untouched and still passing at the harness level
   (KBVM smoke et al use the foot guest image).
 
+## Mesa: desktop GL enabled (EGL-only, no LLVM)
+
+- Options `opengl=false` → `true` (`packages/mesa/PKGBUILD.xsh` rel 1→2);
+  `llvm=disabled`, `glx=disabled` unchanged. No `libGL.so` (no GLX
+  without X11); desktop contexts come from EGL, which is all Ghostty links.
+- Generated sources regenerated for the new option set (70 → 81 outputs,
+  archive `48e216f3…` → `9938c1ac…`); the old set lacked the 11 desktop GL
+  tables. Procedure and tool versions in
+  `packages/mesa/files/generated/README.md`.
+- Payload 4.28M → 5.14M (+0.86MB). `DT_NEEDED` of every shipped ELF
+  re-verified: no `libLLVM`, no new runtime deps
+  (libm/libdrm/libwayland-client/libgbm/libgallium only).
+- Function: GLES 3.1 + render unchanged; new desktop probe reports
+  softpipe 3.3 compat ceiling with green FBO readback, machine-checked
+  by the proof (see `tinyland/docs/opengl-probe.md` for the numbers and
+  the virgl/llvmpipe decision).
+
 ## Blocker (carried, not resolved here)
 
-Ghostty needs desktop OpenGL (>=4.3 per campaign); the pinned Mesa has
-`opengl=false` (no libGL) and QEMU runs `virtio-gpu-pci` without
-`virgl=on`, so no 4.3 context exists. `tinyland/docs/opengl-probe.md`
-records the numbers and the virgl-preferred / llvmpipe-fallback
-decision. No Mesa flag changed; no ghostty guest proof claimed;
-promotion deferred until the renderer verdict is guest-proven.
+Ghostty needs desktop OpenGL 4.3 core; softpipe maxes at 3.3 compat
+(measured) and virgl has no host backing on this host. The llvmpipe
++LLVM path is costed in `tinyland/docs/opengl-probe.md` but not
+committed. No ghostty guest proof claimed; promotion deferred until a
+4.3-capable renderer is guest-proven.

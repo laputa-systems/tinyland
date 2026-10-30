@@ -1,61 +1,71 @@
 # OpenGL feasibility probe (Phase 3)
 
-Guest-executed where stated; build-only where noted. No Mesa flag changed.
+Measured 2026-10-30/31, Linux x86_64. Guest-executed where stated;
+otherwise host-executed against the exact packaged payloads with the
+container musl toolchain (same binaries the PM proof runs).
 
-## Current Mesa (pinned, `packages/mesa/PKGBUILD.xsh`)
+## Current Mesa (after `opengl=true`, `packages/mesa/PKGBUILD.xsh` rel 2)
 
 - Options: `platforms=wayland`, `gallium-drivers=softpipe,virgl`,
-  `egl/gbm/gles2` on, `opengl=false`, `llvm=disabled`, `glx=disabled`.
-- Proof (`packages/mesa/proof.xsh`, host-executed against the proof root):
-  surfaceless EGL init, GLES2 context, offscreen 8x8 render with red/blue
-  readback match. Reports `GL_RENDERER=softpipe`, `OpenGL ES 3.1 Mesa`,
-  `rendered`. This passed as a dependency of the ghostty-custom build
-  (mesa artifact `a11f0c78…`, payload 4.1M).
-- Desktop GL: none. `opengl=false` means no `libGL`; no desktop core
-  context exists to probe. Any `eglCreateContext` for desktop OpenGL
-  fails at link time (no library), not at version negotiation.
+  `egl/gbm/gles2` plus desktop `opengl` on, `llvm=disabled`,
+  `glx=disabled`. No libGL is shipped (no GLX without X11); desktop GL
+  is EGL-only, which is all Ghostty links.
+- Generated sources regenerated for the new option set per
+  `packages/mesa/files/generated/README.md` (81 outputs, archive
+  `9938c1ac…`): the `opengl=false` set (70 outputs) lacked 11 desktop
+  GL tables (`glapi_gentable.c`, `glapi_mapi_tmp.h`, `indirect*.c/h`,
+  `g_egldispatchstubs.c/h`, `egl.def`, `gles2.def`).
+- Proof (host-executed proof root, surfaceless EGL; same cases as the PM
+  proof, replicated manually against payloads `a1a11de8…` + musl +
+  libdrm + wayland-libs-client): `GL_RENDERER=softpipe`,
+  `GL_VERSION=OpenGL ES 3.1 Mesa 26.2.4` (unchanged), and:
+  `DESKTOP_GL_RENDERER=softpipe`,
+  `DESKTOP_GL_VERSION=3.3 (Compatibility Profile) Mesa 26.2.4`,
+  with a green 8x8 FBO clear + readback (`desktop-rendered`).
+  Command: container-musl `cc` build of the proof program, run under
+  the packaged `ld-musl` with `LD_LIBRARY_PATH` + `GBM_BACKENDS_PATH`.
+- Payload 4.28M → 5.14M (+0.86MB). `DT_NEEDED` unchanged apart from
+  the desktop driver: no `libLLVM`, no new runtime deps
+  (libm/libdrm/libwayland-client/libgbm/libgallium only).
 
 ## Ghostty renderer requirement (packaged binary)
 
-- `ghostty-custom-1.4.1-1` (artifact `8a48057a…`, payload 17.8M, binary
-  29.5M): `readelf -d` shows `libEGL.so.1`, `libwayland-client.so.0`,
-  `libxkbcommon.so.0`, `libc.so` only. No GTK/Adwaita/X11/glibc.
-- `--version` (proof root, `LD_LIBRARY_PATH` set): `Ghostty 1.4.1-dev`,
-  `app runtime: .wayland`, `renderer: renderer.generic.Renderer(renderer.OpenGL)`.
-  The renderer is desktop OpenGL, not GLES. Campaign threshold is
-  desktop core >=4.3 with offscreen readback match.
+- `ghostty-custom-1.4.1-1`: `app runtime: .wayland`,
+  `renderer: renderer.generic.Renderer(renderer.OpenGL)`; its source
+  (`src/renderer/OpenGL.zig`) requests an EGL 4.3 core profile context
+  (`MIN_VERSION_MAJOR=4`, `MIN_VERSION_MINOR=3`,
+  `EGL_OPENGL_CORE_PROFILE_BIT`) and fails closed with `OpenGLOutdated`
+  below 4.3.
 
 ## QEMU display (guest 3D path)
 
 - `system/qemu.xsh` launches `-device virtio-gpu-pci` with no `virgl=on`
-  and `-display none` in test mode. The guest DRM is 2D virtio-gpu;
-  there is no virgl host backing, so the guest `virgl` gallium driver
-  has no transport. The only active 3D driver is `softpipe` (software).
+  and `-display none` in test mode; the host QEMU offers no virgl
+  device option and only the `none` display backend, so the guest
+  `virgl` gallium driver has no host backing. Active 3D driver:
+  `softpipe` (software) only.
 
 ## Verdict
 
-Softpipe without LLVM cannot do desktop 4.3 (softpipe exposes desktop
-3.3 at best; 4.3+ needs llvmpipe+LLVM or virgl with host 3D). Current
-closure has neither: `opengl=false` (no desktop GL at all) and
-`llvm=disabled` (no llvmpipe). Guest e2e with Ghostty is blocked on a
-desktop-GL renderer init reproducer (Phase 4/5 must show Ghostty
-failing to create its OpenGL context under the current Mesa).
+Softpipe desktop ceiling is **3.3 compat** (measured above), below
+Ghostty's required **4.3 core**. virgl is unavailable on this host.
+The only 4.3-capable software path is llvmpipe, which needs LLVM.
 
-## Decision (recorded before any Mesa change, per campaign)
+## Decision (recorded with numbers; no LLVM committed)
 
-- Preferred: virgl. Enable host 3D (`virgl=on` + EGL display in
-  `system/qemu.xsh` test mode only if KVM/host supports it) and Mesa
-  `-Dopengl=true` (keep `-Dllvm=disabled`, keep `gallium-drivers=
-  softpipe,virgl`). No guest LLVM, no `libLLVM` in the kiosk closure
-  (current profiles forbid `libLLVM` via `forbidden_sonames`).
-- Fallback: llvmpipe. Requires `-Dllvm=enabled`, which pulls the LLVM
-  runtime into the guest image and the `llvm-toolchain` build closure.
-  Current mesa payload is 4.1M with no LLVM; llvmpipe+LLVM would add
-  tens of MB (libLLVM alone dwarfs the 2.1M tinyland and 4.1M mesa)
-  and violate the minimal-closure rule that forbids `libLLVM`.
-  Measure before adopting: rebuild Mesa with LLVM, record `DT_NEEDED`,
-  payload bytes, plan nodes, and cold-start delta.
-
-No Mesa flag changed in this phase. Phase 4 profiles are built against
-the current Mesa to capture the blocker reproducer; the Mesa change
-lands only with the virgl QEMU + proof update.
+- Preferred remains virgl where a host supports it (no guest LLVM,
+  no `libLLVM` in the kiosk closure, which current profiles forbid via
+  `forbidden_sonames`). Not available here: host QEMU has no virgl
+  device option and no EGL-capable display backend.
+- llvmpipe fallback cost, measured: the `llvm-toolchain` payload
+  (145.8M) ships `libLTO`/`libclang` only — no `libLLVM.so`. A shared
+  `libLLVM` (~100MB class, against the 3.0M tinyland / 5.1M mesa
+  scale) would need a recipe change plus a new runtime package, Mesa
+  `-Dllvm=enabled` plus another generated-sources regeneration, the
+  `libLLVM` profile-ban lift on ghostty profiles only, and a full
+  guest re-proof. Estimated guest growth: tens of MB (order of the
+  whole current kiosk image). Not committed in this slice.
+- Landed instead: EGL-only desktop GL (3.3, functional, +0.86MB, no
+  new deps) with the ceiling machine-checked by the mesa proof, so a
+  future driver change that moves the ceiling re-opens this decision
+  loudly rather than silently.
