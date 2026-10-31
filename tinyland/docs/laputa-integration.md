@@ -1,9 +1,9 @@
 # Laputa integration
 
-Target: unprivileged tinyland session, seatd-mediated devices, Laputa foot
-`1.28.0` in Laputa image. `qemu-tinyland-ghostty` is the canonical profile;
-the foot and dwl profiles remain rollbacks. No tiling, pointer, GPU, or
-desktop scope change.
+Target: unprivileged tinyland session, seatd-mediated devices, Ghostty
+`1.4.1` in the Laputa image. `qemu-tinyland-ghostty` is the only graphical
+profile. No tiling, pointer, or desktop scope change; GPU use is limited to
+virgl rendering with a 2D scanout.
 
 ## Boundaries
 
@@ -100,32 +100,33 @@ run without source checkout or `.work`. Host builds need the system
 libseat dev package (`apk add libseat-dev` on Alpine) for
 `.cargo/config.toml`'s `/usr/lib` search path.
 
-## Gates for `qemu-tinyland-foot`
+## Gates for `qemu-tinyland-ghostty`
 
-1. Unprivileged operation: tinyland and foot as ordinary user, direct opens
+1. Unprivileged operation: tinyland and Ghostty as ordinary user, direct opens
    denied, broker-mediated succeeds, no direct fallback on broker loss.
-2. Exact chain: Laputa kernel, tinyland artifact, foot artifact, brokers
+2. Exact chain: Laputa kernel, tinyland artifact, Ghostty artifact, brokers
    produce real input to changed pixels to confirmed presentation with
    post-input marker.
 3. Lifecycle: app exit, compositor crash, broker loss, shutdown, supported
    device loss have bounded observable outcomes. VT disable and resume
    qualified separately when VT-bound.
 4. Measured dependencies: actual ELF closure shows which packages leave the
-   image. Foot keeps pixman, wayland client and cursor, fontconfig, fonts.
-   Remove only unreachable packages.
+   image. Ghostty keeps libEGL, wayland client and cursor, libxkbcommon, and
+   fonts; Mesa provides virgl. Remove only unreachable packages.
 
 `make seat` proves gates 1 and the device half of 2 in tinyland's own
 guest (Alpine foot 1.17.2, C seatd 0.8.0): denial marker, seat open,
 brokered devices, post-input marker with confirmed presentation. The
-`qemu-tinyland-foot` Laputa profile proves gates 1 and 2 against the exact
-Laputa chain (foot 1.28.0, C seatd 0.9.3, Laputa image): unprivileged
-session, denial marker, brokered DRM/input, real input to changed pixels
-to confirmed presentation, plus the 26-package closure for gate 4.
-Lifecycle qualification beyond app exit and broker loss, and the
-seatd-rs/mdevd-rs substitutions, remain open in that order.
+`qemu-tinyland-ghostty` Laputa profile proves gates 1 and 2 against the
+exact Laputa chain (Ghostty 1.4.1, Rust brokers, Laputa image):
+unprivileged session, denial marker, brokered DRM/input, real input to
+changed pixels to confirmed presentation, plus the measured closure for
+gate 4. Lifecycle qualification covers compositor crash, broker loss,
+single-device loss, application exit, and scanner shutdown.
 
 ## Sequencing
 
-Qualify tinyland against C seatd reference, substitute `seatd-rs`,
-substitute `mdevd-rs`, then qualify complete Rust combination. Keep dwl
-reference until swap. `doas-rs` does not block display devices.
+Qualify tinyland against the C seatd reference, substitute `seatd-rs`,
+substitute `mdevd-rs`, then qualify the complete Rust combination. The dwl
+reference and the foot profiles were removed after the Ghostty profile was
+promoted. `doas-rs` does not block display devices.

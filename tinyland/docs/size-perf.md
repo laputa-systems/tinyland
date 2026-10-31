@@ -1,8 +1,7 @@
 # Size / performance report (Phases 0-6 landed)
 
-Measured 2026-10-30/31, Linux x86_64. The canonical profile is
-`qemu-tinyland-ghostty`; the foot and dwl profiles are rollbacks. Numbers
-cite the commands that produced them.
+Measured 2026-10-30/31, Linux x86_64. `qemu-tinyland-ghostty` is the only
+graphical profile. Numbers cite the commands that produced them.
 
 ## Tinyland: libxkbcommon -> KBVM
 
@@ -45,16 +44,11 @@ confirm presentation still meets the existing screenshot gates.
 
 ## Profile closures / images
 
-- `qemu-tinyland-ghostty` (canonical): 38 plan nodes; disk image 308M,
-  rootfs 276M.
-- `qemu-tinyland-foot` / `qemu-tinyland-vt-foot`: 41 plan nodes each;
-  `qemu-dwl-foot`: 48 nodes (unchanged, Phase 0). Foot images are 288M
-  disk / 256M rootfs.
-- Canonical cold start: session ready with a 4.3 context at 13.82 s guest
+- `qemu-tinyland-ghostty`: 38 plan nodes; disk image 308M, rootfs 276M.
+- Cold start: session ready with a 4.3 context at 13.82 s guest
   uptime (proof start 11.37 s; a prior run measured 10.51 s). Idle RSS
   after input: tinyland 7,172 KB, Ghostty 41,504 KB. Renderer: virgl,
   OpenGL 4.3 core. Host screenshot is 1280x800 with 0.61% magenta.
-- Foot and dwl rollbacks are untouched and still passing.
 
 ## Mesa: desktop GL enabled (EGL-only, no LLVM)
 
