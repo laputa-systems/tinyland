@@ -1,7 +1,8 @@
-# Size / performance report (Phases 0-3 landed)
+# Size / performance report (Phases 0-6 landed)
 
-Measured 2026-10-30/31, Linux x86_64. No Mesa flag changed; no profile
-promotion. Numbers cite the commands that produced them.
+Measured 2026-10-30/31, Linux x86_64. The canonical profile is
+`qemu-tinyland-ghostty`; the foot and dwl profiles are rollbacks. Numbers
+cite the commands that produced them.
 
 ## Tinyland: libxkbcommon -> KBVM
 
@@ -29,8 +30,9 @@ confirm presentation still meets the existing screenshot gates.
 
 ## Ghostty Custom (new package)
 
-- Binary: 29.5M ELF (`ghostty-custom-x86_64-linux-musl.tar.gz` 18.4M,
-  SHA-256 `7de995d7…`; aarch64 17.9M `56409052…`, runtime not claimed).
+- Binary: 29.5M ELF (`ghostty-custom-x86_64-linux-musl.tar.gz` 18.3M,
+  SHA-256 `9b56d0b8…`; aarch64 17.9M `110f7f08…`, runtime not claimed).
+  Package `ghostty-custom-1.4.1-2`, payload 18,516,608 bytes.
 - DT_NEEDED: `libEGL.so.1`, `libwayland-client.so.0`,
   `libxkbcommon.so.0`, `libc.so`. No GTK/Adwaita/D-Bus/X11/glibc.
 - PM artifact `8a48057a…` (payload 17.8M), proof green x86_64
@@ -43,12 +45,16 @@ confirm presentation still meets the existing screenshot gates.
 
 ## Profile closures / images
 
+- `qemu-tinyland-ghostty` (canonical): 38 plan nodes; disk image 308M,
+  rootfs 276M.
 - `qemu-tinyland-foot` / `qemu-tinyland-vt-foot`: 41 plan nodes each;
-  `qemu-dwl-foot`: 48 nodes (unchanged, Phase 0). No ghostty profile
-  landed: e2e is blocked on the Phase 3 desktop-GL verdict (below), so
-  no new image sizes or cold-start numbers are claimed.
-- Foot profiles untouched and still passing at the harness level
-  (KBVM smoke et al use the foot guest image).
+  `qemu-dwl-foot`: 48 nodes (unchanged, Phase 0). Foot images are 288M
+  disk / 256M rootfs.
+- Canonical cold start: session ready with a 4.3 context at 13.82 s guest
+  uptime (proof start 11.37 s; a prior run measured 10.51 s). Idle RSS
+  after input: tinyland 7,172 KB, Ghostty 41,504 KB. Renderer: virgl,
+  OpenGL 4.3 core. Host screenshot is 1280x800 with 0.61% magenta.
+- Foot and dwl rollbacks are untouched and still passing.
 
 ## Mesa: desktop GL enabled (EGL-only, no LLVM)
 
@@ -67,10 +73,11 @@ confirm presentation still meets the existing screenshot gates.
   by the proof (see `tinyland/docs/opengl-probe.md` for the numbers and
   the virgl/llvmpipe decision).
 
-## Blocker (carried, not resolved here)
+## Rendering path (resolved)
 
 Ghostty needs desktop OpenGL 4.3 core; softpipe maxes at 3.3 compat
-(measured) and virgl has no host backing on this host. The llvmpipe
-+LLVM path is costed in `tinyland/docs/opengl-probe.md` but not
-committed. No ghostty guest proof claimed; promotion deferred until a
-4.3-capable renderer is guest-proven.
+(measured), and virgl on the host GPU gives the guest 4.3 core (guest
+measured). QEMU cannot screendump a GL scanout, so the profile scans out
+on a 2D `virtio-gpu-pci` and renders on a `virtio-gpu-gl-pci`; the host
+pixel proof and the 4.3 context both hold. The llvmpipe +LLVM path is
+costed in `tinyland/docs/opengl-probe.md` and was not needed.
