@@ -1,8 +1,9 @@
 # Laputa integration
 
 Target: unprivileged tinyland session, seatd-mediated devices, Laputa foot
-`1.28.0` in Laputa image. Keeps `qemu-dwl-foot` as reference until replacement
-passes. No tiling, pointer, GPU, or desktop scope change.
+`1.28.0` in Laputa image. `qemu-tinyland-ghostty` is the canonical profile;
+the foot and dwl profiles remain rollbacks. No tiling, pointer, GPU, or
+desktop scope change.
 
 ## Boundaries
 
