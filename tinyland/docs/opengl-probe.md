@@ -77,6 +77,13 @@ seat before the second roundtrip. In the same function,
 pointer to a stack local that `connect` then returns by value, so any
 later registry event writes through a dangling pointer.
 
+Fixed in the fork at `15e551072`: the seat is created at bind time from an
+in-place connection, and the app loop polls the display fd instead of
+spinning. `qemu-tinyland-ghostty` passes against a local build of that
+commit; the published `release-354a4e32…` tarball predates it, so
+`packages/ghostty-custom` needs a new release before the profile test can
+pass from the pinned package.
+
 ## Verdict
 
 Softpipe desktop ceiling is **3.3 compat** (measured above), below
