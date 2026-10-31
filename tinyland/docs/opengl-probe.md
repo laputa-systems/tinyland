@@ -39,17 +39,51 @@ container musl toolchain (same binaries the PM proof runs).
 
 ## QEMU display (guest 3D path)
 
-- `system/qemu.xsh` launches `-device virtio-gpu-pci` with no `virgl=on`
-  and `-display none` in test mode; the host QEMU offers no virgl
-  device option and only the `none` display backend, so the guest
-  `virgl` gallium driver has no host backing. Active 3D driver:
-  `softpipe` (software) only.
+- Profiles with `qemu_gpu: Virgl` launch `virtio-gpu-gl-pci` with
+  `-display egl-headless` in test mode (`system/qemu.xsh`). The host
+  QEMU needs Alpine's optional virgl and EGL display modules
+  (`docs/QEMU.md`); without them only `virtio-gpu-pci` and
+  `-display none` exist, which is what the first probe saw.
+- Guest-executed (2026-10-30, Linux x86_64 host with an AMD radeonsi
+  GPU): the exact-attribs reproducer below, run in a guest on
+  `virtio-gpu-gl-pci`, printed
+  `renderer=virgl (... (radeonsi, ...)) version=4.3 (Core Profile) Mesa 26.2.4`
+  for Ghostty's attribs, and `4.3 (Compatibility Profile)` for the
+  attrib-less maximum.
+
+## Ghostty presentation path (guest Wayland trace)
+
+`WAYLAND_DEBUG=client` on the packaged Ghostty in `qemu-tinyland-ghostty`
+shows it binds `wl_compositor`, `wl_shm`, `wl_seat`, and `xdg_wm_base`,
+never `zwp_linux_dmabuf_v1`. It renders through EGL off screen (its log
+reads `info(opengl): loaded OpenGL 4.3`), reads the frame back into one
+1280x800 `wl_shm` buffer, and attaches that buffer each frame. Tinyland
+therefore needs no dmabuf support for Ghostty, and the GL ceiling is set
+only by the driver behind the render node.
+
+## Keyboard blocker (Ghostty Custom)
+
+The packaged Ghostty receives no keys. In its source at the pinned commit
+`354a4e3`, `src/apprt/wayland/connection.zig` binds `wl_seat` inside the
+registry roundtrip, and the second roundtrip dispatches the seat's
+`capabilities` event. The seat listener is attached only later, in
+`src/apprt/wayland/App.zig` (`Seat.init`), so libwayland discards the
+event (`discarded wl_seat#6.capabilities(2)` in the trace), `getKeyboard`
+is never called, and no `wl_keyboard` exists. Compositors send seat
+capabilities once at bind, so this reproduces on any compositor. The fix
+belongs in Ghostty Custom: attach the seat listener at bind, or create the
+seat before the second roundtrip. In the same function,
+`registry.setListener(*Connection, onRegistryEvent, &self)` stores a
+pointer to a stack local that `connect` then returns by value, so any
+later registry event writes through a dangling pointer.
 
 ## Verdict
 
 Softpipe desktop ceiling is **3.3 compat** (measured above), below
-Ghostty's required **4.3 core**. virgl is unavailable on this host.
-The only 4.3-capable software path is llvmpipe, which needs LLVM.
+Ghostty's required **4.3 core**. virgl on a GPU host provides **4.3
+core** (guest-measured above), and `qemu-tinyland-ghostty` renders
+Ghostty on it. llvmpipe remains the 4.3-capable path for hosts without
+virgl and needs LLVM.
 
 Exact-attribs reproducer (packaged `mesa-26.2.4-2` payloads + musl,
 container-musl `cc`, run under the packaged `ld-musl`): requesting
@@ -101,8 +135,9 @@ ceiling check.
 
 - Preferred remains virgl where a host supports it (no guest LLVM,
   no `libLLVM` in the kiosk closure, which current profiles forbid via
-  `forbidden_sonames`). Not available here: host QEMU has no virgl
-  device option and no EGL-capable display backend.
+  `forbidden_sonames`). Selected for `qemu-tinyland-ghostty` once the
+  host QEMU virgl modules were installed; it measured 4.3 core in the
+  guest.
 - llvmpipe fallback cost, measured: the `llvm-toolchain` payload
   (145.8M) ships `libLTO`/`libclang` only — no `libLLVM.so`. A shared
   `libLLVM` (~100MB class, against the 3.0M tinyland / 5.1M mesa
