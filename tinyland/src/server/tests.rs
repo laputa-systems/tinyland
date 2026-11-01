@@ -181,6 +181,16 @@ fn premultiplied_argb_blends_over_existing_pixels_and_clips() {
 }
 
 #[test]
+fn abgr_and_xbgr_swap_red_and_blue_into_the_framebuffer() {
+    let mut fb = vec![0; 4];
+    blit_rows(&mut fb, 1, 1, &[10, 20, 30, 0], 1, 1, 0, 0, ShmFormat::Xbgr8888);
+    assert_eq!(fb, [30, 20, 10, 255]);
+    let mut fb = vec![100, 80, 60, 255];
+    blit_rows(&mut fb, 1, 1, &[40, 30, 20, 128], 1, 1, 0, 0, ShmFormat::Abgr8888);
+    assert_eq!(fb, [69, 69, 69, 255]);
+}
+
+#[test]
 fn buffer_commit_before_configure_ack_is_a_protocol_error() {
     let mut f = Fixture::new();
     let surface = f.surface();

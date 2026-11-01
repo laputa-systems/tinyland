@@ -672,22 +672,17 @@ fn blit_rows(
             }
             let s = (sy as usize * src_w as usize + sx as usize) * 4;
             let d = (dy as usize * out_w as usize + dx as usize) * 4;
-            match format {
-                ShmFormat::Xrgb8888 => {
-                    fb[d] = rows[s];
-                    fb[d + 1] = rows[s + 1];
-                    fb[d + 2] = rows[s + 2];
-                    fb[d + 3] = 0xFF;
+            let (blue, green, red) = format.channel_offsets();
+            let source = [rows[s + blue], rows[s + green], rows[s + red]];
+            if format.has_alpha() {
+                let a = rows[s + 3] as u32;
+                for (channel, value) in source.iter().enumerate() {
+                    fb[d + channel] = (*value as u32 + fb[d + channel] as u32 * (255 - a) / 255).min(255) as u8;
                 }
-                ShmFormat::Argb8888 => {
-                    let a = rows[s + 3] as u32;
-                    for channel in 0..3 {
-                        fb[d + channel] = (rows[s + channel] as u32
-                            + fb[d + channel] as u32 * (255 - a) / 255).min(255) as u8;
-                    }
-                    fb[d + 3] = 0xFF;
-                }
+            } else {
+                fb[d..d + 3].copy_from_slice(&source);
             }
+            fb[d + 3] = 0xFF;
         }
     }
 }

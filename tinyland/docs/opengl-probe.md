@@ -57,7 +57,14 @@ container musl toolchain (same binaries the PM proof runs).
 shows it binds `wl_compositor`, `wl_shm`, `wl_seat`, and `xdg_wm_base`,
 never `zwp_linux_dmabuf_v1`. It renders through EGL off screen (its log
 reads `info(opengl): loaded OpenGL 4.3`), reads the frame back into one
-1280x800 `wl_shm` buffer, and attaches that buffer each frame. Tinyland
+1280x800 `wl_shm` buffer in ABGR8888 (the byte order of a GL RGBA readback), and attaches
+that buffer each frame. Like the seat events below, Ghostty never attaches a `wl_shm`
+listener before the roundtrip, so libwayland discards the compositor's `format` events
+(`discarded wl_shm#5.format(0)` in the trace) and the client assumes ABGR8888 without
+checking. Tinyland therefore advertises ABGR8888 and XBGR8888 beside ARGB8888 and XRGB8888
+and swaps red and blue while copying them; before it did, the compositor rejected the
+buffer with a `wl_shm_pool` protocol error and Ghostty crashed in `libwayland-client`.
+A format the compositor does not list still disconnects the client. Tinyland
 therefore needs no dmabuf support for Ghostty, and the GL ceiling is set
 only by the driver behind the render node.
 

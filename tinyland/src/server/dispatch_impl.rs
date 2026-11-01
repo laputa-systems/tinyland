@@ -437,6 +437,8 @@ impl GlobalDispatch<wl_shm::WlShm, ()> for State {
         let shm = data_init.init(resource, ());
         shm.format(wl_shm::Format::Argb8888);
         shm.format(wl_shm::Format::Xrgb8888);
+        shm.format(wl_shm::Format::Abgr8888);
+        shm.format(wl_shm::Format::Xbgr8888);
     }
 }
 
@@ -513,10 +515,12 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                 let fmt = match format {
                     wayland_server::WEnum::Value(wl_shm::Format::Argb8888) => ShmFormat::Argb8888,
                     wayland_server::WEnum::Value(wl_shm::Format::Xrgb8888) => ShmFormat::Xrgb8888,
+                    wayland_server::WEnum::Value(wl_shm::Format::Abgr8888) => ShmFormat::Abgr8888,
+                    wayland_server::WEnum::Value(wl_shm::Format::Xbgr8888) => ShmFormat::Xbgr8888,
                     other => {
                         resource.post_error(
                             wl_shm_pool::Error::InvalidFormat as u32,
-                            format!("only ARGB8888/XRGB8888 supported, got {other:?}"),
+                            format!("only ARGB8888, XRGB8888, ABGR8888 and XBGR8888 are supported, got {other:?}"),
                         );
                         return;
                     }

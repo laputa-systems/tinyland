@@ -2,6 +2,22 @@
 pub enum ShmFormat {
     Argb8888,
     Xrgb8888,
+    Abgr8888,
+    Xbgr8888,
+}
+
+impl ShmFormat {
+    /// Byte offsets of the blue, green and red channels inside one pixel.
+    pub fn channel_offsets(self) -> (usize, usize, usize) {
+        match self {
+            Self::Argb8888 | Self::Xrgb8888 => (0, 1, 2),
+            Self::Abgr8888 | Self::Xbgr8888 => (2, 1, 0),
+        }
+    }
+
+    pub fn has_alpha(self) -> bool {
+        matches!(self, Self::Argb8888 | Self::Abgr8888)
+    }
 }
 
 pub struct ShmPoolData {
