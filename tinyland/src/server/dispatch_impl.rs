@@ -513,10 +513,10 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                 let fmt = match format {
                     wayland_server::WEnum::Value(wl_shm::Format::Argb8888) => ShmFormat::Argb8888,
                     wayland_server::WEnum::Value(wl_shm::Format::Xrgb8888) => ShmFormat::Xrgb8888,
-                    _ => {
+                    other => {
                         resource.post_error(
                             wl_shm_pool::Error::InvalidFormat as u32,
-                            "only ARGB8888/XRGB8888 supported".to_string(),
+                            format!("only ARGB8888/XRGB8888 supported, got {other:?}"),
                         );
                         return;
                     }
