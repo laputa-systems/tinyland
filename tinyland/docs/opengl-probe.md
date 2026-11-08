@@ -28,6 +28,21 @@ container musl toolchain (same binaries the PM proof runs).
   the desktop driver: no `libLLVM`, no new runtime deps
   (libm/libdrm/libwayland-client/libgbm/libgallium only).
 
+## Mesa with lavapipe (`packages/mesa/PKGBUILD.xsh` rel 3)
+
+Measured 2026-11-08, Linux x86_64. Lavapipe (`vulkan-drivers=swrast`)
+requires LLVM; Mesa links the static `llvm-static` archives (LLVM
+23.1.5), so no `libLLVM` or `libc++` soname enters the closure and the
+profiles' `libLLVM` ban stands. Building lavapipe also builds llvmpipe,
+which now serves software GL ahead of softpipe: the PM proof reports
+`GL_RENDERER=llvmpipe (LLVM 23.1.5, 256 bits)`, `OpenGL ES 3.2`, and
+desktop `4.6 (Compatibility Profile)`. Ghostty still renders on virgl in
+the canonical profile and passes its guest proof on this Mesa. The
+software path now exceeds Ghostty's 4.3 core requirement, but no profile
+uses it. Installed Mesa grew from 22.8 MB to 142.9 MB: libgallium
+68.1 MB and `libvulkan_lvp.so` 71.8 MB, each carrying its own LLVM.
+The softpipe and payload numbers above describe rel 2.
+
 ## Ghostty renderer requirement (packaged binary)
 
 - `ghostty-custom-1.4.1-1`: `app runtime: .wayland`,
