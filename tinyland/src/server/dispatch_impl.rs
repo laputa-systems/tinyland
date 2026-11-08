@@ -232,12 +232,8 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
             .filter(|(_, t)| t.surface == id)
             .map(|(top_id, _)| top_id.clone())
             .collect();
-        state.toplevels.retain(|_, t| t.surface != id);
         for top_id in removed_toplevels {
-            state.toplevel_order.retain(|order| order != &top_id);
-        }
-        if state.active_surface().as_ref() == Some(&id) {
-            state.deactivate_surface(&id);
+            state.retire_toplevel(&top_id);
         }
         state.pending_present = true;
     }
@@ -1166,11 +1162,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         resource: &xdg_toplevel::XdgToplevel,
         _data: &(),
     ) {
-        if let Some(top) = state.toplevels.remove(&resource.id()) {
-            state.toplevel_order.retain(|order| order != &resource.id());
-            state.clear_focus(&top.surface);
-            state.pending_present = true;
-        }
+        state.retire_toplevel(&resource.id());
     }
 }
 

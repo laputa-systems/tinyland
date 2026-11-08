@@ -593,6 +593,16 @@ impl State {
         self.send_selection();
     }
 
+    fn retire_toplevel(&mut self, top_id: &ObjectId) {
+        let Some(top) = self.toplevels.get_mut(top_id) else { return };
+        top.mapped = false;
+        let surface = top.surface.clone();
+        self.deactivate_surface(&surface);
+        self.toplevels.remove(top_id);
+        self.toplevel_order.retain(|order| order != top_id);
+        self.pending_present = true;
+    }
+
     fn clear_focus(&mut self, id: &ObjectId) {
         self.deactivate_surface(id);
     }

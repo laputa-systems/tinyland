@@ -658,3 +658,48 @@ fn scale_and_transform_subset_is_accepted_but_ignored() {
     let response = h.request(&bad_transform, 7, &[999]);
     assert!(String::from_utf8_lossy(&response).contains("unknown buffer transform"));
 }
+
+fn two_mapped_toplevels_with_second_active(f: &mut Fixture) -> (wl_surface::WlSurface, wl_surface::WlSurface, ObjectId) {
+    use wayland_server::protocol::{wl_keyboard, wl_seat};
+    let first = f.surface();
+    let second = f.surface();
+    let _ = f.toplevel(&first);
+    let _ = f.toplevel(&second);
+    let top_first = f.state.toplevels.iter().find(|(_, t)| t.surface == first.id()).map(|(id, _)| id.clone()).unwrap();
+    let top_second = f.state.toplevels.iter().find(|(_, t)| t.surface == second.id()).map(|(id, _)| id.clone()).unwrap();
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat));
+    let kb = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats[0].keyboards.push(kb);
+    for (surface, top, value) in [(&first, &top_first, 33), (&second, &top_second, 44)] {
+        f.state.toplevels.get_mut(top).unwrap().acked_configure = 7;
+        f.state.surfaces.get_mut(&surface.id()).unwrap().pixels = Some(SurfacePixels {
+            bytes: vec![value; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
+        });
+        f.state.toplevels.get_mut(top).unwrap().mapped = true;
+        f.state.set_active(top.clone());
+    }
+    assert_eq!(f.state.compose()[0], 44);
+    (first, second, top_second)
+}
+
+#[test]
+fn destroying_the_later_toplevel_returns_to_the_earlier_one() {
+    let mut f = Fixture::new();
+    let (first, _second, top_second) = two_mapped_toplevels_with_second_active(&mut f);
+    let top = f.state.toplevels[&top_second].resource.clone();
+    f.request(&top, 0, &[]);
+    assert_eq!(f.state.active_surface(), Some(first.id()));
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(first.id()));
+    assert_eq!(f.state.compose()[0], 33);
+}
+
+#[test]
+fn destroying_the_later_surface_returns_to_the_earlier_one() {
+    let mut f = Fixture::new();
+    let (first, second, _top_second) = two_mapped_toplevels_with_second_active(&mut f);
+    f.request(&second, 0, &[]);
+    assert_eq!(f.state.active_surface(), Some(first.id()));
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(first.id()));
+    assert_eq!(f.state.compose()[0], 33);
+}
