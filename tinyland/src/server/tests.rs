@@ -5,6 +5,8 @@ use std::os::unix::net::UnixStream;
 use wayland_server::{Client, Resource};
 use wayland_server::protocol::{wl_surface, wl_shm_pool};
 
+mod surfaces;
+
 struct Fixture {
     display: Display<State>,
     state: State,

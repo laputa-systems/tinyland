@@ -3,7 +3,7 @@ use crate::input::SeatData;
 use crate::positioner::{Positioner, Rect};
 use crate::shell::{Configures, PopupData, ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat};
-use crate::surface::SurfaceData;
+use crate::surface::{Region, SurfaceData};
 use std::os::unix::io::OwnedFd;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::protocol::{
@@ -64,7 +64,7 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
                     return;
                 }
                 let region = data_init.init(id, ());
-                state.regions.insert(region.id(), Vec::new());
+                state.regions.insert(region.id(), Region::default());
             }
             _ => {}
         }
@@ -98,10 +98,19 @@ impl Dispatch<wl_region::WlRegion, ()> for State {
                         super::display_error::post(resource, super::display_error::DisplayError::NoMemory, "too many region rectangles");
                         return;
                     }
-                    entry.push((x, y, width, height));
+                    entry.add(Rect { x, y, width, height });
                 }
             }
-            wl_region::Request::Subtract { .. } => {}
+            wl_region::Request::Subtract { x, y, width, height } => {
+                if width > 0 && height > 0 {
+                    use crate::server::MAX_REGION_RECTS;
+                    if entry.len() >= MAX_REGION_RECTS {
+                        super::display_error::post(resource, super::display_error::DisplayError::NoMemory, "too many region rectangles");
+                        return;
+                    }
+                    entry.subtract(Rect { x, y, width, height });
+                }
+            }
             wl_region::Request::Destroy => {}
             _ => {}
         }
@@ -156,9 +165,15 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                 }
             }
             wl_surface::Request::SetOpaqueRegion { .. } => {}
-            wl_surface::Request::SetInputRegion { .. } => {}
+            wl_surface::Request::SetInputRegion { region } => {
+                let copy = region.map(|region| state.regions.get(&region.id()).cloned().unwrap_or_default());
+                if let Some(s) = state.surfaces.get_mut(&id) {
+                    s.pending.input_region = Some(copy);
+                }
+            }
             wl_surface::Request::Commit => {
                 state.apply_commit(&id);
+                state.refocus_pointer();
             }
             wl_surface::Request::SetBufferTransform { transform } => {
                 match transform {
@@ -196,22 +211,19 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
 
     fn destroyed(
         state: &mut Self,
-        _client: wayland_server::backend::ClientId,
+        client: wayland_server::backend::ClientId,
         resource: &wl_surface::WlSurface,
         _data: &(),
     ) {
         let id = resource.id();
         if let Some(s) = state.surfaces.remove(&id) {
-            let client = s.resource.client().map(|client| client.id());
             let current = s.pixels.as_ref().map(|pixels| pixels.bytes.len()).unwrap_or(0);
             let cached = s.cached.as_ref().and_then(|cached| cached.pixels.as_ref()).and_then(|pixels| pixels.as_ref()).map(|pixels| pixels.bytes.len()).unwrap_or(0);
-            if let Some(client) = client {
-                if current > 0 {
-                    state.release_bytes(client.clone(), current);
-                }
-                if cached > 0 {
-                    state.release_bytes(client, cached);
-                }
+            if current > 0 {
+                state.release_bytes(client.clone(), current);
+            }
+            if cached > 0 {
+                state.release_bytes(client, cached);
             }
             if let Some(parent) = s.parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &id);
@@ -379,7 +391,10 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                     s.subsurface_sync = true;
                 }
             }
-            wl_subsurface::Request::SetDesync => state.desynchronize(&surf_id),
+            wl_subsurface::Request::SetDesync => {
+                state.desynchronize(&surf_id);
+                state.refocus_pointer();
+            }
             wl_subsurface::Request::PlaceAbove { sibling } => restack(state, resource, &surf_id, &sibling.id(), true),
             wl_subsurface::Request::PlaceBelow { sibling } => restack(state, resource, &surf_id, &sibling.id(), false),
             wl_subsurface::Request::Destroy => {}
@@ -389,12 +404,12 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
 
     fn destroyed(
         state: &mut Self,
-        _client: wayland_server::backend::ClientId,
+        client: wayland_server::backend::ClientId,
         resource: &wl_subsurface::WlSubsurface,
         _data: &(),
     ) {
         if let Some(surf_id) = state.subsurfaces.remove(&resource.id()) {
-            let (parent, cached_bytes, client) = match state.surfaces.get_mut(&surf_id) {
+            let (parent, cached_bytes) = match state.surfaces.get_mut(&surf_id) {
                 Some(surface) => {
                     let cached_bytes = surface
                         .cached
@@ -403,19 +418,16 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                         .and_then(|pixels| pixels.as_ref())
                         .map(|pixels| pixels.bytes.len())
                         .unwrap_or(0);
-                    let client = surface.resource.client().map(|client| client.id());
                     surface.cached = None;
                     surface.cached_pos = None;
                     surface.cached_stacking = None;
                     surface.pending_pos = None;
-                    (surface.parent.take(), cached_bytes, client)
+                    (surface.parent.take(), cached_bytes)
                 }
-                None => (None, 0, None),
+                None => (None, 0),
             };
             if cached_bytes > 0 {
-                if let Some(client) = client {
-                    state.release_bytes(client, cached_bytes);
-                }
+                state.release_bytes(client, cached_bytes);
             }
             if let Some(parent) = parent {
                 if let Some(parent) = state.surfaces.get_mut(&parent) { parent.stacking.retain(|child| child != &surf_id);
@@ -423,6 +435,7 @@ impl Dispatch<wl_subsurface::WlSubsurface, ()> for State {
                     if let Some(order) = &mut parent.cached_stacking { order.retain(|child| child != &surf_id); } }
             }
             state.pending_present = true;
+            state.refocus_pointer();
         }
     }
 }

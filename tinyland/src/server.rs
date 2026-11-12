@@ -40,7 +40,7 @@ pub struct State {
     buffers: HashMap<ObjectId, (wl_buffer::WlBuffer, ShmBufferData)>,
     seats: Vec<SeatData>,
     outputs: Vec<(ClientId, wl_output::WlOutput)>,
-    regions: HashMap<ObjectId, Vec<(i32, i32, i32, i32)>>,
+    regions: HashMap<ObjectId, crate::surface::Region>,
     selection: SelectionState,
     positioners: HashMap<ObjectId, Positioner>,
     popups: Vec<PopupData>,
@@ -329,7 +329,7 @@ impl State {
             }
             None => None,
         };
-        let update = SurfaceUpdate { pixels, callbacks: pending.callbacks };
+        let update = SurfaceUpdate { pixels, callbacks: pending.callbacks, input_region: pending.input_region };
         if self.synchronized(surf_id) {
             self.surfaces.get_mut(surf_id).unwrap().cached.get_or_insert_with(SurfaceUpdate::default).merge(update);
             if let Some(order) = pending_stacking {

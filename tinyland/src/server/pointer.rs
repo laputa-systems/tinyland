@@ -1,6 +1,7 @@
+use super::popup::MAX_TREE_DEPTH;
 use super::{now_ms, State};
 use crate::input::{Motion, PointerFrame};
-use crate::positioner::Rect;
+use crate::positioner::clip_to_i32;
 use wayland_server::backend::{ClientId, ObjectId};
 use wayland_server::protocol::wl_pointer;
 use wayland_server::Resource;
@@ -36,10 +37,27 @@ impl PointerState {
 }
 
 impl State {
-    fn surface_rect(&self, surf_id: &ObjectId) -> Option<Rect> {
-        let (x, y) = self.surface_origin(surf_id)?;
-        let pixels = self.surfaces.get(surf_id)?.pixels.as_ref()?;
-        Some(Rect { x, y, width: pixels.width as i32, height: pixels.height as i32 })
+    fn hit_in_tree(&self, id: &ObjectId, origin: (i64, i64), x: f64, y: f64, depth: usize) -> Option<ObjectId> {
+        if depth >= MAX_TREE_DEPTH {
+            return None;
+        }
+        let surface = self.surfaces.get(id)?;
+        let pixels = surface.pixels.as_ref()?;
+        for child in surface.stacking.iter().rev() {
+            if child == id {
+                let local = (x - origin.0 as f64, y - origin.1 as f64);
+                let inside = local.0 >= 0.0 && local.1 >= 0.0 && local.0 < f64::from(pixels.width) && local.1 < f64::from(pixels.height);
+                if inside && surface.input_region.as_ref().is_none_or(|region| region.contains(local.0, local.1)) {
+                    return Some(id.clone());
+                }
+            } else if let Some(position) = self.surfaces.get(child).map(|surface| surface.subsurface_pos) {
+                let child_origin = (origin.0 + i64::from(position.0), origin.1 + i64::from(position.1));
+                if let Some(hit) = self.hit_in_tree(child, child_origin, x, y, depth + 1) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
     }
 
     pub(super) fn surface_at(&self, x: f64, y: f64) -> Option<ObjectId> {
@@ -49,7 +67,10 @@ impl State {
             .into_iter()
             .rev()
             .chain(std::iter::once(active))
-            .find(|surface| self.surface_rect(surface).is_some_and(|rect| rect.contains(x, y)))
+            .find_map(|root| {
+                let origin = self.surface_origin_wide(&root)?;
+                self.hit_in_tree(&root, origin, x, y, 0)
+            })
     }
 
     pub(super) fn pointers_of(&self, surf_id: &ObjectId) -> Vec<wl_pointer::WlPointer> {
@@ -64,8 +85,8 @@ impl State {
     }
 
     fn local_position(&self, surf_id: &ObjectId) -> (f64, f64) {
-        let (ox, oy) = self.surface_origin(surf_id).unwrap_or((0, 0));
-        (self.pointer.position.0 - f64::from(ox), self.pointer.position.1 - f64::from(oy))
+        let (ox, oy) = self.surface_origin_wide(surf_id).unwrap_or((0, 0));
+        (self.pointer.position.0 - ox as f64, self.pointer.position.1 - oy as f64)
     }
 
     fn pointer_frame_to(&self, surf_id: &ObjectId) {
@@ -153,9 +174,9 @@ impl State {
         }
         let surface = cursor.surface.clone()?;
         self.surfaces.get(&surface)?.pixels.as_ref()?;
-        let x = self.pointer.position.0.floor() as i32 - cursor.hotspot.0;
-        let y = self.pointer.position.1.floor() as i32 - cursor.hotspot.1;
-        Some((surface, (x, y)))
+        let x = self.pointer.position.0.floor() as i64 - i64::from(cursor.hotspot.0);
+        let y = self.pointer.position.1.floor() as i64 - i64::from(cursor.hotspot.1);
+        Some((surface, (clip_to_i32(x), clip_to_i32(y))))
     }
 
     pub(super) fn pointer_frame(&mut self, frame: PointerFrame) {
