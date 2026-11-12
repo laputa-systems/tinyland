@@ -1,4 +1,4 @@
-use crate::input::{self, InputDevice, InputEvent, Keyboard, SeatData};
+use crate::input::{self, HeldInput, InputDevice, InputEvent, InputId, Keyboard, PointerFrame, Released, SeatData};
 use crate::output::DrmOutput;
 use crate::seat::Session;
 use crate::selection::SelectionState;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::backend::{ClientData, ClientId, ObjectId};
 use wayland_server::protocol::{
-    wl_buffer, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
     wl_subcompositor,
 };
 use wayland_server::{Client, Display, DisplayHandle, ListeningSocket, Resource};
@@ -25,6 +25,10 @@ impl ClientData for UdsClientData {
     fn disconnected(&self, _client_id: ClientId, reason: wayland_server::backend::DisconnectReason) {
         eprintln!("TINYLAND_CLIENT_DISCONNECTED {reason:?}");
     }
+}
+
+struct SubmittedFrame {
+    callbacks: Vec<(ObjectId, wl_callback::WlCallback)>,
 }
 
 pub struct State {
@@ -47,12 +51,16 @@ pub struct State {
     pointer: PointerState,
     has_pointer: bool,
     pending_present: bool,
+    submitted: Option<SubmittedFrame>,
+    held: HeldInput,
     mapped_logged: bool,
     active_toplevel: Option<ObjectId>,
     toplevel_order: Vec<ObjectId>,
     client_bytes: HashMap<ClientId, usize>,
     total_bytes: usize,
 }
+
+const REVOKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub const MAX_PER_CLIENT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
@@ -91,6 +99,8 @@ impl State {
         pointer: PointerState::centered(out_size),
         has_pointer: false,
         pending_present: false,
+        submitted: None,
+        held: HeldInput::default(),
         mapped_logged: false,
         active_toplevel: None,
         toplevel_order: Vec::new(),
@@ -559,13 +569,14 @@ impl State {
             if let Some(surface) = self.surfaces.get(&new_surface) {
                 let new_client = surface.resource.client();
                 let [depressed, latched, locked, group] = self.keyboard.modifiers();
+                let held: Vec<u8> = self.held.keys().flat_map(|code| u32::from(code).to_ne_bytes()).collect();
                 for seat in &mut self.seats {
                     if seat.resource.client() != new_client {
                         continue;
                     }
                     seat.keyboard_focus = Some(new_surface.clone());
                     for keyboard in &seat.keyboards {
-                        keyboard.enter(serial, &surface.resource, Vec::new());
+                        keyboard.enter(serial, &surface.resource, held.clone());
                         keyboard.modifiers(serial, depressed, latched, locked, group);
                     }
                 }
@@ -696,13 +707,103 @@ impl State {
         fb
     }
 
-    fn presented(&mut self, time: u32) {
+    fn submit_frame(&mut self) -> Vec<u8> {
+        assert!(self.submitted.is_none(), "a frame was submitted while another was in flight");
+        let pixels = self.compose();
+        let callbacks = self.take_visible_callbacks();
+        self.pending_present = false;
+        self.submitted = Some(SubmittedFrame { callbacks });
+        pixels
+    }
+
+    fn complete_frame(&mut self, time: u32) {
+        let frame = self.submitted.take().expect("a flip completed without a submitted frame");
+        for (surface, callback) in frame.callbacks {
+            if self.surfaces.contains_key(&surface) && callback.is_alive() {
+                callback.done(time);
+            }
+        }
+    }
+
+    fn abandon_frame(&mut self) {
+        let Some(frame) = self.submitted.take() else { return };
+        for (surface, callback) in frame.callbacks.into_iter().rev() {
+            if let Some(surface) = self.surfaces.get_mut(&surface) {
+                surface.callbacks.insert(0, callback);
+            }
+        }
+        self.pending_present = true;
+    }
+
+    fn take_visible_callbacks(&mut self) -> Vec<(ObjectId, wl_callback::WlCallback)> {
+        let mut batch = Vec::new();
         let mut stack: Vec<ObjectId> = self.visible_surfaces().into_iter().map(|(surface, _)| surface).collect();
         while let Some(id) = stack.pop() {
             if let Some(surface) = self.surfaces.get_mut(&id) {
                 if surface.pixels.is_none() { continue; }
-                for callback in surface.callbacks.drain(..) { callback.done(time); }
+                batch.extend(surface.callbacks.drain(..).map(|callback| (id.clone(), callback)));
                 stack.extend(surface.stacking.iter().filter(|child| **child != id).cloned());
+            }
+        }
+        batch
+    }
+
+    fn input_event(&mut self, source: InputId, event: InputEvent) -> bool {
+        match event {
+            InputEvent::Key { code, down } => {
+                if !self.held.key(source, code, down) {
+                    return false;
+                }
+                self.key(code, down);
+                true
+            }
+            InputEvent::Pointer(mut frame) => {
+                frame.buttons.retain(|(code, down)| self.held.button(source, *code, *down));
+                if frame.is_empty() {
+                    return false;
+                }
+                self.pointer_frame(frame);
+                true
+            }
+        }
+    }
+
+    fn input_lost(&mut self, source: InputId) {
+        let released = self.held.lose(source);
+        self.release(released);
+    }
+
+    fn suspend_input(&mut self) {
+        let released = self.held.release_all();
+        self.release(released);
+        let before = self.keyboard.modifiers();
+        if self.keyboard.reset_stuck() != before {
+            self.publish_modifiers();
+        }
+    }
+
+    fn release(&mut self, released: Released) {
+        for code in released.keys {
+            self.key(code, false);
+        }
+        if !released.buttons.is_empty() {
+            self.pointer_frame(PointerFrame {
+                buttons: released.buttons.into_iter().map(|code| (code, false)).collect(),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn publish_modifiers(&mut self) {
+        let serial = self.next_serial();
+        let [depressed, latched, locked, group] = self.keyboard.modifiers();
+        let Some(focused) = self.active_surface() else { return };
+        for seat in &self.seats {
+            if seat.keyboard_focus.as_ref() != Some(&focused) {
+                continue;
+            }
+            for keyboard in &seat.keyboards {
+                keyboard.modifiers(serial, depressed, latched, locked, group);
             }
         }
     }
@@ -786,6 +887,220 @@ fn create_globals(dh: &DisplayHandle) {
     dh.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
 }
 
+struct OpenInput {
+    id: InputId,
+    broker_id: Option<i32>,
+    device: InputDevice,
+}
+
+enum InputRead {
+    Events(Vec<(std::time::SystemTime, InputEvent)>),
+    Gone,
+}
+
+trait SeatDevices {
+    fn read_inputs(&mut self) -> Result<Vec<(InputId, InputRead)>, String>;
+    fn remove_input(&mut self, id: InputId, broker: Option<&Session<'_>>);
+    fn input_count(&self) -> usize;
+    fn release(&mut self, broker: &Session<'_>) -> Result<(), String>;
+    fn reopen(&mut self, broker: &Session<'_>) -> Result<(), String>;
+}
+
+struct Devices {
+    output: Option<DrmOutput>,
+    drm_id: Option<i32>,
+    inputs: Vec<OpenInput>,
+    next_input: u32,
+    drm_path: std::path::PathBuf,
+    width: u32,
+    height: u32,
+}
+
+impl Devices {
+    fn new(drm_path: &std::path::Path, width: u32, height: u32) -> Self {
+        Self { output: None, drm_id: None, inputs: Vec::new(), next_input: 0, drm_path: drm_path.to_path_buf(), width, height }
+    }
+
+    fn adopt(&mut self, broker_id: Option<i32>, device: InputDevice) {
+        let id = InputId(self.next_input);
+        self.next_input += 1;
+        self.inputs.push(OpenInput { id, broker_id, device });
+    }
+
+    fn open_direct(&mut self) -> Result<(), String> {
+        self.output = Some(
+            DrmOutput::open(&self.drm_path, self.width, self.height)
+                .map_err(|error| format!("display init failed: {error}"))?,
+        );
+        let found = input::discover_devices().map_err(|error| format!("input discovery: {error}"))?;
+        for device in found {
+            self.adopt(None, device);
+        }
+        Ok(())
+    }
+}
+
+impl SeatDevices for Devices {
+    fn read_inputs(&mut self) -> Result<Vec<(InputId, InputRead)>, String> {
+        let mut reads = Vec::new();
+        for input in &mut self.inputs {
+            match input.device.read() {
+                Ok(events) => reads.push((input.id, InputRead::Events(events))),
+                Err(error) if input::is_gone(&error) => reads.push((input.id, InputRead::Gone)),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(reads)
+    }
+
+    fn remove_input(&mut self, id: InputId, broker: Option<&Session<'_>>) {
+        let Some(position) = self.inputs.iter().position(|input| input.id == id) else { return };
+        let input = self.inputs.remove(position);
+        drop(input.device);
+        if let (Some(broker), Some(broker_id)) = (broker, input.broker_id) {
+            let _ = broker.close_device(broker_id, "input");
+        }
+    }
+
+    fn input_count(&self) -> usize {
+        self.inputs.len()
+    }
+
+    fn release(&mut self, broker: &Session<'_>) -> Result<(), String> {
+        self.output = None;
+        for input in self.inputs.drain(..) {
+            drop(input.device);
+            if let Some(id) = input.broker_id {
+                broker.close_device(id, "input")?;
+            }
+        }
+        if let Some(id) = self.drm_id.take() {
+            broker.close_device(id, "drm")?;
+        }
+        Ok(())
+    }
+
+    fn reopen(&mut self, broker: &Session<'_>) -> Result<(), String> {
+        let (fd, id) = broker.open_device(&self.drm_path)?;
+        let origin = format!("seat:{}", self.drm_path.display());
+        self.output = Some(DrmOutput::open_from_file(File::from(fd), self.width, self.height, Some(origin))?);
+        self.drm_id = Some(id);
+        for path in input::discover_device_paths()? {
+            let origin = format!("seat:{}", path.display());
+            let (fd, id) = broker.open_device(&path)?;
+            match input::device_from_fd(fd, &origin) {
+                Ok(Some(device)) => self.adopt(Some(id), device),
+                Ok(None) => broker.close_device(id, &origin)?,
+                Err(error) => {
+                    let _ = broker.close_device(id, &origin);
+                    return Err(error);
+                }
+            }
+        }
+        input::require_keyboard(self.inputs.iter().map(|input| &input.device))
+    }
+}
+
+struct Seat<'a, D> {
+    broker: Option<Session<'a>>,
+    devices: D,
+    suspended: bool,
+}
+
+impl<D: SeatDevices> Seat<'_, D> {
+    fn service_broker(&mut self, state: &mut State) -> Result<(), String> {
+        let Some(broker) = self.broker.as_ref() else { return Ok(()) };
+        broker.dispatch().map_err(|error| format!("seat dispatch failed: {error}"))?;
+        if broker.take_disabled() {
+            self.suspend(state)
+        } else if broker.take_enabled() && self.suspended {
+            self.resume(state)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn suspend(&mut self, state: &mut State) -> Result<(), String> {
+        let broker = self.broker.as_ref().expect("a seat suspends only under a broker");
+        state.suspend_input();
+        state.abandon_frame();
+        self.devices
+            .release(broker)
+            .and_then(|()| broker.acknowledge_disable())
+            .map_err(|error| format!("seat disable failed: {error}"))?;
+        eprintln!("TINYLAND_SEAT_DISABLED");
+        seat_marker("laputa-seat-disabled");
+        self.suspended = true;
+        Ok(())
+    }
+
+    fn resume(&mut self, state: &mut State) -> Result<(), String> {
+        let broker = self.broker.as_ref().expect("a seat resumes only under a broker");
+        self.devices.reopen(broker).map_err(|error| format!("seat resume failed: {error}"))?;
+        state.pending_present = true;
+        self.suspended = false;
+        eprintln!("TINYLAND_SEAT_ENABLED");
+        seat_marker("laputa-seat-enabled");
+        Ok(())
+    }
+
+    fn service_inputs(&mut self, state: &mut State) -> Result<(), String> {
+        let mut arrived = Vec::new();
+        let mut lost = Vec::new();
+        for (id, read) in self.devices.read_inputs()? {
+            match read {
+                InputRead::Events(events) => {
+                    arrived.extend(events.into_iter().map(|(time, event)| (time, id, event)));
+                }
+                InputRead::Gone => lost.push(id),
+            }
+        }
+        if !lost.is_empty() {
+            if let Some(broker) = self.broker.as_ref() {
+                broker
+                    .dispatch_wait(REVOKE_SETTLE)
+                    .map_err(|error| format!("seat dispatch failed: {error}"))?;
+                if broker.take_disabled() {
+                    return self.suspend(state);
+                }
+            }
+        }
+        arrived.sort_by_key(|(time, _, _)| *time);
+        for (_, id, event) in arrived {
+            let pressed = match &event {
+                InputEvent::Key { code, down: true } => Some(*code),
+                _ => None,
+            };
+            if state.input_event(id, event) {
+                if let Some(code) = pressed {
+                    self.request_vt_switch(state, code);
+                }
+            }
+        }
+        if !lost.is_empty() {
+            for id in lost {
+                state.input_lost(id);
+                self.devices.remove_input(id, self.broker.as_ref());
+            }
+            let remaining = self.devices.input_count();
+            eprintln!("TINYLAND_INPUT_LOST remaining={remaining}");
+            if remaining == 0 {
+                return Err("no input devices remain".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn request_vt_switch(&mut self, state: &mut State, code: u16) {
+        let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) else { return };
+        let Some(broker) = self.broker.as_ref() else { return };
+        eprintln!("TINYLAND_VT_SWITCH vt={vt}");
+        if let Err(error) = broker.switch_session(vt) {
+            eprintln!("seat switch failed: {error}");
+        }
+    }
+}
+
 pub fn run(config: &ServerConfig<'_>) -> i32 {
     let mode = config.mode;
     let device = config.device;
@@ -803,8 +1118,9 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         }
     };
 
-    let mut broker = if seat_mode {
-        match Session::open() {
+    let cancelled = || shutdown.signal().is_some();
+    let broker = if seat_mode {
+        match Session::open(&cancelled) {
             Ok(session) => Some(session),
             Err(error) => {
                 eprintln!("seat open failed: {error}");
@@ -815,34 +1131,17 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         None
     };
 
-    let mut output: Option<DrmOutput> = None;
-    let mut drm_id: Option<i32> = None;
-    let mut inputs: Vec<(Option<i32>, InputDevice)> = Vec::new();
-    if let Some(broker) = broker.as_ref() {
-        if let Err(error) = open_brokered_devices(
-            broker, device, width, height,
-            &mut output, &mut drm_id, &mut inputs,
-        ) {
-            eprintln!("brokered display init failed: {error}");
-            return 1;
-        }
-    } else {
-        match DrmOutput::open(device, width, height) {
-            Ok(o) => output = Some(o),
-            Err(e) => {
-                eprintln!("display init failed: {e}");
-                return 1;
-            }
-        }
-        match input::discover_devices() {
-            Ok(found) => inputs = found.into_iter().map(|dev| (None, dev)).collect(),
-            Err(error) => {
-                eprintln!("input discovery: {error}");
-                return 1;
-            }
-        }
+    let mut devices = Devices::new(device, width, height);
+    let opened = match broker.as_ref() {
+        Some(broker) => devices.reopen(broker).map_err(|error| format!("brokered display init failed: {error}")),
+        None => devices.open_direct(),
+    };
+    if let Err(error) = opened {
+        eprintln!("{error}");
+        return 1;
     }
-    let Some(out) = output.as_mut() else {
+    let mut seat = Seat { broker, devices, suspended: false };
+    let Some(out) = seat.devices.output.as_mut() else {
         eprintln!("display init failed: no output");
         return 1;
     };
@@ -882,24 +1181,21 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         Err(error) => { eprintln!("keyboard init: {error}"); return 1; }
     };
     let mut state = State::new(dh.clone(), (w, h), keyboard);
-    state.has_pointer = inputs.iter().any(|(_, device)| device.is_pointer());
+    state.has_pointer = seat.devices.inputs.iter().any(|input| input.device.is_pointer());
 
     let mut app = match spawn_app(mode, runtime_dir.as_str(), sock_name.as_str(), command) {
         Ok(app) => app,
         Err(error) => { eprintln!("foot spawn failed: {error}"); return 1; }
     };
-    let ready_path = output.as_ref().map(|o| o.mode_path().to_string()).unwrap_or_else(|| "none".into());
+    let ready_path = seat.devices.output.as_ref().map(|o| o.mode_path().to_string()).unwrap_or_else(|| "none".into());
     eprintln!("TINYLAND_COMPOSITOR_READY socket={sock_name} size={w}x{h} path={ready_path}");
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
     let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
-    let mut suspended = false;
-    let mut vt_chord: Option<u16> = None;
-    let mut lost = Vec::new();
     loop {
         if shutdown.signal().is_some() { return 0; }
-        let poll_timeout = match output.as_ref().and_then(|o| o.flip_deadline()) {
+        let poll_timeout = match seat.devices.output.as_ref().and_then(|o| o.flip_deadline()) {
             Some(deadline) => {
                 let now = std::time::Instant::now();
                 if now >= deadline {
@@ -916,19 +1212,19 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             None => base_timeout,
         };
         {
-            let seat_fd = broker.as_ref().map(|b| b.poll_fd());
+            let seat_fd = seat.broker.as_ref().map(|b| b.poll_fd());
             let mut fds = vec![
                 rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN),
                 rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN),
             ];
-            if let Some(out) = output.as_ref() {
+            if let Some(out) = seat.devices.output.as_ref() {
                 fds.push(rustix::event::PollFd::new(out, rustix::event::PollFlags::IN));
             }
             if let Some(fd) = &seat_fd {
                 fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
             }
-            for (_, device) in &inputs {
-                fds.push(rustix::event::PollFd::new(device, rustix::event::PollFlags::IN));
+            for input in &seat.devices.inputs {
+                fds.push(rustix::event::PollFd::new(&input.device, rustix::event::PollFlags::IN));
             }
             match rustix::event::poll(&mut fds, Some(&poll_timeout)) {
                 Ok(_) => {}
@@ -941,46 +1237,14 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                 }
             }
         }
-        if let Some(broker) = broker.as_mut() {
-            if let Err(error) = broker.dispatch() {
-                eprintln!("seat dispatch failed: {error}");
-                return 1;
-            }
-            if broker.take_disabled() {
-                if let Err(error) = disable_seat_devices(broker, &mut output, &mut drm_id, &mut inputs) {
-                    eprintln!("seat disable failed: {error}");
-                    return 1;
-                }
-                suspended = true;
-                lost.clear();
-            } else if broker.take_enabled() && suspended {
-                match open_brokered_devices(broker, device, width, height, &mut output, &mut drm_id, &mut inputs) {
-                    Ok(()) => {
-                        state.keyboard.reset_stuck();
-                        state.pending_present = true;
-                        suspended = false;
-                        eprintln!("TINYLAND_SEAT_ENABLED");
-                        seat_marker("laputa-seat-enabled");
-                        if let Some(code) = vt_chord.take() {
-                            for release in [29, 97, 56, 100, code] {
-                                state.key(release, false);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("seat resume failed: {error}");
-                        return 1;
-                    }
-                }
-            }
+        if let Err(error) = seat.service_broker(&mut state) {
+            eprintln!("{error}");
+            return 1;
         }
-        if let Some(out) = output.as_mut() {
+        if let Some(out) = seat.devices.output.as_mut() {
             if out.has_pending_flip() {
                 match out.poll_flip() {
-                    Ok(Some(time)) => {
-                        state.pending_present = false;
-                        state.presented(time);
-                    }
+                    Ok(Some(time)) => state.complete_frame(time),
                     Ok(None) => {}
                     Err(error) => {
                         if shutdown.signal().is_some() { return 0; }
@@ -990,59 +1254,9 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                 }
             }
         }
-        lost.clear();
-        let mut arrived = Vec::new();
-        for (position, (_, device)) in inputs.iter_mut().enumerate() {
-            match device.read() {
-                Ok(events) => arrived.extend(events),
-                Err(error) if input::is_gone(&error) => {
-                    if let Err(error) = broker.as_ref().map_or(Ok(()), |b| b.dispatch_wait(100)) {
-                        eprintln!("seat dispatch failed: {error}");
-                        return 1;
-                    }
-                    lost.push(position);
-                    break;
-                }
-                Err(error) => { eprintln!("{error}"); return 1; }
-            }
-        }
-        arrived.sort_by_key(|(time, _)| *time);
-        for (_, event) in arrived {
-            let (code, down) = match event {
-                InputEvent::Key { code, down } => (code, down),
-                InputEvent::Pointer(frame) => {
-                    state.pointer_frame(frame);
-                    continue;
-                }
-            };
-            state.key(code, down);
-
-            if down {
-                if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
-                    if let Some(broker) = broker.as_ref() {
-                        eprintln!("TINYLAND_VT_SWITCH vt={vt}");
-                        if let Err(error) = broker.switch_session(vt) {
-                            eprintln!("seat switch failed: {error}");
-                        }
-                        vt_chord = Some(code);
-                        state.keyboard.reset_stuck();
-                    }
-                }
-            }
-        }
-        if !lost.is_empty() {
-            let gone = std::mem::take(&mut lost);
-            for position in gone.into_iter().rev() {
-                if let Some((Some(id), _)) = inputs.get(position) {
-                    let _ = broker.as_ref().map(|b| b.close_device(*id, "input"));
-                }
-                inputs.remove(position);
-            }
-            state.keyboard.reset_stuck();
-            eprintln!("TINYLAND_INPUT_LOST remaining={}", inputs.len());
-            if inputs.is_empty() {
-                return 1;
-            }
+        if let Err(error) = seat.service_inputs(&mut state) {
+            eprintln!("{error}");
+            return 1;
         }
         if let Err(error) = app.reap() { eprintln!("{error}"); return 1; }
         if app.exited() {
@@ -1067,9 +1281,9 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             eprintln!("dispatch failed: {e}");
             return 1;
         }
-        if state.pending_present && !output.as_ref().is_some_and(|o| o.has_pending_flip()) {
-            if let Some(out) = output.as_mut() {
-                let pixels = state.compose();
+        if state.pending_present && !seat.devices.output.as_ref().is_some_and(|o| o.has_pending_flip()) {
+            if let Some(out) = seat.devices.output.as_mut() {
+                let pixels = state.submit_frame();
                 if let Err(error) = out.queue_present(&pixels, w, h) {
                     if shutdown.signal().is_some() { return 0; }
                     eprintln!("present failed: {error}");
@@ -1082,57 +1296,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             return 1;
         }
     }
-}
-
-fn open_brokered_devices(
-    broker: &Session,
-    device: &std::path::Path,
-    width: u32,
-    height: u32,
-    output: &mut Option<DrmOutput>,
-    drm_id: &mut Option<i32>,
-    inputs: &mut Vec<(Option<i32>, InputDevice)>,
-) -> Result<(), String> {
-    let (fd, id) = broker.open_device(device)?;
-    let origin = format!("seat:{}", device.display());
-    *output = Some(DrmOutput::open_from_file(File::from(fd), width, height, Some(origin))?);
-    *drm_id = Some(id);
-    for path in input::discover_device_paths()? {
-        let origin = format!("seat:{}", path.display());
-        let (fd, id) = broker.open_device(&path)?;
-        match input::device_from_fd(fd, &origin) {
-            Ok(Some(dev)) => inputs.push((Some(id), dev)),
-            Ok(None) => broker.close_device(id, &origin)?,
-            Err(error) => {
-                let _ = broker.close_device(id, &origin);
-                return Err(error);
-            }
-        }
-    }
-    input::require_keyboard(inputs.iter().map(|(_, device)| device))
-
-}
-
-fn disable_seat_devices(
-    broker: &Session,
-    output: &mut Option<DrmOutput>,
-    drm_id: &mut Option<i32>,
-    inputs: &mut Vec<(Option<i32>, InputDevice)>,
-) -> Result<(), String> {
-    *output = None;
-    for (id, dev) in inputs.drain(..) {
-        drop(dev);
-        if let Some(id) = id {
-            broker.close_device(id, "input")?;
-        }
-    }
-    if let Some(id) = drm_id.take() {
-        broker.close_device(id, "drm")?;
-    }
-    broker.acknowledge_disable()?;
-    eprintln!("TINYLAND_SEAT_DISABLED");
-    seat_marker("laputa-seat-disabled");
-    Ok(())
 }
 
 fn seat_marker(name: &str) {

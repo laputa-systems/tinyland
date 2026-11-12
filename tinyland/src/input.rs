@@ -4,6 +4,71 @@ use std::io::Write;
 use std::time::SystemTime;
 use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InputId(pub u32);
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Released {
+    pub keys: Vec<u16>,
+    pub buttons: Vec<u16>,
+}
+
+type Owners = std::collections::BTreeMap<u16, std::collections::BTreeSet<InputId>>;
+
+fn acquire(owners: &mut Owners, owner: InputId, code: u16) -> bool {
+    let holders = owners.entry(code).or_default();
+    let first = holders.is_empty();
+    holders.insert(owner) && first
+}
+
+fn relinquish(owners: &mut Owners, owner: InputId, code: u16) -> bool {
+    let Some(holders) = owners.get_mut(&code) else { return false };
+    if !holders.remove(&owner) {
+        return false;
+    }
+    let last = holders.is_empty();
+    if last {
+        owners.remove(&code);
+    }
+    last
+}
+
+fn relinquish_all(owners: &mut Owners, owner: InputId) -> Vec<u16> {
+    let held: Vec<u16> = owners.iter().filter(|(_, holders)| holders.contains(&owner)).map(|(code, _)| *code).collect();
+    held.into_iter().filter(|code| relinquish(owners, owner, *code)).collect()
+}
+
+#[derive(Debug, Default)]
+pub struct HeldInput {
+    keys: Owners,
+    buttons: Owners,
+}
+
+impl HeldInput {
+    pub fn key(&mut self, owner: InputId, code: u16, down: bool) -> bool {
+        if down { acquire(&mut self.keys, owner, code) } else { relinquish(&mut self.keys, owner, code) }
+    }
+
+    pub fn button(&mut self, owner: InputId, code: u16, down: bool) -> bool {
+        if down { acquire(&mut self.buttons, owner, code) } else { relinquish(&mut self.buttons, owner, code) }
+    }
+
+    pub fn lose(&mut self, owner: InputId) -> Released {
+        Released { keys: relinquish_all(&mut self.keys, owner), buttons: relinquish_all(&mut self.buttons, owner) }
+    }
+
+    pub fn release_all(&mut self) -> Released {
+        Released {
+            keys: std::mem::take(&mut self.keys).into_keys().collect(),
+            buttons: std::mem::take(&mut self.buttons).into_keys().collect(),
+        }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = u16> + '_ {
+        self.keys.keys().copied()
+    }
+}
+
 #[derive(Debug)]
 pub struct SeatData {
     pub resource: wl_seat::WlSeat,
@@ -184,7 +249,7 @@ pub struct PointerFrame {
 }
 
 impl PointerFrame {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.motion.is_none() && self.buttons.is_empty() && self.wheel == (0, 0)
     }
 }

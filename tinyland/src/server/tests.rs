@@ -5,6 +5,8 @@ use std::os::unix::net::UnixStream;
 use wayland_server::{Client, Resource};
 use wayland_server::protocol::{wl_surface, wl_shm_pool};
 
+mod lifecycle;
+
 struct Fixture {
     display: Display<State>,
     state: State,
@@ -175,13 +177,13 @@ fn frame_callbacks_wait_for_commit_and_successful_presentation() {
     f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
     let pending = f.request(&surface, 3, &[2]);
     assert!(pending.is_empty());
-    f.state.presented(100);
+    f.state.submit_frame();
+    f.state.complete_frame(100);
     assert!(f.state.surfaces[&surface.id()].callbacks.is_empty());
     f.request(&surface, 6, &[]);
     assert_eq!(f.state.surfaces[&surface.id()].callbacks.len(), 1);
-    f.state.compose();
-    assert_eq!(f.state.surfaces[&surface.id()].callbacks.len(), 1);
-    f.state.presented(123);
+    f.state.submit_frame();
+    f.state.complete_frame(123);
     assert!(f.state.surfaces[&surface.id()].callbacks.is_empty());
     f.display.flush_clients().unwrap();
     let mut response = Vec::new();
