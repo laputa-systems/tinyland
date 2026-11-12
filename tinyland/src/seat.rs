@@ -18,8 +18,11 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const DEFAULT_SOCKET_PATH: &str = "/run/seatd.sock";
+const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5);
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn errno_text(context: &str, errno: i32) -> String {
     format!("{context}: {}", io::Error::from_raw_os_error(errno))
@@ -106,46 +109,56 @@ fn parse_seat_name(body: &[u8]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(name).into_owned())
 }
 
+enum Wait {
+    Ready,
+    Expired,
+}
+
 /// An open seatd session. Owns the connection, a duplicated poll descriptor,
 /// and the listener transition flags.
-pub struct Session {
+pub struct Session<'a> {
     conn: RefCell<Conn>,
     fd: OwnedFd,
+    cancel: &'a dyn Fn() -> bool,
+    timeout: Duration,
     enabled: Cell<bool>,
     disabled: Cell<bool>,
     failed: Cell<bool>,
 }
 
-impl Session {
+impl<'a> Session<'a> {
     /// Require the seatd backend and open the seat.
-    pub fn open() -> Result<Self, String> {
+    pub fn open(cancel: &'a dyn Fn() -> bool) -> Result<Self, String> {
         require_seatd_backend(std::env::var("LIBSEAT_BACKEND").ok())?;
         let path = seatd_socket_path(std::env::var("SEATD_SOCK").ok());
-        Self::open_path(&path)
+        Self::open_path(&path, cancel)
     }
 
-    fn open_path(path: &str) -> Result<Self, String> {
+    fn open_path(path: &str, cancel: &'a dyn Fn() -> bool) -> Result<Self, String> {
         let stream = UnixStream::connect(path)
             .map_err(|e| format!("seatd connect {path}: {e}"))?;
         stream
             .set_nonblocking(true)
             .map_err(|e| format!("seatd nonblocking {path}: {e}"))?;
-        Self::from_conn(stream.into())
+        Self::from_conn(stream.into(), cancel, TRANSACTION_TIMEOUT)
     }
 
-    fn from_conn(fd: OwnedFd) -> Result<Self, String> {
+    pub(crate) fn from_conn(fd: OwnedFd, cancel: &'a dyn Fn() -> bool, timeout: Duration) -> Result<Self, String> {
         let poll_fd = fd
             .try_clone()
             .map_err(|e| format!("dup seat fd: {e}"))?;
         let session = Self {
             conn: RefCell::new(Conn::new(fd)),
             fd: poll_fd,
+            cancel,
+            timeout,
             enabled: Cell::new(false),
             disabled: Cell::new(false),
             failed: Cell::new(false),
         };
-        session.send(CLIENT_OPEN_SEAT, &[])?;
-        let body = session.exchange(SERVER_SEAT_OPENED)?;
+        let deadline = session.deadline();
+        session.send(CLIENT_OPEN_SEAT, &[], deadline)?;
+        let body = session.exchange(SERVER_SEAT_OPENED, deadline)?;
         let name = parse_seat_name(&body)?;
         eprintln!("TINYLAND_SEAT_OPEN seat={name}");
         Ok(session)
@@ -172,7 +185,8 @@ impl Session {
     /// reports a revoked device as gone before the daemon's disable
     /// notification arrives, so drain first and let a suspend win over
     /// an unplug verdict. Daemon loss is fatal here too.
-    pub fn dispatch_wait(&self, timeout_ms: i32) -> Result<(), String> {
+    pub fn dispatch_wait(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
         self.check()?;
         if let Err(error) = daemon_liveness(self.fd.as_fd()) {
             return self.fail(error);
@@ -180,16 +194,7 @@ impl Session {
         if let Some((opcode, _)) = self.pump_once()? {
             return self.fail(format!("unexpected seat response opcode {opcode}"));
         }
-        let timespec = rustix::time::Timespec {
-            tv_sec: (timeout_ms / 1000) as i64,
-            tv_nsec: ((timeout_ms % 1000) * 1_000_000) as i64,
-        };
-        let timeout = if timeout_ms < 0 {
-            None
-        } else {
-            Some(&timespec)
-        };
-        self.wait_readable(timeout)?;
+        self.wait(rustix::event::PollFlags::IN, deadline)?;
         if let Some((opcode, _)) = self.pump_once()? {
             return self.fail(format!("unexpected seat response opcode {opcode}"));
         }
@@ -205,8 +210,9 @@ impl Session {
         if session < 0 {
             return Err(format!("seatd switch_session: invalid session {session}"));
         }
-        self.send(CLIENT_SWITCH_SESSION, &session.to_ne_bytes())?;
-        self.exchange(SERVER_SESSION_SWITCHED)
+        let deadline = self.deadline();
+        self.send(CLIENT_SWITCH_SESSION, &session.to_ne_bytes(), deadline)?;
+        self.exchange(SERVER_SESSION_SWITCHED, deadline)
             .map(|_| ())
             .map_err(|error| format!("seatd switch_session: {error}"))
     }
@@ -224,8 +230,9 @@ impl Session {
     /// Acknowledge a disable event after all seat devices are dropped.
     pub fn acknowledge_disable(&self) -> Result<(), String> {
         self.check()?;
-        self.send(CLIENT_DISABLE_SEAT, &[])?;
-        self.exchange(SERVER_SEAT_DISABLED)
+        let deadline = self.deadline();
+        self.send(CLIENT_DISABLE_SEAT, &[], deadline)?;
+        self.exchange(SERVER_SEAT_DISABLED, deadline)
             .map(|_| ())
             .map_err(|error| format!("seatd disable_seat: {error}"))
     }
@@ -245,6 +252,7 @@ impl Session {
         let mut arg = Vec::with_capacity(path_len);
         arg.extend_from_slice(raw);
         arg.push(0);
+        let deadline = self.deadline();
         {
             let mut conn = self.conn.borrow_mut();
             conn.put(
@@ -258,15 +266,15 @@ impl Session {
             conn.put(&(path_len as u16).to_ne_bytes())
                 .map_err(|e| errno_text("seatd open_device send", e))?;
         }
-        self.flush()?;
+        self.flush(deadline)?;
         {
             let mut conn = self.conn.borrow_mut();
             conn.put(&arg)
                 .map_err(|e| errno_text("seatd open_device send", e))?;
         }
-        self.flush()?;
+        self.flush(deadline)?;
         let body = self
-            .exchange(SERVER_DEVICE_OPENED)
+            .exchange(SERVER_DEVICE_OPENED, deadline)
             .map_err(|error| format!("seatd open_device {}: {error}", path.display()))?;
         if body.len() != 4 {
             return self.fail("seatd device response has the wrong size".to_string());
@@ -292,8 +300,9 @@ impl Session {
         if id < 0 {
             return Err(format!("seatd close_device {origin}: invalid id {id}"));
         }
-        self.send(CLIENT_CLOSE_DEVICE, &id.to_ne_bytes())?;
-        self.exchange(SERVER_DEVICE_CLOSED)
+        let deadline = self.deadline();
+        self.send(CLIENT_CLOSE_DEVICE, &id.to_ne_bytes(), deadline)?;
+        self.exchange(SERVER_DEVICE_CLOSED, deadline)
             .map(|_| ())
             .map_err(|error| format!("seatd close_device {origin}: {error}"))
     }
@@ -311,7 +320,11 @@ impl Session {
         Err(message)
     }
 
-    fn send(&self, opcode: u16, body: &[u8]) -> Result<(), String> {
+    fn deadline(&self) -> Instant {
+        Instant::now() + self.timeout
+    }
+
+    fn send(&self, opcode: u16, body: &[u8], deadline: Instant) -> Result<(), String> {
         {
             let mut conn = self.conn.borrow_mut();
             conn.put(
@@ -326,51 +339,38 @@ impl Session {
                 conn.put(body).map_err(|e| errno_text("seatd send", e))?;
             }
         }
-        self.flush()
+        self.flush(deadline)
     }
 
-    fn flush(&self) -> Result<(), String> {
+    fn flush(&self, deadline: Instant) -> Result<(), String> {
         loop {
             match self.conn.borrow_mut().flush() {
                 Ok(_) => return Ok(()),
-                Err(e) if would_block(e) => self.wait_writable()?,
+                Err(e) if would_block(e) => {
+                    if let Wait::Expired = self.wait(rustix::event::PollFlags::OUT, deadline)? {
+                        return self.fail("seatd request timed out sending".to_string());
+                    }
+                }
                 Err(e) => return self.fail(errno_text("seatd send", e)),
             }
         }
     }
 
-    fn wait_writable(&self) -> Result<(), String> {
+    fn wait(&self, flags: rustix::event::PollFlags, deadline: Instant) -> Result<Wait, String> {
         loop {
-            let mut fds = [rustix::event::PollFd::new(
-                &self.fd,
-                rustix::event::PollFlags::OUT,
-            )];
-            match rustix::event::poll(&mut fds, None) {
-                Ok(_) => {
-                    let revents = fds[0].revents();
-                    if revents.intersects(
-                        rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR,
-                    ) {
-                        return self.fail("seat daemon lost".to_string());
-                    }
-                    return Ok(());
-                }
-                Err(e) if e == rustix::io::Errno::INTR => {}
-                Err(e) => return self.fail(format!("seat poll failed: {e}")),
+            if (self.cancel)() {
+                return self.fail("seatd request cancelled by shutdown".to_string());
             }
-        }
-    }
-
-    fn wait_readable(
-        &self,
-        timeout: Option<&rustix::time::Timespec>,
-    ) -> Result<(), String> {
-        loop {
-            let mut fds = [rustix::event::PollFd::new(
-                &self.fd,
-                rustix::event::PollFlags::IN,
-            )];
-            match rustix::event::poll(&mut fds, timeout) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(Wait::Expired);
+            }
+            let slice = remaining.min(CANCEL_POLL_INTERVAL);
+            let timeout = rustix::time::Timespec::try_from(slice)
+                .map_err(|e| format!("seat poll timeout: {e}"))?;
+            let mut fds = [rustix::event::PollFd::new(&self.fd, flags)];
+            match rustix::event::poll(&mut fds, Some(&timeout)) {
+                Ok(0) => {}
                 Ok(_) => {
                     let revents = fds[0].revents();
                     if revents.intersects(
@@ -378,7 +378,7 @@ impl Session {
                     ) {
                         return self.fail("seat daemon lost".to_string());
                     }
-                    return Ok(());
+                    return Ok(Wait::Ready);
                 }
                 Err(e) if e == rustix::io::Errno::INTR => {}
                 Err(e) => return self.fail(format!("seat poll failed: {e}")),
@@ -449,7 +449,7 @@ impl Session {
         self.parse_available()
     }
 
-    fn exchange(&self, expected: u16) -> Result<Vec<u8>, String> {
+    fn exchange(&self, expected: u16, deadline: Instant) -> Result<Vec<u8>, String> {
         loop {
             if let Some((opcode, body)) = self.pump_once()? {
                 if opcode == expected {
@@ -467,15 +467,16 @@ impl Session {
                 }
                 return self.fail(format!("unexpected seat response opcode {opcode}"));
             }
-            self.wait_readable(None)?;
+            if let Wait::Expired = self.wait(rustix::event::PollFlags::IN, deadline)? {
+                return self.fail("seatd request timed out awaiting the reply".to_string());
+            }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake_broker {
     use super::*;
-    use std::io::Read;
     use std::thread;
 
     fn five_seconds() -> rustix::time::Timespec {
@@ -485,18 +486,18 @@ mod tests {
         }
     }
 
-    struct ServerConn {
+    pub(crate) struct ServerConn {
         conn: Conn,
     }
 
     impl ServerConn {
-        fn new(fd: OwnedFd) -> Self {
+        pub(crate) fn new(fd: OwnedFd) -> Self {
             Self {
                 conn: Conn::new(fd),
             }
         }
 
-        fn read_msg(&mut self) -> (u16, Vec<u8>) {
+        pub(crate) fn read_msg(&mut self) -> (u16, Vec<u8>) {
             loop {
                 if self.conn.pending() >= 4 {
                     break;
@@ -547,7 +548,7 @@ mod tests {
             }
         }
 
-        fn send(&mut self, opcode: u16, body: &[u8]) {
+        pub(crate) fn send(&mut self, opcode: u16, body: &[u8]) {
             self.conn
                 .put(&Header { opcode, size: body.len() as u16 }.encode())
                 .unwrap();
@@ -557,7 +558,7 @@ mod tests {
             self.flush();
         }
 
-        fn send_fd(&mut self, opcode: u16, body: &[u8], fd: OwnedFd) {
+        pub(crate) fn send_fd(&mut self, opcode: u16, body: &[u8], fd: OwnedFd) {
             self.conn.put_fd(fd).unwrap();
             self.send(opcode, body);
         }
@@ -592,7 +593,7 @@ mod tests {
         }
     }
 
-    fn start_server<F>(script: F) -> (OwnedFd, thread::JoinHandle<()>)
+    pub(crate) fn start_server<F>(script: F) -> (OwnedFd, thread::JoinHandle<()>)
     where
         F: FnOnce(&mut ServerConn) + Send + 'static,
     {
@@ -605,11 +606,23 @@ mod tests {
         (client.into(), handle)
     }
 
-    fn seat_opened_body(name: &str) -> Vec<u8> {
+    pub(crate) fn seat_opened_body(name: &str) -> Vec<u8> {
         let mut body = ((name.len() + 1) as u16).to_ne_bytes().to_vec();
         body.extend_from_slice(name.as_bytes());
         body.push(0);
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::fake_broker::{seat_opened_body, start_server};
+    use std::io::Read;
+    use std::thread;
+
+    fn never() -> bool {
+        false
     }
 
     #[test]
@@ -632,7 +645,7 @@ mod tests {
 
     #[test]
     fn open_without_daemon_is_a_hard_error() {
-        let error = match Session::open_path("/nonexistent/bctl-seatd-test.sock") {
+        let error = match Session::open_path("/nonexistent/bctl-seatd-test.sock", &never) {
             Ok(_) => panic!("open_path unexpectedly succeeded"),
             Err(error) => error,
         };
@@ -665,7 +678,7 @@ mod tests {
             wait.recv().unwrap();
         });
 
-        let session = Session::from_conn(client).unwrap();
+        let session = Session::from_conn(client, &never, Duration::from_secs(5)).unwrap();
         let (fd, id) = session.open_device(Path::new("/dev/null")).unwrap();
         assert_eq!(id, 1);
         let mut file = std::fs::File::from(fd);
@@ -694,7 +707,7 @@ mod tests {
             wait.recv().unwrap();
         });
 
-        let session = Session::from_conn(client).unwrap();
+        let session = Session::from_conn(client, &never, Duration::from_secs(5)).unwrap();
         let mut enabled = false;
         let mut disabled = false;
         for _ in 0..100 {
@@ -703,14 +716,14 @@ mod tests {
             if enabled && disabled {
                 break;
             }
-            session.dispatch_wait(50).unwrap();
+            session.dispatch_wait(Duration::from_millis(50)).unwrap();
         }
         assert!(enabled, "enable event was not dispatched");
         assert!(disabled, "disable event was not dispatched");
         session.acknowledge_disable().unwrap();
         let mut enabled_again = false;
         for _ in 0..100 {
-            session.dispatch_wait(50).unwrap();
+            session.dispatch_wait(Duration::from_millis(50)).unwrap();
             if session.take_enabled() {
                 enabled_again = true;
                 break;
@@ -731,7 +744,7 @@ mod tests {
             wait.recv().unwrap();
         });
 
-        let session = Session::from_conn(client).unwrap();
+        let session = Session::from_conn(client, &never, Duration::from_secs(5)).unwrap();
         release.send(()).unwrap();
         server.join().unwrap();
         let mut loss = None;
@@ -746,6 +759,156 @@ mod tests {
         }
         let error = loss.expect("closed broker was not reported as a loss");
         assert!(error.contains("seat daemon lost"), "unexpected: {error}");
-        assert!(session.dispatch_wait(10).is_err());
+        assert!(session.dispatch_wait(Duration::from_millis(10)).is_err());
+    }
+    fn bounded<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the transaction was still blocked after ten seconds")
+    }
+
+    fn stalled_broker(
+        requests: usize,
+    ) -> (OwnedFd, std::sync::mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (release, wait) = std::sync::mpsc::channel();
+        let (client, server) = start_server(move |conn| {
+            assert_eq!(conn.read_msg().0, CLIENT_OPEN_SEAT);
+            conn.send(SERVER_SEAT_OPENED, &seat_opened_body("seat0"));
+            for _ in 0..requests {
+                assert_eq!(conn.read_msg().0, CLIENT_CLOSE_DEVICE);
+            }
+            wait.recv().unwrap();
+        });
+        (client, release, server)
+    }
+
+    fn timed_out(error: &str, phase: &str) {
+        assert!(error.contains("timed out"), "unexpected: {error}");
+        assert!(error.contains(phase), "unexpected: {error}");
+    }
+
+    #[test]
+    fn an_unanswered_request_fails_at_its_deadline_and_poisons_the_session() {
+        let (client, release, server) = stalled_broker(1);
+        let (error, elapsed, later) = bounded(move || {
+            let session =
+                Session::from_conn(client, &never, Duration::from_millis(300)).unwrap();
+            let started = std::time::Instant::now();
+            let error = session.close_device(1, "test").unwrap_err();
+            (error, started.elapsed(), session.dispatch())
+        });
+        timed_out(&error, "awaiting the reply");
+        assert!(elapsed >= Duration::from_millis(300), "returned early: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "overran its deadline: {elapsed:?}");
+        assert!(later.is_err(), "a transaction abandoned mid-protocol leaves the session unusable");
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn replies_that_do_not_complete_the_request_do_not_extend_its_deadline() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let (client, server) = start_server(move |conn| {
+            assert_eq!(conn.read_msg().0, CLIENT_OPEN_SEAT);
+            conn.send(SERVER_SEAT_OPENED, &seat_opened_body("seat0"));
+            assert_eq!(conn.read_msg().0, CLIENT_CLOSE_DEVICE);
+            while wait.try_recv().is_err() {
+                conn.send(SERVER_PONG, &[]);
+                thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let (outcome, result) = std::sync::mpsc::channel();
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            let session =
+                Session::from_conn(client, &never, Duration::from_millis(400)).unwrap();
+            let started = std::time::Instant::now();
+            let error = session.close_device(1, "test").unwrap_err();
+            outcome.send((error, started.elapsed())).unwrap();
+            let _ = held.recv();
+        });
+        let (error, elapsed) = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the transaction was still blocked after ten seconds");
+        release.send(()).unwrap();
+        server.join().unwrap();
+        hold.send(()).unwrap();
+        timed_out(&error, "awaiting the reply");
+        assert!(elapsed < Duration::from_millis(1500), "wake-ups restarted the deadline: {elapsed:?}");
+    }
+
+    #[test]
+    fn shutdown_cancels_an_unanswered_request() {
+        let (client, release, server) = stalled_broker(1);
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let raised = shutdown.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            raised.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (error, elapsed) = bounded(move || {
+            let cancel = move || shutdown.load(std::sync::atomic::Ordering::SeqCst);
+            let session = Session::from_conn(client, &cancel, Duration::from_secs(60)).unwrap();
+            let started = std::time::Instant::now();
+            (session.close_device(1, "test").unwrap_err(), started.elapsed())
+        });
+        assert!(error.contains("cancelled"), "unexpected: {error}");
+        assert!(elapsed < Duration::from_secs(3), "cancellation was not prompt: {elapsed:?}");
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    fn saturate(session: &Session<'_>) {
+        let chunk = [0u8; 4096];
+        loop {
+            match rustix::io::write(session.poll_fd(), &chunk) {
+                Ok(_) => {}
+                Err(e) if e == rustix::io::Errno::AGAIN => return,
+                Err(e) => panic!("saturate: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_saturated_write_fails_at_the_deadline() {
+        let (client, release, server) = stalled_broker(0);
+        let (error, elapsed) = bounded(move || {
+            let session =
+                Session::from_conn(client, &never, Duration::from_millis(300)).unwrap();
+            saturate(&session);
+            let started = std::time::Instant::now();
+            (session.close_device(1, "test").unwrap_err(), started.elapsed())
+        });
+        timed_out(&error, "sending");
+        assert!(elapsed >= Duration::from_millis(300), "returned early: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "overran its deadline: {elapsed:?}");
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_cancels_a_saturated_write() {
+        let (client, release, server) = stalled_broker(0);
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let raised = shutdown.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            raised.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (error, elapsed) = bounded(move || {
+            let cancel = move || shutdown.load(std::sync::atomic::Ordering::SeqCst);
+            let session = Session::from_conn(client, &cancel, Duration::from_secs(60)).unwrap();
+            saturate(&session);
+            let started = std::time::Instant::now();
+            (session.close_device(1, "test").unwrap_err(), started.elapsed())
+        });
+        assert!(error.contains("cancelled"), "unexpected: {error}");
+        assert!(elapsed < Duration::from_secs(3), "cancellation was not prompt: {elapsed:?}");
+        release.send(()).unwrap();
+        server.join().unwrap();
     }
 }

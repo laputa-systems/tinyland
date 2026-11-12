@@ -63,9 +63,8 @@ impl Headless {
             .dispatch_clients(&mut self.state)
             .map_err(|error| format!("dispatch: {error}"))?;
         if self.state.pending_present {
-            self.state.compose();
-            self.state.pending_present = false;
-            self.state.presented(super::now_ms());
+            self.state.submit_frame();
+            self.state.complete_frame(super::now_ms());
         }
         self.display
             .flush_clients()
