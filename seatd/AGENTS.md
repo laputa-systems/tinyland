@@ -7,7 +7,7 @@ Linux Rust implementation of the seatd foreground daemon (one seat, `seat0`). De
 ```sh
 cargo test --offline --locked
 cargo clippy --offline --locked --all-targets -- -D warnings
-bash harness/vm-qualification.sh transition|shutdown <guest-root> <kernel> <initramfs> <seatd-bin>
+/bin/bash harness/vm-qualification.sh transition|shutdown <guest-root> <kernel> <initramfs> <seatd-bin>
 ```
 
 Musl targets use the `kache` wrapper and link with `mold`; see [validation](doc/validation.md).
@@ -22,9 +22,9 @@ Musl targets use the `kache` wrapper and link with `mold`; see [validation](doc/
 ## Map
 
 - Socket admission and single-instance lock → `src/admit.rs`
-- Frame buffers and descriptor transfer → `src/conn.rs`
+- Frame buffers and descriptor transfer → shared `seatd-protocol` crate (`src/conn.rs` re-exports)
 - Session transitions → `src/session.rs`
 - Devices, VT, effects → `src/device.rs`, `src/vt.rs`, `src/effect.rs`, `src/sys.rs`
-- Wire protocol → `src/wire.rs`, golden transcript → `harness/protocol.golden`
-- Guest qualification → `harness/VM.md`, raw guest client → `harness/vm-probe.c`
+- Wire protocol → shared `seatd-protocol` crate, golden transcript → `harness/protocol.golden`
+- Guest qualification → `harness/VM.md`; compositor integration proofs remain consumer-owned
 - Runtime contract, recovery, validation, behavior rules → `doc/runtime.md`, `doc/recovery.md`, `doc/validation.md`, `doc/behavior.md`

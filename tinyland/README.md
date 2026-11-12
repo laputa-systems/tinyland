@@ -1,41 +1,29 @@
-# tinyland
+# Tinyland compositor
 
-Minimal single-fullscreen Wayland kiosk that scans out real foot pixels
-through DRM and takes keyboard input. Proven inside a QEMU/KVM Alpine
-guest on Linux x86_64.
+Tinyland scans out Wayland client pixels through DRM and takes keyboard and
+pointer input. Each toplevel fills the output. The newest mapped toplevel gets
+focus, and closing it returns to the previous one. Positioned popups compose
+above their parent. The native Rust seatd client brokers device access for an
+unprivileged compositor and fails closed when the broker disappears.
 
-## Run
+Run `cargo test --locked -p tinyland` from the workspace root. The optional
+`headless` feature exposes the in-process server used by the WLCS adapter.
+`make -C tinyland check`, `test`, and `audit` run component checks.
 
-Needs Linux x86_64 with KVM and `qemu-system-x86_64`.
-
-```sh
-make smoke
-```
-
-Other proofs: `make drm-proof`, `make wayland-pixels`, `make drm-parity`,
-`make negative`.
-
-## Configure
+The retained x86_64 QEMU harness builds a disposable guest with
+`/bin/bash tinyland/harness/build-guest.sh`. Run its proofs from `tinyland/`.
+The bctl SmolVM integration harness remains in
+[bctl](https://github.com/joshuarli/bctl/tree/main/guest/harness).
+Each consumer owns qualification of its own image and pinned input revision.
 
 ```text
-usage: tinyland [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]
+usage: tinyland [--seat] [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]
 ```
 
-Defaults are `--drm-device /dev/dri/card0`, `1024x768`, and socket
-`wayland-0`. Bad options exit 2. `QEMU` overrides the emulator binary and
-`ALPINE_MIRROR` overrides the package mirror.
+Defaults are `/dev/dri/card0`, `1024x768`, and `wayland-0`. Invalid options
+exit 2 before opening devices. The connector's preferred mode controls the
+actual scanout size; requested dimensions are a lower bound.
 
-## Output
-
-Each proof writes console, compositor, and QEMU logs plus a `.png`
-screenshot under `.work/`. `smoke` passes when the guest reports
-`GUEST_TEXT_OK` and the screenshot holds the magenta marker.
-
-## Help
-
-File issues at `laputa-systems/tinyland`. Developer detail starts at
-`AGENTS.md`.
-
-## License
-
-No `LICENSE` file is committed.
+Developer contracts are in [AGENTS.md](AGENTS.md), and qualification details
+are in [verification.md](docs/verification.md). No compositor LICENSE file is
+committed.

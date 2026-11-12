@@ -14,13 +14,67 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_output((2, 1))
+    }
+
+    fn with_output(size: (u32, u32)) -> Self {
         let display = Display::new().unwrap();
         let mut dh = display.handle();
         let (socket, server) = UnixStream::pair().unwrap();
         socket.set_nonblocking(true).unwrap();
         let client = dh.insert_client(server, Arc::new(UdsClientData)).unwrap();
-        let state = State::new(dh, (2, 1), Keyboard::new().unwrap());
+        let state = State::new(dh, size, Keyboard::new().unwrap());
         Self { display, state, client, socket }
+    }
+
+    fn filled_buffer(&mut self, width: i32, height: i32, fill: u8) -> wl_buffer::WlBuffer {
+        let bytes = vec![fill; width as usize * height as usize * 4];
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(bytes.len() as u64).unwrap();
+        std::os::unix::fs::FileExt::write_all_at(&file, &bytes, 0).unwrap();
+        let buffer = self.client.create_resource::<wl_buffer::WlBuffer, (), State>(&self.state.dh, 1, ()).unwrap();
+        self.state.buffers.insert(buffer.id(), (buffer.clone(), ShmBufferData {
+            file: Arc::new(file), offset: 0, width, height, stride: width * 4, format: ShmFormat::Xrgb8888,
+        }));
+        buffer
+    }
+
+    fn show(&mut self, surface: &wl_surface::WlSurface, width: i32, height: i32, fill: u8) -> Vec<(u32, u16, Vec<u32>)> {
+        let buffer = self.filled_buffer(width, height, fill);
+        self.request(surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+        messages(&self.request(surface, 6, &[]))
+    }
+
+    fn events(&mut self) -> Vec<(u32, u16, Vec<u32>)> {
+        self.display.flush_clients().unwrap();
+        messages(&drain_socket(&mut self.socket))
+    }
+
+    fn pointer_seat(&mut self) -> wayland_server::protocol::wl_pointer::WlPointer {
+        use wayland_server::protocol::{wl_keyboard, wl_pointer};
+        self.state.has_pointer = true;
+        let seat = self.client.create_resource::<wl_seat::WlSeat, (), State>(&self.state.dh, 5, ()).unwrap();
+        let mut seat = SeatData::new(seat);
+        let pointer = self.client.create_resource::<wl_pointer::WlPointer, (), State>(&self.state.dh, 5, ()).unwrap();
+        seat.pointers.push(pointer.clone());
+        seat.keyboards.push(self.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&self.state.dh, 5, ()).unwrap());
+        self.state.seats.push(seat);
+        pointer
+    }
+
+    fn move_pointer(&mut self, x: f64, y: f64) {
+        let (w, h) = self.state.out_size;
+        self.state.pointer_frame(crate::input::PointerFrame {
+            motion: Some(crate::input::Motion::Absolute { x: x / f64::from(w - 1), y: y / f64::from(h - 1) }),
+            ..Default::default()
+        });
+    }
+
+    fn press(&mut self, down: bool) {
+        self.state.pointer_frame(crate::input::PointerFrame {
+            buttons: vec![(crate::input::BTN_LEFT, down)],
+            ..Default::default()
+        });
     }
 
     fn surface(&mut self) -> wl_surface::WlSurface {
@@ -64,10 +118,13 @@ impl Fixture {
     fn toplevel(&mut self, surface: &wl_surface::WlSurface) -> wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface {
         use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
         let xdg = self.client.create_resource::<xdg_surface::XdgSurface, (), State>(&self.state.dh, 1, ()).unwrap();
-        self.state.xdg_surfaces.insert(xdg.id(), XdgSurfaceData::new(surface.id()));
+        let base = self.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&self.state.dh, 1, ()).unwrap();
+        let mut xdg_data = XdgSurfaceData::new(base, surface.id());
+        xdg_data.has_toplevel = true;
+        self.state.xdg_surfaces.insert(xdg.id(), xdg_data);
         let top = self.client.create_resource::<xdg_toplevel::XdgToplevel, (), State>(&self.state.dh, 1, ()).unwrap();
         let mut data = ToplevelData::new(top.clone(), xdg.clone(), surface.id());
-        data.last_configure = 7;
+        data.configures.send(7);
         self.state.toplevels.insert(top.id(), data);
         xdg
     }
@@ -458,14 +515,15 @@ fn logical_focus_is_single_active_toplevel_across_two_clients() {
     let _ = xdg_a;
     let top_a = f.state.toplevels.iter().find(|(_, t)| t.surface == surface_a.id()).map(|(id, _)| id.clone()).unwrap();
     let xdg_b = client2.create_resource::<wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface, (), State>(&f.state.dh, 1, ()).unwrap();
-    f.state.xdg_surfaces.insert(xdg_b.id(), XdgSurfaceData::new(surface_b.id()));
+    let base_b = client2.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.state.xdg_surfaces.insert(xdg_b.id(), XdgSurfaceData::new(base_b, surface_b.id()));
     let top_b_res = client2.create_resource::<wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel, (), State>(&f.state.dh, 1, ()).unwrap();
     let mut data_b = ToplevelData::new(top_b_res.clone(), xdg_b.clone(), surface_b.id());
-    data_b.last_configure = 7;
-    data_b.acked_configure = 7;
+    data_b.configures.send(7);
+    data_b.configures.ack(7);
     let top_b = top_b_res.id();
     f.state.toplevels.insert(top_b.clone(), data_b);
-    f.state.toplevels.get_mut(&top_a).unwrap().acked_configure = 7;
+    f.state.toplevels.get_mut(&top_a).unwrap().configures.ack(7);
 
     let seat_a = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
     f.state.seats.push(SeatData::new(seat_a));
@@ -548,8 +606,8 @@ fn two_toplevels_from_same_client_share_one_active_surface() {
     let _ = f.toplevel(&second);
     let top_first = f.state.toplevels.iter().find(|(_, t)| t.surface == first.id()).map(|(id, _)| id.clone()).unwrap();
     let top_second = f.state.toplevels.iter().find(|(_, t)| t.surface == second.id()).map(|(id, _)| id.clone()).unwrap();
-    f.state.toplevels.get_mut(&top_first).unwrap().acked_configure = 7;
-    f.state.toplevels.get_mut(&top_second).unwrap().acked_configure = 7;
+    f.state.toplevels.get_mut(&top_first).unwrap().configures.ack(7);
+    f.state.toplevels.get_mut(&top_second).unwrap().configures.ack(7);
     let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
     f.state.seats.push(SeatData::new(seat));
     let kb = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
@@ -613,6 +671,7 @@ fn per_client_memory_budget_rejects_without_harming_healthy_client() {
     f.request(&offender, 1, &[offender_buffer.id().protocol_id(), 0, 0]);
     let response = f.request(&offender, 6, &[]);
     assert!(String::from_utf8_lossy(&response).contains("memory budget"));
+    assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
     assert!(f.state.surfaces.get(&offender.id()).map(|s| s.pixels.is_none()).unwrap_or(true));
     let mut header = Vec::new();
     header.extend(healthy_surface.id().protocol_id().to_ne_bytes());
@@ -641,6 +700,7 @@ fn callback_bound_disconnects_offender_only() {
     }
     let response = f.request(&surface, 3, &[2 + crate::server::MAX_CALLBACKS_PER_SURFACE as u32]);
     assert!(String::from_utf8_lossy(&response).contains("too many outstanding frame callbacks"));
+    assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
 }
 
 #[test]
@@ -660,25 +720,12 @@ fn scale_and_transform_subset_is_accepted_but_ignored() {
 }
 
 fn two_mapped_toplevels_with_second_active(f: &mut Fixture) -> (wl_surface::WlSurface, wl_surface::WlSurface, ObjectId) {
-    use wayland_server::protocol::{wl_keyboard, wl_seat};
-    let first = f.surface();
-    let second = f.surface();
-    let _ = f.toplevel(&first);
-    let _ = f.toplevel(&second);
-    let top_first = f.state.toplevels.iter().find(|(_, t)| t.surface == first.id()).map(|(id, _)| id.clone()).unwrap();
-    let top_second = f.state.toplevels.iter().find(|(_, t)| t.surface == second.id()).map(|(id, _)| id.clone()).unwrap();
-    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
-    f.state.seats.push(SeatData::new(seat));
-    let kb = f.client.create_resource::<wl_keyboard::WlKeyboard, (), State>(&f.state.dh, 5, ()).unwrap();
-    f.state.seats[0].keyboards.push(kb);
-    for (surface, top, value) in [(&first, &top_first, 33), (&second, &top_second, 44)] {
-        f.state.toplevels.get_mut(top).unwrap().acked_configure = 7;
-        f.state.surfaces.get_mut(&surface.id()).unwrap().pixels = Some(SurfacePixels {
-            bytes: vec![value; 8], width: 2, height: 1, format: ShmFormat::Xrgb8888,
-        });
-        f.state.toplevels.get_mut(top).unwrap().mapped = true;
-        f.state.set_active(top.clone());
-    }
+    f.pointer_seat();
+    let (first, _, _) = mapped_toplevel(f, 33);
+    let (second, _, _) = mapped_toplevel(f, 44);
+    let top_second = f.state.toplevels.iter()
+        .find(|(_, top)| top.surface == second.id())
+        .map(|(id, _)| id.clone()).unwrap();
     assert_eq!(f.state.compose()[0], 44);
     (first, second, top_second)
 }
@@ -702,4 +749,297 @@ fn destroying_the_later_surface_returns_to_the_earlier_one() {
     assert_eq!(f.state.active_surface(), Some(first.id()));
     assert_eq!(f.state.seats[0].keyboard_focus, Some(first.id()));
     assert_eq!(f.state.compose()[0], 33);
+}
+
+fn messages(data: &[u8]) -> Vec<(u32, u16, Vec<u32>)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset + 8 <= data.len() {
+        let object = u32::from_ne_bytes(data[offset..offset + 4].try_into().unwrap());
+        let header = u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+        let size = (header >> 16) as usize;
+        assert!(size >= 8 && offset + size <= data.len(), "truncated message");
+        let args = data[offset + 8..offset + size].chunks(4).map(|word| u32::from_ne_bytes(word.try_into().unwrap())).collect();
+        out.push((object, header as u16, args));
+        offset += size;
+    }
+    out
+}
+
+fn sent<'a>(events: &'a [(u32, u16, Vec<u32>)], object: &impl Resource, opcode: u16) -> Vec<&'a [u32]> {
+    let id = object.id().protocol_id();
+    events.iter().filter(|(o, op, _)| *o == id && *op == opcode).map(|(_, _, args)| args.as_slice()).collect()
+}
+
+fn fixed(value: f64) -> u32 {
+    ((value * 256.0) as i32) as u32
+}
+
+const POINTER_ENTER: u16 = 0;
+const POINTER_LEAVE: u16 = 1;
+const POINTER_MOTION: u16 = 2;
+const POINTER_BUTTON: u16 = 3;
+const POINTER_AXIS: u16 = 4;
+const POPUP_CONFIGURE: u16 = 0;
+const POPUP_DONE: u16 = 1;
+
+type Events = Vec<(u32, u16, Vec<u32>)>;
+
+fn mapped_toplevel(f: &mut Fixture, fill: u8) -> (wl_surface::WlSurface, wayland_protocols::xdg::shell::server::xdg_surface::XdgSurface, Events) {
+    let surface = f.surface();
+    let xdg = f.toplevel(&surface);
+    f.request(&xdg, 4, &[7]);
+    let (w, h) = f.state.out_size;
+    let events = f.show(&surface, w as i32, h as i32, fill);
+    (surface, xdg, events)
+}
+
+#[test]
+fn popup_is_placed_inside_the_output_takes_pointer_input_and_is_dismissed_by_an_outside_click() {
+    use wayland_protocols::xdg::shell::server::xdg_positioner::{Anchor, ConstraintAdjustment, Gravity};
+    let mut f = Fixture::with_output((100, 50));
+    let pointer = f.pointer_seat();
+    let (parent, parent_xdg, _) = mapped_toplevel(&mut f, 10);
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&base, 1, &[2]);
+    f.request_id(2, 1, &[30, 20]);
+    f.request_id(2, 2, &[10, 40, 20, 5]);
+    f.request_id(2, 3, &[Anchor::BottomLeft as u32]);
+    f.request_id(2, 4, &[Gravity::BottomRight as u32]);
+    f.request_id(2, 5, &[(ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX).bits()]);
+    let popup_surface = f.surface();
+    f.request(&base, 2, &[3, popup_surface.id().protocol_id()]);
+    f.request_id(3, 2, &[4, parent_xdg.id().protocol_id(), 2]);
+    let events = messages(&f.request(&popup_surface, 6, &[]));
+    let configure: Vec<_> = events.iter().filter(|(o, op, _)| *o == 4 && *op == POPUP_CONFIGURE).collect();
+    assert_eq!(configure.len(), 1, "{events:?}");
+    assert_eq!(configure[0].2, [10, 20, 30, 20], "flipped above the anchor to stay inside the output");
+    let serial = events.iter().find(|(o, op, _)| *o == 3 && *op == 0).unwrap().2[0];
+    f.request_id(3, 4, &[serial]);
+    f.show(&popup_surface, 30, 20, 99);
+    assert!(f.state.popups[0].live());
+    let frame = f.state.compose();
+    assert_eq!(frame[(25 * 100 + 15) * 4], 99, "popup composes over its parent");
+    assert_eq!(frame[(5 * 100 + 80) * 4], 10);
+
+    f.move_pointer(15.0, 25.0);
+    let events = f.events();
+    let enter = sent(&events, &pointer, POINTER_ENTER);
+    assert_eq!(enter.len(), 1);
+    assert_eq!(enter[0][1..], [popup_surface.id().protocol_id(), fixed(5.0), fixed(5.0)]);
+    assert_eq!(sent(&events, &pointer, POINTER_LEAVE)[0][1], parent.id().protocol_id());
+
+    f.press(true);
+    f.move_pointer(90.0, 5.0);
+    let events = f.events();
+    assert_eq!(sent(&events, &pointer, POINTER_BUTTON).len(), 1);
+    assert!(sent(&events, &pointer, POINTER_LEAVE).is_empty(), "a held button keeps the implicit grab");
+    assert_eq!(sent(&events, &pointer, POINTER_MOTION)[0][1..], [fixed(80.0), fixed(-15.0)]);
+    f.press(false);
+    let events = f.events();
+    assert_eq!(sent(&events, &pointer, POINTER_ENTER)[0][1], parent.id().protocol_id());
+    assert!(events.iter().all(|(o, op, _)| !(*o == 4 && *op == POPUP_DONE)), "a click that started inside keeps the popup");
+
+    f.press(true);
+    let events = f.events();
+    assert!(events.iter().any(|(o, op, _)| *o == 4 && *op == POPUP_DONE), "{events:?}");
+    let button = sent(&events, &pointer, POINTER_BUTTON);
+    assert_eq!(button.len(), 1, "the dismissing click still reaches the surface under the pointer");
+    assert!(!f.state.popups[0].live());
+    assert_eq!(f.state.compose()[(25 * 100 + 15) * 4], 10);
+    f.press(false);
+}
+
+#[test]
+fn popup_needs_a_complete_positioner_and_a_parent() {
+    let mut f = Fixture::with_output((100, 50));
+    let (_, parent_xdg, _) = mapped_toplevel(&mut f, 10);
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&base, 1, &[2]);
+    f.request_id(2, 1, &[30, 20]);
+    let popup_surface = f.surface();
+    f.request(&base, 2, &[3, popup_surface.id().protocol_id()]);
+    let response = f.request_id(3, 2, &[4, parent_xdg.id().protocol_id(), 2]);
+    assert!(String::from_utf8_lossy(&response).contains("positioner needs a size and an anchor rectangle"));
+    assert!(f.state.popups.is_empty());
+}
+
+#[test]
+fn second_toplevel_covers_the_primary_and_focus_returns_when_it_closes() {
+    let mut f = Fixture::with_output((4, 2));
+    let pointer = f.pointer_seat();
+    let keyboard = f.state.seats[0].keyboards[0].clone();
+    let (primary, _, _) = mapped_toplevel(&mut f, 10);
+    let primary_top = f.state.toplevel_for_surface(&primary.id()).unwrap();
+    assert!(f.state.toplevels[&primary_top].activated);
+
+    let (second, _, events) = mapped_toplevel(&mut f, 20);
+    let second_top = f.state.toplevel_for_surface(&second.id()).unwrap();
+    assert_eq!(f.state.compose()[0], 20);
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(second.id()));
+    assert!(f.state.toplevels[&second_top].activated);
+    assert!(!f.state.toplevels[&primary_top].activated);
+    assert_eq!(sent(&events, &f.state.toplevels[&primary_top].resource, 0).len(), 1, "primary is reconfigured as inactive");
+    assert_eq!(sent(&events, &keyboard, 2)[0][1], primary.id().protocol_id());
+    assert_eq!(sent(&events, &keyboard, 1)[0][1], second.id().protocol_id());
+    assert_eq!(sent(&events, &pointer, POINTER_ENTER)[0][1], second.id().protocol_id());
+
+    let closing = f.state.toplevels[&second_top].resource.clone();
+    let events = messages(&f.request(&closing, 0, &[]));
+    assert_eq!(f.state.compose()[0], 10);
+    assert_eq!(f.state.seats[0].keyboard_focus, Some(primary.id()));
+    assert!(f.state.toplevels[&primary_top].activated);
+    assert_eq!(sent(&events, &f.state.toplevels[&primary_top].resource, 0).len(), 1, "primary is reactivated");
+    let position = |object: u32, opcode: u16| events.iter().position(|(o, op, _)| *o == object && *op == opcode).unwrap();
+    assert!(
+        position(keyboard.id().protocol_id(), 1) < position(f.state.toplevels[&primary_top].resource.id().protocol_id(), 0),
+        "keyboard enter precedes the activating configure",
+    );
+    assert_eq!(sent(&events, &keyboard, 1)[0][1], primary.id().protocol_id());
+    assert_eq!(sent(&events, &pointer, POINTER_ENTER)[0][1], primary.id().protocol_id());
+
+    let buffer = f.filled_buffer(4, 2, 30);
+    f.request(&primary, 1, &[buffer.id().protocol_id(), 0, 0]);
+    let response = f.request(&primary, 6, &[]);
+    assert!(!String::from_utf8_lossy(&response).contains("configure"), "commits before acking a reconfigure are allowed");
+    assert_eq!(f.state.compose()[0], 30);
+}
+
+#[test]
+fn cursor_surface_is_drawn_at_the_hotspot_for_the_focused_client_only() {
+    let mut f = Fixture::with_output((8, 4));
+    let pointer = f.pointer_seat();
+    mapped_toplevel(&mut f, 10);
+    f.move_pointer(5.0, 2.0);
+    let serial = f.state.pointer.enter_serial;
+    let cursor = f.surface();
+    f.request(&pointer, 0, &[serial.wrapping_sub(1), cursor.id().protocol_id(), 1, 1]);
+    assert!(f.state.pointer.cursor.is_none(), "a stale serial cannot set the cursor");
+    f.request(&pointer, 0, &[serial, cursor.id().protocol_id(), 1, 1]);
+    f.show(&cursor, 2, 2, 77);
+    let frame = f.state.compose();
+    assert_eq!(frame[(8 + 4) * 4], 77);
+    assert_eq!(frame[(2 * 8 + 5) * 4], 77);
+    assert_eq!(frame[(3 * 8 + 6) * 4], 10);
+    let role = f.surface();
+    f.state.surfaces.get_mut(&role.id()).unwrap().has_role = true;
+    let response = f.request(&pointer, 0, &[serial, role.id().protocol_id(), 0, 0]);
+    assert!(String::from_utf8_lossy(&response).contains("another role"));
+}
+
+#[test]
+fn wheel_notches_become_discrete_axis_events_with_wayland_sign() {
+    let mut f = Fixture::with_output((8, 4));
+    let pointer = f.pointer_seat();
+    mapped_toplevel(&mut f, 10);
+    f.move_pointer(3.0, 3.0);
+    f.events();
+    f.state.pointer_frame(crate::input::PointerFrame { wheel: (-2, 0), ..Default::default() });
+    let events = f.events();
+    let axis = sent(&events, &pointer, POINTER_AXIS);
+    assert_eq!(axis.len(), 1);
+    assert_eq!(axis[0][1..], [0, fixed(20.0)], "REL_WHEEL down is a positive vertical scroll");
+}
+
+const DISPLAY_ERROR: u16 = 0;
+const DISPLAY_OBJECT: u32 = 1;
+const DISPLAY_NO_MEMORY: u32 = 2;
+
+fn display_errors(events: &Events) -> Vec<(u32, u32)> {
+    events.iter().filter(|(object, opcode, _)| *object == 1 && *opcode == DISPLAY_ERROR).map(|(_, _, args)| (args[0], args[1])).collect()
+}
+
+#[test]
+fn committing_a_buffer_whose_file_was_truncated_reports_invalid_fd_on_the_buffer() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    let buffer = f.filled_buffer(2, 1, 9);
+    f.state.buffers[&buffer.id()].1.file.set_len(4).unwrap();
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    let events = messages(&f.request(&surface, 6, &[]));
+    assert_eq!(
+        display_errors(&events),
+        [(buffer.id().protocol_id(), wl_shm::Error::InvalidFd as u32)],
+    );
+}
+
+#[test]
+fn committing_a_buffer_destroyed_after_attach_keeps_the_current_content() {
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    f.show(&surface, 2, 1, 7);
+    let before = f.state.surfaces[&surface.id()].pixels.as_ref().expect("content is shown").bytes.clone();
+    let buffer = f.filled_buffer(2, 1, 9);
+    f.request(&surface, 1, &[buffer.id().protocol_id(), 0, 0]);
+    f.state.buffers.remove(&buffer.id());
+    f.request(&surface, 3, &[2]);
+    let events = messages(&f.request(&surface, 6, &[]));
+    assert!(display_errors(&events).is_empty());
+    assert_eq!(f.state.surfaces[&surface.id()].pixels.as_ref().map(|p| p.bytes.clone()), Some(before));
+    assert!(f.state.surfaces[&surface.id()].callbacks.len() == 1, "the frame callback still queues");
+}
+
+const KEYBOARD_ENTER: u16 = 1;
+const KEYBOARD_MODIFIERS: u16 = 4;
+const KEY_LEFTSHIFT: u16 = 42;
+
+#[test]
+fn fractional_pointer_motion_reaches_the_client_as_wl_fixed() {
+    let mut f = Fixture::with_output((100, 100));
+    let pointer = f.pointer_seat();
+    let (_surface, _xdg, _) = mapped_toplevel(&mut f, 3);
+    f.events();
+    f.state.pointer_frame(crate::input::PointerFrame {
+        motion: Some(crate::input::Motion::Relative { dx: 0.5, dy: -0.25 }),
+        ..Default::default()
+    });
+    let events = f.events();
+    let motion = sent(&events, &pointer, POINTER_MOTION);
+    assert_eq!(motion.len(), 1);
+    assert_eq!(&motion[0][1..], [fixed(50.5), fixed(49.75)]);
+}
+
+#[test]
+fn input_after_the_focused_surface_is_destroyed_reaches_nobody_and_does_not_panic() {
+    let mut f = Fixture::with_output((100, 100));
+    let pointer = f.pointer_seat();
+    let (surface, xdg, _) = mapped_toplevel(&mut f, 3);
+    let top = f.state.toplevels.values().next().unwrap().resource.clone();
+    f.move_pointer(10.0, 10.0);
+    f.press(true);
+    f.events();
+    f.request(&top, 0, &[]);
+    f.request(&xdg, 0, &[]);
+    f.request(&surface, 0, &[]);
+    f.events();
+    f.move_pointer(20.0, 20.0);
+    f.press(false);
+    f.state.key(30, true);
+    f.state.key(30, false);
+    let events = f.events();
+    assert!(sent(&events, &pointer, POINTER_MOTION).is_empty());
+    assert!(sent(&events, &pointer, POINTER_BUTTON).is_empty());
+    assert!(f.state.pointer.focus.is_none());
+}
+
+#[test]
+fn modifier_held_when_focus_is_lost_is_reported_to_the_next_focus_and_released_there() {
+    let mut f = Fixture::with_output((100, 100));
+    f.pointer_seat();
+    let (_first, _xdg, _) = mapped_toplevel(&mut f, 3);
+    let first_top = f.state.toplevels.values().next().unwrap().resource.clone();
+    f.state.key(KEY_LEFTSHIFT, true);
+    f.request(&first_top, 0, &[]);
+    f.events();
+    let second = f.surface();
+    let second_xdg = f.toplevel(&second);
+    let mut entered = messages(&f.request(&second_xdg, 4, &[7]));
+    entered.extend(f.show(&second, 100, 100, 4));
+    let keyboard = f.state.seats[0].keyboards[0].clone();
+    let held = sent(&entered, &keyboard, KEYBOARD_MODIFIERS);
+    assert!(!sent(&entered, &keyboard, KEYBOARD_ENTER).is_empty());
+    assert_eq!(held.last().map(|args| args[1] != 0), Some(true));
+    f.state.key(KEY_LEFTSHIFT, false);
+    let released = f.events();
+    assert_eq!(sent(&released, &keyboard, KEYBOARD_MODIFIERS).last().map(|args| args[1]), Some(0));
 }

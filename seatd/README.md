@@ -1,6 +1,6 @@
 # seatd
 
-This repository contains a Linux Rust implementation of the seatd foreground
+This workspace contains a Linux Rust implementation of the seatd foreground
 daemon. It serves the existing libseat seatd protocol over a Unix socket. The
 daemon supports one seat, `seat0`.
 
@@ -11,7 +11,7 @@ The repository pins `nightly-2026-09-15` with `rust-src` and `clippy` in
 offline dependency set:
 
 ```sh
-cargo build --offline --locked
+cargo build --offline --locked -p seatd
 ```
 
 Rust builds use the `kache` rustc wrapper. Linux musl targets link with `mold`.
@@ -36,14 +36,17 @@ before deployment.
 
 The daemon speaks the libseat seatd protocol over the socket: open and
 close seats and devices, enable and disable sessions, switch sessions,
-ping. The exact byte sequences are pinned in
-[harness/protocol.golden](harness/protocol.golden) and exercised by a
-raw-protocol guest client with no C dependencies. Read
+ping. The opcodes, framing, and SCM_RIGHTS descriptor passing live in the
+shared `../seatd-protocol` crate; tinyland's native client uses the same
+crate, so client and server cannot drift. The exact byte sequences are
+pinned in [harness/protocol.golden](harness/protocol.golden) and exercised
+by a raw-protocol guest client with no C dependencies. Read
 [validation](doc/validation.md) for what the checks cover.
 
-VT-bound operation, virtio DRM/evdev handoff, and dwl/foot input have also
-passed disposable-guest qualification. See [VM qualification](harness/VM.md)
-for the tested environment and reproduction commands.
+VT-bound operation, virtio DRM/evdev handoff, and compositor input were
+qualified on Laputa's disposable x86_64 guest. The retained daemon harness is
+in `harness/`. Consumer image proofs remain in Laputa and bctl. See
+[../tinyland/docs/verification.md](../tinyland/docs/verification.md).
 
 ## License
 

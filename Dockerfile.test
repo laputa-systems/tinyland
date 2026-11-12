@@ -1,0 +1,16 @@
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+RUN apk add --no-cache build-base ca-certificates curl git mold xkeyboard-config=2.43-r0
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /rustup-init.sh \
+ && sh /rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-09-15 \
+ && rm /rustup-init.sh
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY seatd/ seatd/
+COPY seatd-protocol/ seatd-protocol/
+COPY tinyland/ tinyland/
+RUN cargo fetch --locked
+CMD ["cargo", "test", "--locked", "--workspace"]

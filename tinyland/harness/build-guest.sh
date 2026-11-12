@@ -5,9 +5,10 @@ ROOT="$PWD/.work/guest-root"
 bash harness/prepare-guest.sh "$ROOT"
 export TMPDIR="$PWD/.work/tmp"
 echo 'building tinyland (musl)'
-cargo build --locked --release --target x86_64-unknown-linux-musl 2>&1 | tail -n 3
+cargo build --locked --release --target x86_64-unknown-linux-musl -p tinyland -p seatd
 mkdir -p "$ROOT/usr/local/bin"
-cp target/x86_64-unknown-linux-musl/release/tinyland "$ROOT/usr/local/bin/tinyland"
+cp ../target/x86_64-unknown-linux-musl/release/tinyland "$ROOT/usr/local/bin/tinyland"
+cp ../target/x86_64-unknown-linux-musl/release/seatd "$ROOT/usr/local/bin/seatd"
 cp guest/init "$ROOT/init"
 cp guest/test-app "$ROOT/usr/local/bin/guest-test"
 cp guest/seat-proof "$ROOT/usr/local/bin/seat-proof"

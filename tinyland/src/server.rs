@@ -1,16 +1,16 @@
-use crate::input::{self, Keyboard, SeatData};
+use crate::input::{self, InputDevice, InputEvent, Keyboard, SeatData};
 use crate::output::DrmOutput;
 use crate::seat::Session;
 use crate::selection::SelectionState;
-use crate::shell::{ToplevelData, XdgSurfaceData};
+use crate::positioner::Positioner;
+use crate::shell::{PopupData, ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
 use crate::surface::{SurfaceData, SurfaceUpdate};
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::io::AsFd;
-use evdev::Device;
 use std::sync::Arc;
-use wayland_protocols::xdg::shell::server::xdg_wm_base;
+use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::backend::{ClientData, ClientId, ObjectId};
 use wayland_server::protocol::{
     wl_buffer, wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm,
@@ -42,6 +42,10 @@ pub struct State {
     outputs: Vec<(ClientId, wl_output::WlOutput)>,
     regions: HashMap<ObjectId, Vec<(i32, i32, i32, i32)>>,
     selection: SelectionState,
+    positioners: HashMap<ObjectId, Positioner>,
+    popups: Vec<PopupData>,
+    pointer: PointerState,
+    has_pointer: bool,
     pending_present: bool,
     mapped_logged: bool,
     active_toplevel: Option<ObjectId>,
@@ -82,6 +86,10 @@ impl State {
         outputs: Vec::new(),
         regions: HashMap::new(),
         selection: SelectionState::default(),
+        positioners: HashMap::new(),
+        popups: Vec::new(),
+        pointer: PointerState::centered(out_size),
+        has_pointer: false,
         pending_present: false,
         mapped_logged: false,
         active_toplevel: None,
@@ -230,20 +238,25 @@ impl State {
             Some(surface) => (std::mem::take(&mut surface.pending), surface.pending_stacking.take()),
             None => return,
         };
+        let attaches = matches!(pending.buffer, Some(Some(_)));
         if let Some(top_id) = self.toplevel_for_surface(surf_id) {
             let top = &self.toplevels[&top_id];
-            if matches!(pending.buffer, Some(Some(_))) && (top.last_configure == 0 || top.acked_configure != top.last_configure) {
-                top.xdg_surface.post_error(3u32, "buffer committed before configure ack");
+            if attaches && !top.configures.acked() {
+                top.xdg_surface.post_error(xdg_surface::Error::UnconfiguredBuffer as u32, "buffer committed before configure ack");
                 return;
             }
-            if top.last_configure == 0 && !matches!(pending.buffer, Some(Some(_))) {
-                let serial = self.next_serial();
-                let top = self.toplevels.get_mut(&top_id).unwrap();
-                use wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-                top.resource.configure(self.out_size.0 as i32, self.out_size.1 as i32,
-                    [State::Fullscreen, State::Activated].into_iter().flat_map(|state| (state as u32).to_ne_bytes()).collect());
-                top.xdg_surface.configure(serial);
-                top.last_configure = serial;
+            if !top.configures.started() && !attaches {
+                self.configure_toplevel(&top_id, true);
+            }
+        }
+        if let Some(index) = self.popup_index(surf_id) {
+            let popup = &self.popups[index];
+            if attaches && !popup.configures.acked() {
+                popup.xdg_surface.post_error(xdg_surface::Error::UnconfiguredBuffer as u32, "buffer committed before configure ack");
+                return;
+            }
+            if !popup.configures.started() && !attaches && !popup.dismissed {
+                self.configure_popup(index);
             }
         }
         let client_id = self.surface_client_id(surf_id);
@@ -253,23 +266,24 @@ impl State {
         let current_callbacks = self.surfaces.get(surf_id).map(|s| s.callbacks.len()).unwrap_or(0);
         let cached_callbacks = self.surfaces.get(surf_id).and_then(|s| s.cached.as_ref()).map(|c| c.callbacks.len()).unwrap_or(0);
         if pending.callbacks.len() + current_callbacks + cached_callbacks > MAX_CALLBACKS_PER_SURFACE {
-            self.surfaces[surf_id].resource.post_error(0u32, "too many outstanding frame callbacks");
+            display_error::post(&self.surfaces[surf_id].resource, display_error::DisplayError::NoMemory, "too many outstanding frame callbacks");
             return;
         }
-        let pixels = match pending.buffer {
+        let attached = match pending.buffer {
+            Some(Some(id)) if !self.buffers.contains_key(&id) => None,
+            other => other,
+        };
+        let pixels = match attached {
             Some(Some(id)) => {
                 let needed = match self.buffers.get(&id) {
                     Some((_, data)) => (data.width as usize).checked_mul(data.height as usize).and_then(|n| n.checked_mul(4)),
                     None => None,
                 };
-                let Some((buffer, data)) = self.buffers.get(&id) else {
-                    self.surfaces[surf_id].resource.post_error(0u32, "attached buffer was destroyed before commit");
-                    return;
-                };
+                let Some((buffer, data)) = self.buffers.get(&id) else { unreachable!("destroyed buffers were filtered out above") };
                 let needed = match needed {
                     Some(n) => n,
                     None => {
-                        self.surfaces[surf_id].resource.post_error(0u32, "buffer size overflow");
+                        display_error::post(&self.surfaces[surf_id].resource, display_error::DisplayError::NoMemory, "buffer size overflow");
                         return;
                     }
                 };
@@ -280,7 +294,7 @@ impl State {
                         && (self.client_bytes.get(&client).copied().unwrap_or(0).saturating_add(net as usize) > MAX_PER_CLIENT_BYTES
                             || self.total_bytes.saturating_add(net as usize) > MAX_TOTAL_BYTES)
                     {
-                        self.surfaces[surf_id].resource.post_error(0u32, "client exceeds memory budget");
+                        display_error::post(&self.surfaces[surf_id].resource, display_error::DisplayError::NoMemory, "client exceeds memory budget");
                         return;
                     }
                 }
@@ -292,7 +306,7 @@ impl State {
                             let net = pixels.bytes.len() as isize - old as isize;
                             if net > 0 {
                                 if self.charge_bytes(client, net as usize).is_err() {
-                                    self.surfaces[surf_id].resource.post_error(0u32, "client exceeds memory budget");
+                                    display_error::post(&self.surfaces[surf_id].resource, display_error::DisplayError::NoMemory, "client exceeds memory budget");
                                     return;
                                 }
                             } else if net < 0 {
@@ -301,7 +315,7 @@ impl State {
                         }
                         Some(Some(pixels))
                     }
-                    Err(error) => { self.surfaces[surf_id].resource.post_error(0u32, error); return; }
+                    Err(error) => { buffer.post_error(wl_shm::Error::InvalidFd as u32, error); return; }
                 }
             }
             Some(None) => {
@@ -347,14 +361,15 @@ impl State {
                 let top = self.toplevels.get_mut(&top_id).unwrap();
                 if top.mapped {
                     top.mapped = false;
-                    top.last_configure = 0;
-                    top.acked_configure = 0;
+                    top.configures.reset();
+                    top.activated = false;
                     self.toplevel_order.retain(|order| order != &top_id);
                     self.clear_focus(surf_id);
                 }
             }
             self.try_map(surf_id);
         }
+        self.update_popup_mapping(surf_id);
         self.pending_present = true;
     }
 
@@ -460,10 +475,7 @@ impl State {
         };
         let (has_buffer, acked_ok) = match (self.surfaces.get(surf_id), self.toplevels.get(&top_id))
         {
-            (Some(s), Some(t)) => (
-                s.pixels.is_some(),
-                t.acked_configure >= t.last_configure && t.last_configure > 0,
-            ),
+            (Some(s), Some(t)) => (s.pixels.is_some(), t.configures.acked()),
             _ => return,
         };
         if !has_buffer || !acked_ok {
@@ -489,6 +501,22 @@ impl State {
             self.mapped_logged = true;
             eprintln!("TINYLAND_SURFACE_MAPPED");
         }
+        eprintln!("TINYLAND_TOPLEVEL_MAPPED mapped={}", self.toplevels.values().filter(|top| top.mapped).count());
+    }
+
+    fn configure_toplevel(&mut self, top_id: &ObjectId, activated: bool) {
+        let serial = self.next_serial();
+        let (width, height) = self.out_size;
+        let Some(top) = self.toplevels.get_mut(top_id) else { return };
+        let mut states = vec![xdg_toplevel::State::Maximized];
+        if activated {
+            states.push(xdg_toplevel::State::Activated);
+        }
+        top.resource.configure(width as i32, height as i32,
+            states.into_iter().flat_map(|state| (state as u32).to_ne_bytes()).collect());
+        top.xdg_surface.configure(serial);
+        top.configures.send(serial);
+        top.activated = activated;
     }
 
     fn client_of_surface(&self, surf_id: &ObjectId) -> Option<ClientId> {
@@ -506,7 +534,11 @@ impl State {
         if self.active_toplevel.as_ref() == Some(&top_id) {
             return;
         }
+        let old_top = self.active_toplevel.clone();
         let old_surface = self.active_surface();
+        if let Some(old) = &old_surface {
+            self.dismiss_popups(old);
+        }
         let serial = self.next_serial();
         if let Some(old) = old_surface {
             for seat in &mut self.seats {
@@ -523,24 +555,34 @@ impl State {
         self.active_toplevel = Some(top_id.clone());
         self.toplevel_order.retain(|id| id != &top_id);
         self.toplevel_order.push(top_id.clone());
-        let Some(new_surface) = self.active_surface() else { return };
-        let Some(surface) = self.surfaces.get(&new_surface) else { return };
-        let new_client = surface.resource.client();
-        let [depressed, latched, locked, group] = self.keyboard.modifiers();
-        for seat in &mut self.seats {
-            if seat.resource.client() != new_client {
-                continue;
-            }
-            seat.keyboard_focus = Some(new_surface.clone());
-            for keyboard in &seat.keyboards {
-                keyboard.enter(serial, &surface.resource, Vec::new());
-                keyboard.modifiers(serial, depressed, latched, locked, group);
+        if let Some(new_surface) = self.active_surface() {
+            if let Some(surface) = self.surfaces.get(&new_surface) {
+                let new_client = surface.resource.client();
+                let [depressed, latched, locked, group] = self.keyboard.modifiers();
+                for seat in &mut self.seats {
+                    if seat.resource.client() != new_client {
+                        continue;
+                    }
+                    seat.keyboard_focus = Some(new_surface.clone());
+                    for keyboard in &seat.keyboards {
+                        keyboard.enter(serial, &surface.resource, Vec::new());
+                        keyboard.modifiers(serial, depressed, latched, locked, group);
+                    }
+                }
             }
         }
+        if let Some(old) = old_top.filter(|old| self.toplevels.get(old).is_some_and(|top| top.mapped && top.activated)) {
+            self.configure_toplevel(&old, false);
+        }
+        if self.toplevels.get(&top_id).is_some_and(|top| top.configures.started() && !top.activated) {
+            self.configure_toplevel(&top_id, true);
+        }
         self.send_selection();
+        self.refocus_pointer();
     }
 
     fn deactivate_surface(&mut self, surf_id: &ObjectId) {
+        self.dismiss_popups(surf_id);
         let serial = self.next_serial();
         for seat in &mut self.seats {
             if seat.keyboard_focus.as_ref() == Some(surf_id) {
@@ -552,8 +594,11 @@ impl State {
                 seat.keyboard_focus = None;
             }
         }
-        let is_active = self.active_surface().as_ref() == Some(surf_id);
-        if !is_active {
+        let active_gone = self
+            .active_toplevel
+            .as_ref()
+            .is_some_and(|top| !self.toplevels.get(top).is_some_and(|top| top.mapped));
+        if !active_gone && self.active_surface().as_ref() != Some(surf_id) {
             return;
         }
         if let Some(top) = self
@@ -591,6 +636,7 @@ impl State {
             self.set_active(next);
         }
         self.send_selection();
+        self.refocus_pointer();
     }
 
     fn retire_toplevel(&mut self, top_id: &ObjectId) {
@@ -599,6 +645,7 @@ impl State {
         let surface = top.surface.clone();
         self.deactivate_surface(&surface);
         self.toplevels.remove(top_id);
+        self.dismiss_orphans();
         self.toplevel_order.retain(|order| order != top_id);
         self.pending_present = true;
     }
@@ -624,18 +671,33 @@ impl State {
         }
     }
 
+    fn visible_surfaces(&self) -> Vec<(ObjectId, (i32, i32))> {
+        let mut visible = Vec::new();
+        if let Some(surface) = self.active_surface() {
+            if let Some(origin) = self.surface_origin(&surface) {
+                visible.push((surface.clone(), origin));
+            }
+            for popup in self.live_popups_of(&surface) {
+                if let Some(origin) = self.surface_origin(&popup) {
+                    visible.push((popup, origin));
+                }
+            }
+        }
+        visible.extend(self.cursor_placement());
+        visible
+    }
+
     fn compose(&self) -> Vec<u8> {
         let (w, h) = self.out_size;
         let mut fb = vec![0; w as usize * h as usize * 4];
-        if let Some(surface) = self.active_surface() {
-            self.blit_surface(&surface, 0, 0, &mut fb);
+        for (surface, (x, y)) in self.visible_surfaces() {
+            self.blit_surface(&surface, x, y, &mut fb);
         }
         fb
     }
 
     fn presented(&mut self, time: u32) {
-        let Some(surface) = self.active_surface() else { return };
-        let mut stack = vec![surface];
+        let mut stack: Vec<ObjectId> = self.visible_surfaces().into_iter().map(|(surface, _)| surface).collect();
         while let Some(id) = stack.pop() {
             if let Some(surface) = self.surfaces.get_mut(&id) {
                 if surface.pixels.is_none() { continue; }
@@ -714,6 +776,16 @@ pub struct ServerConfig<'a> {
     pub seat_mode: bool,
 }
 
+fn create_globals(dh: &DisplayHandle) {
+    dh.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
+    dh.create_global::<State, wl_subcompositor::WlSubcompositor, ()>(1, ());
+    dh.create_global::<State, wl_shm::WlShm, ()>(1, ());
+    dh.create_global::<State, wl_output::WlOutput, ()>(2, ());
+    dh.create_global::<State, wl_seat::WlSeat, ()>(5, ());
+    dh.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
+    dh.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
+}
+
 pub fn run(config: &ServerConfig<'_>) -> i32 {
     let mode = config.mode;
     let device = config.device;
@@ -745,7 +817,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
 
     let mut output: Option<DrmOutput> = None;
     let mut drm_id: Option<i32> = None;
-    let mut inputs: Vec<(Option<i32>, Device)> = Vec::new();
+    let mut inputs: Vec<(Option<i32>, InputDevice)> = Vec::new();
     if let Some(broker) = broker.as_ref() {
         if let Err(error) = open_brokered_devices(
             broker, device, width, height,
@@ -762,10 +834,10 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                 return 1;
             }
         }
-        match input::discover_keyboards() {
+        match input::discover_devices() {
             Ok(found) => inputs = found.into_iter().map(|dev| (None, dev)).collect(),
             Err(error) => {
-                eprintln!("keyboard discovery: {error}");
+                eprintln!("input discovery: {error}");
                 return 1;
             }
         }
@@ -789,13 +861,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         }
     };
     let mut dh = display.handle();
-    dh.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
-    dh.create_global::<State, wl_subcompositor::WlSubcompositor, ()>(1, ());
-    dh.create_global::<State, wl_shm::WlShm, ()>(1, ());
-    dh.create_global::<State, wl_output::WlOutput, ()>(2, ());
-    dh.create_global::<State, wl_seat::WlSeat, ()>(5, ());
-    dh.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
-    dh.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
+    create_globals(&dh);
 
     let socket_name_str = socket_name.to_string_lossy().into_owned();
     let socket = match ListeningSocket::bind(socket_name_str.as_str()) {
@@ -816,6 +882,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         Err(error) => { eprintln!("keyboard init: {error}"); return 1; }
     };
     let mut state = State::new(dh.clone(), (w, h), keyboard);
+    state.has_pointer = inputs.iter().any(|(_, device)| device.is_pointer());
 
     let mut app = match spawn_app(mode, runtime_dir.as_str(), sock_name.as_str(), command) {
         Ok(app) => app,
@@ -928,32 +995,10 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             }
         }
         lost.clear();
+        let mut arrived = Vec::new();
         for (position, (_, device)) in inputs.iter_mut().enumerate() {
-            match input::read_keys(device) {
-                Ok(keys) => {
-                    for (code, down) in keys {
-                        state.key(code, down);
-
-                        // Grabbed keyboards hide the combo from the console,
-                        // so the compositor must hand the switch to the
-                        // privileged broker itself. Forwarding stays intact
-                        // for the fast path; releases dropped while suspended
-                        // are replayed on resume, and the reset keeps this
-                        // side clean for what comes next.
-                        if down {
-                            if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
-                                if let Some(broker) = broker.as_ref() {
-                                    eprintln!("TINYLAND_VT_SWITCH vt={vt}");
-                                    if let Err(error) = broker.switch_session(vt) {
-                                        eprintln!("seat switch failed: {error}");
-                                    }
-                                    vt_chord = Some(code);
-                                    state.keyboard.reset_stuck();
-                                }
-                            }
-                        }
-                    }
-                },
+            match device.read() {
+                Ok(events) => arrived.extend(events),
                 Err(error) if input::is_gone(&error) => {
                     // Revoke lands in the kernel before its disable
                     // notification arrives; drain first so a suspend wins
@@ -967,6 +1012,36 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     break;
                 }
                 Err(error) => { eprintln!("{error}"); return 1; }
+            }
+        }
+        arrived.sort_by_key(|(time, _)| *time);
+        for (_, event) in arrived {
+            let (code, down) = match event {
+                InputEvent::Key { code, down } => (code, down),
+                InputEvent::Pointer(frame) => {
+                    state.pointer_frame(frame);
+                    continue;
+                }
+            };
+            state.key(code, down);
+
+            // Grabbed keyboards hide the combo from the console,
+            // so the compositor must hand the switch to the
+            // privileged broker itself. Forwarding stays intact
+            // for the fast path; releases dropped while suspended
+            // are replayed on resume, and the reset keeps this
+            // side clean for what comes next.
+            if down {
+                if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
+                    if let Some(broker) = broker.as_ref() {
+                        eprintln!("TINYLAND_VT_SWITCH vt={vt}");
+                        if let Err(error) = broker.switch_session(vt) {
+                            eprintln!("seat switch failed: {error}");
+                        }
+                        vt_chord = Some(code);
+                        state.keyboard.reset_stuck();
+                    }
+                }
             }
         }
         if !lost.is_empty() {
@@ -1032,37 +1107,33 @@ fn open_brokered_devices(
     height: u32,
     output: &mut Option<DrmOutput>,
     drm_id: &mut Option<i32>,
-    inputs: &mut Vec<(Option<i32>, Device)>,
+    inputs: &mut Vec<(Option<i32>, InputDevice)>,
 ) -> Result<(), String> {
     let (fd, id) = broker.open_device(device)?;
     let origin = format!("seat:{}", device.display());
     *output = Some(DrmOutput::open_from_file(File::from(fd), width, height, Some(origin))?);
     *drm_id = Some(id);
-    for path in input::discover_keyboard_paths()? {
+    for path in input::discover_device_paths()? {
         let origin = format!("seat:{}", path.display());
         let (fd, id) = broker.open_device(&path)?;
         match input::device_from_fd(fd, &origin) {
-            Ok(dev) => inputs.push((Some(id), dev)),
-            Err(error) if error.contains("is not a keyboard") => {
-                broker.close_device(id, &origin)?;
-            }
+            Ok(Some(dev)) => inputs.push((Some(id), dev)),
+            Ok(None) => broker.close_device(id, &origin)?,
             Err(error) => {
                 let _ = broker.close_device(id, &origin);
                 return Err(error);
             }
         }
     }
-    if inputs.is_empty() {
-        return Err("no keyboard with alphabetic and enter keys".into());
-    }
-    Ok(())
+    input::require_keyboard(inputs.iter().map(|(_, device)| device))
+
 }
 
 fn disable_seat_devices(
     broker: &Session,
     output: &mut Option<DrmOutput>,
     drm_id: &mut Option<i32>,
-    inputs: &mut Vec<(Option<i32>, Device)>,
+    inputs: &mut Vec<(Option<i32>, InputDevice)>,
 ) -> Result<(), String> {
     *output = None;
     for (id, dev) in inputs.drain(..) {
@@ -1169,6 +1240,14 @@ fn spawn_app(mode: &str, runtime_dir: &str, socket_name: &str, command: &[std::f
 }
 
 mod dispatch_impl;
+mod display_error;
+mod pointer;
+mod popup;
+
+pub use pointer::PointerState;
+
+#[cfg(feature = "headless")]
+pub mod headless;
 
 #[cfg(test)]
 mod tests;
