@@ -29,14 +29,14 @@ SEATD_VTBOUND=0 seatd -g seat -l info
 
 The daemon logs at `info` by default. For s6 readiness, `-n fd` writes one
 newline and closes an inherited, already-open descriptor after the socket is
-ready. A closed descriptor number can alias an internal descriptor created
-during startup; this is an [open defect](../../TODO.md).
+ready. Seatd validates that descriptor before creating any of its own, and
+exits with status 1 if it is not open.
 
-Sequential startup refuses a live listener or non-socket file and reclaims a
-stale socket. Serialize startup attempts: the executable's initial reclamation
-runs before the lock around binding, so concurrent starts can remove a newly
-live socket. Use `-z` to refuse an already occupied path, including a stale
-socket. Its initial check is also outside the lock.
+Startup holds an exclusive lock on `<socket path>.lock` from path inspection
+through reclamation, bind, and listen, so concurrent starts admit one owner.
+A start refuses a live listener or non-socket file and reclaims a stale
+socket. Use `-z` to refuse an already occupied path, including a stale
+socket; the check runs under the same lock.
 
 ## Select VT behavior
 

@@ -2,14 +2,11 @@ use seatd::admit;
 use seatd::cli;
 use seatd::log;
 use seatd::r#loop::Server;
+use seatd::readiness::Readiness;
 use seatd::shutdown;
 use seatd::{log_error, log_info};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn os_error() -> std::io::Error {
-    std::io::Error::last_os_error()
-}
 
 fn main() {
     let prog = std::env::args().next().unwrap_or_else(|| "seatd".to_string());
@@ -29,37 +26,17 @@ fn main() {
     log::set_level(opts.level);
 
     let path = admit::socket_path();
-    match admit::path_stat_kind(&path) {
-        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
-        Err(e) => {
-            log_error!("Could not stat socket path: {e}");
-            std::process::exit(1);
-        }
-        Ok(mode) => {
-            if mode & libc::S_IFMT != libc::S_IFSOCK {
-                log_error!(
-                    "Non-socket file found at socket path {path}, refusing to start"
-                );
+
+    let readiness = match opts.readiness {
+        Some(fd) => match Readiness::acquire(fd) {
+            Ok(readiness) => Some(readiness),
+            Err(e) => {
+                log_error!("Invalid readiness descriptor {fd}: {e}");
                 std::process::exit(1);
-            } else if !opts.unlink_existing_socket {
-                if admit::probe_live(&path) {
-                    log_error!("Live daemon owns socket path {path}, refusing to start");
-                } else {
-                    log_error!("Socket file found at socket path {path}, refusing to start");
-                }
-                std::process::exit(1);
-            } else if admit::probe_live(&path) {
-                log_error!("Live daemon owns socket path {path}, refusing to steal it");
-                std::process::exit(1);
-            } else {
-                log_info!("Removing stale socket at {path}");
-                if let Err(e) = admit::unlink_path(&path) {
-                    log_error!("Could not remove stale socket: {e}");
-                    std::process::exit(1);
-                }
             }
-        }
-    }
+        },
+        None => None,
+    };
 
     let mut server = match Server::new() {
         Ok(s) => s,
@@ -69,7 +46,7 @@ fn main() {
         }
     };
 
-    let socket_fd = match admit::open_socket(&path, opts.uid, opts.gid) {
+    let socket_fd = match admit::open_socket(&path, opts.existing_socket, opts.uid, opts.gid) {
         Ok(fd) => fd,
         Err(e) => {
             log_error!("Could not create server socket: {e}");
@@ -89,19 +66,15 @@ fn main() {
 
     log_info!("seatd started");
 
-    if opts.readiness != -1 {
-        let buf: [u8; 1] = *b"\n";
-        let n = unsafe { libc::write(opts.readiness, buf.as_ptr() as *const _, 1) };
-        if n != 1 {
-            let e = os_error();
-            log_error!("Could not write readiness signal: {e}");
-        }
-        unsafe {
-            libc::close(opts.readiness);
-        }
+    if let Some(readiness) = readiness {
+        readiness.notify();
     }
 
-    server.run();
+    let result = server.run();
 
     shutdown::shutdown(server, socket_path);
+    if let Err(e) = result {
+        log_error!("Poller failed: {e}");
+        std::process::exit(1);
+    }
 }

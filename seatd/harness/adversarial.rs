@@ -228,6 +228,258 @@ fn admit_group_socket_gets_0770() {
     d.child.wait().ok();
 }
 
+struct Contender {
+    child: Child,
+    ready: OwnedFd,
+}
+
+fn spawn_contender(sock: &str, args: &[&str]) -> Contender {
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    assert_eq!(unsafe { libc::fcntl(r, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+    let child = Command::new(daemon_bin())
+        .args(["-l", "silent", "-n", &w.to_string()])
+        .args(args)
+        .env("SEATD_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn seatd");
+    unsafe {
+        libc::close(w);
+    }
+    Contender { child, ready: unsafe { OwnedFd::from_raw_fd(r) } }
+}
+
+fn poll_readable(fd: i32, what: &str) {
+    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    assert_eq!(unsafe { libc::poll(&mut p, 1, 10_000) }, 1, "{what}: timed out");
+}
+
+impl Contender {
+    fn is_waiting_for_lock(&self) -> bool {
+        let locks = std::fs::read_to_string("/proc/locks").expect("read /proc/locks");
+        let pid = self.child.id().to_string();
+        locks.lines().any(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            f.get(1) == Some(&"->") && f.iter().position(|t| *t == "WRITE").and_then(|i| f.get(i + 1)) == Some(&pid.as_str())
+        })
+    }
+
+    fn wait_for_lock(&mut self, what: &str) {
+        for _ in 0..1000 {
+            if self.is_waiting_for_lock() {
+                return;
+            }
+            if let Some(status) = self.child.try_wait().unwrap() {
+                panic!("{what}: exited with {status} instead of waiting for the startup lock");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{what}: never reached the startup lock");
+    }
+
+    fn started(&mut self) -> bool {
+        poll_readable(self.ready.as_raw_fd(), "contender outcome");
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(self.ready.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
+        assert!(n == 0 || (n == 1 && b == *b"\n"), "unexpected readiness read {n}");
+        n == 1
+    }
+
+    fn refused(&mut self) {
+        assert!(!self.started(), "contender started instead of refusing");
+        assert_eq!(self.child.wait().unwrap().code(), Some(1));
+    }
+}
+
+impl Drop for Contender {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn hold_startup_lock(sock: &str) -> OwnedFd {
+    let c = std::ffi::CString::new(format!("{sock}.lock")).unwrap();
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_CLOEXEC, 0o600) };
+    assert!(fd >= 0);
+    assert_eq!(unsafe { libc::flock(fd, libc::LOCK_EX) }, 0);
+    unsafe { OwnedFd::from_raw_fd(fd) }
+}
+
+fn fresh_path(sock: &str) {
+    std::fs::create_dir_all(".work/tmp").unwrap();
+    try_unlink(sock);
+    try_unlink(&format!("{sock}.lock"));
+}
+
+fn leave_stale_socket(sock: &str) -> u64 {
+    drop(std::os::unix::net::UnixListener::bind(sock).unwrap());
+    assert!(std::os::unix::net::UnixStream::connect(sock).is_err());
+    socket_ino(sock).unwrap()
+}
+
+fn socket_ino(sock: &str) -> Option<u64> {
+    std::fs::symlink_metadata(sock).ok().map(|m| std::os::unix::fs::MetadataExt::ino(&m))
+}
+
+#[test]
+fn admit_contenders_leave_stale_socket_alone_until_locked() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/admit-contend.sock";
+    fresh_path(sock);
+    let stale = leave_stale_socket(sock);
+    let lock = hold_startup_lock(sock);
+    let mut a = spawn_contender(sock, &[]);
+    let mut b = spawn_contender(sock, &[]);
+    a.wait_for_lock("first contender");
+    b.wait_for_lock("second contender");
+    assert_eq!(socket_ino(sock), Some(stale), "stale socket reclaimed outside the startup lock");
+    drop(lock);
+    let (a_won, b_won) = (a.started(), b.started());
+    assert!(a_won != b_won, "exactly one contender must own the socket");
+    let (mut winner, mut loser) = if a_won { (a, b) } else { (b, a) };
+    assert_eq!(loser.child.wait().unwrap().code(), Some(1));
+    std::os::unix::net::UnixStream::connect(sock).expect("winner serves");
+    terminate(&mut winner.child);
+    assert!(winner.child.wait().unwrap().success());
+    assert!(!std::path::Path::new(sock).exists());
+}
+
+#[test]
+fn admit_contender_refuses_socket_published_while_paused() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/admit-published.sock";
+    fresh_path(sock);
+    let stale = leave_stale_socket(sock);
+    let lock = hold_startup_lock(sock);
+    let mut a = spawn_contender(sock, &[]);
+    a.wait_for_lock("paused contender");
+    assert_eq!(socket_ino(sock), Some(stale), "stale socket reclaimed outside the startup lock");
+    try_unlink(sock);
+    let published = std::os::unix::net::UnixListener::bind(sock).unwrap();
+    let live = socket_ino(sock).unwrap();
+    drop(lock);
+    a.refused();
+    assert_eq!(socket_ino(sock), Some(live), "live socket was unlinked");
+    std::os::unix::net::UnixStream::connect(sock).expect("published socket still live");
+    drop(published);
+    try_unlink(sock);
+}
+
+#[test]
+fn admit_z_refusal_is_decided_under_the_startup_lock() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/admit-z-lock.sock";
+    fresh_path(sock);
+    let stale = leave_stale_socket(sock);
+    let lock = hold_startup_lock(sock);
+    let mut refused = spawn_contender(sock, &["-z"]);
+    refused.wait_for_lock("-z contender over stale socket");
+    drop(lock);
+    refused.refused();
+    assert_eq!(socket_ino(sock), Some(stale), "-z removed the stale socket");
+
+    try_unlink(sock);
+    let lock = hold_startup_lock(sock);
+    let mut vacated = spawn_contender(sock, &["-z"]);
+    vacated.wait_for_lock("-z contender over vacated path");
+    drop(lock);
+    assert!(vacated.started(), "-z must start when the path was vacated while it waited");
+    std::os::unix::net::UnixStream::connect(sock).expect("-z contender serves");
+    terminate(&mut vacated.child);
+    assert!(vacated.child.wait().unwrap().success());
+}
+
+#[test]
+fn admit_non_socket_path_is_inspected_under_the_startup_lock() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/admit-regular-lock.sock";
+    fresh_path(sock);
+    std::fs::write(sock, b"policy").unwrap();
+    let lock = hold_startup_lock(sock);
+    let mut a = spawn_contender(sock, &[]);
+    a.wait_for_lock("contender over regular file");
+    drop(lock);
+    a.refused();
+    assert_eq!(std::fs::read(sock).unwrap(), b"policy");
+    try_unlink(sock);
+}
+
+fn spawn_readiness_three(sock: &str, inherit: bool) -> (Child, OwnedFd) {
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    let mut cmd = Command::new(daemon_bin());
+    cmd.args(["-l", "silent", "-n", "3"])
+        .env("SEATD_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(move || {
+            if inherit {
+                if libc::dup2(w, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else {
+                libc::close(3);
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().expect("spawn seatd");
+    unsafe {
+        libc::close(w);
+        (child, OwnedFd::from_raw_fd(r))
+    }
+}
+
+#[test]
+fn readiness_closed_descriptor_is_rejected_before_setup() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/readiness-closed.sock";
+    fresh_path(sock);
+    let (mut child, _ready) = spawn_readiness_three(sock, false);
+    let mut status = None;
+    for _ in 0..500 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let created = std::path::Path::new(sock).exists();
+    let _ = child.kill();
+    let _ = child.wait();
+    try_unlink(sock);
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "closed readiness descriptor was accepted");
+    assert!(!created, "socket was created before the readiness descriptor was validated");
+}
+
+#[test]
+fn readiness_inherited_pipe_is_notified_and_closed() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/readiness-pipe.sock";
+    fresh_path(sock);
+    let (mut child, ready) = spawn_readiness_three(sock, true);
+    let fd = ready.as_raw_fd();
+    let mut b = [0u8; 2];
+    poll_readable(fd, "readiness byte");
+    let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 2) };
+    assert_eq!((n, b[0]), (1, b'\n'));
+    poll_readable(fd, "readiness close");
+    assert_eq!(unsafe { libc::read(fd, b.as_mut_ptr().cast(), 2) }, 0);
+    std::os::unix::net::UnixStream::connect(sock).expect("daemon serves");
+    terminate(&mut child);
+    assert!(child.wait().unwrap().success());
+    assert!(!std::path::Path::new(sock).exists());
+}
+
 fn pair() -> (Conn, Conn) {
     unsafe {
         let mut fds = [0; 2];

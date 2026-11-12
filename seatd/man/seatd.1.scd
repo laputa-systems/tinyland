@@ -29,7 +29,8 @@ authenticate users or provide login, power, or supervision management. See
 
 *-n* fd
 	Write one newline to fd after the socket is ready, then close fd. This
-	readiness notification is compatible with s6.
+	readiness notification is compatible with s6. Seatd exits with status 1
+	before startup if fd is not open.
 
 *-u* user
 	Set the socket owner. When either *-u* or *-g* is given, seatd sets the
@@ -46,9 +47,8 @@ authenticate users or provide login, power, or supervision management. See
 *-z*
 	Refuse to start if anything already exists at the socket path. This
 	option cannot be combined with *-u* or *-g*. Without *-z*, seatd probes
-	the existing socket and normally reclaims only a stale socket.
-	Serialize startup attempts; concurrent reclamation is not yet protected
-	throughout startup. See *doc/runtime.md*.
+	the existing socket and normally reclaims only a stale socket. The
+	check and any reclamation run under the startup lock.
 
 # ENVIRONMENT
 

@@ -1,3 +1,4 @@
+use crate::admit::ExistingSocket;
 use crate::log::Level;
 use std::ffi::CString;
 
@@ -14,8 +15,8 @@ pub const USAGE: &str = "Usage: seatd [options]\n\
 pub struct Options {
     pub uid: i64,
     pub gid: i64,
-    pub readiness: i32,
-    pub unlink_existing_socket: bool,
+    pub readiness: Option<i32>,
+    pub existing_socket: ExistingSocket,
     pub level: Level,
     pub show_version: bool,
     pub show_help: bool,
@@ -26,8 +27,8 @@ impl Default for Options {
         Options {
             uid: -1,
             gid: -1,
-            readiness: -1,
-            unlink_existing_socket: true,
+            readiness: None,
+            existing_socket: ExistingSocket::ReclaimStale,
             level: Level::Info,
             show_version: false,
             show_help: false,
@@ -95,7 +96,7 @@ pub fn parse(argv: &[String], prog: &str) -> Result<Options, i32> {
                 b'n' => {
                     let s = optarg.unwrap();
                     match s.parse::<i32>() {
-                        Ok(v) if v >= 0 => opts.readiness = v,
+                        Ok(v) if v >= 0 => opts.readiness = Some(v),
                         _ => {
                             eprintln!("Invalid readiness fd: {s}");
                             return Err(1);
@@ -103,7 +104,7 @@ pub fn parse(argv: &[String], prog: &str) -> Result<Options, i32> {
                     }
                 }
                 b'u' => {
-                    if !opts.unlink_existing_socket {
+                    if opts.existing_socket == ExistingSocket::Refuse {
                         eprintln!("-u/-g and -z are mutually exclusive");
                         return Err(1);
                     }
@@ -117,7 +118,7 @@ pub fn parse(argv: &[String], prog: &str) -> Result<Options, i32> {
                     }
                 }
                 b'g' => {
-                    if !opts.unlink_existing_socket {
+                    if opts.existing_socket == ExistingSocket::Refuse {
                         eprintln!("-u/-g and -z are mutually exclusive");
                         return Err(1);
                     }
@@ -148,7 +149,7 @@ pub fn parse(argv: &[String], prog: &str) -> Result<Options, i32> {
                         eprintln!("-u/-g and -z are mutually exclusive");
                         return Err(1);
                     }
-                    opts.unlink_existing_socket = false;
+                    opts.existing_socket = ExistingSocket::Refuse;
                 }
                 b'v' => opts.show_version = true,
                 b'h' => opts.show_help = true,

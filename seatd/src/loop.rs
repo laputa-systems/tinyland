@@ -265,11 +265,19 @@ impl Server {
             return Err(e);
         }
         let sig_revents = self.pollfds[0].revents;
+        if sig_revents & libc::POLLNVAL != 0 {
+            self.running = false;
+            return Err(io::Error::other("signal descriptor is not open"));
+        }
         if sig_revents & libc::POLLIN != 0 {
             self.handle_signals();
         }
         if self.listen_fd.is_some() && self.pollfds.len() > 1 {
             let listen_revents = self.pollfds[1].revents;
+            if listen_revents & libc::POLLNVAL != 0 {
+                self.running = false;
+                return Err(io::Error::other("listening descriptor is not open"));
+            }
             if listen_revents & (libc::POLLERR | libc::POLLHUP) != 0 {
                 let listen_fd = self.listen_fd.as_ref().unwrap().as_raw_fd();
                 unsafe {
@@ -313,13 +321,11 @@ impl Server {
         Ok(())
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> io::Result<()> {
         while self.running {
-            if let Err(e) = self.poll_once() {
-                log_error!("Poller failed: {e}");
-                break;
-            }
+            self.poll_once()?;
         }
+        Ok(())
     }
 
     pub fn finish(mut self) {
@@ -392,5 +398,17 @@ mod tests {
         }));
         server.finish();
         result.unwrap();
+    }
+
+    #[test]
+    fn closed_signal_descriptor_is_terminal() {
+        let mut server = Server::new().unwrap();
+        server.rebuild();
+        server.pollfds[0].fd = i32::MAX;
+        let result = server.poll_once();
+        let running = server.running;
+        server.finish();
+        assert!(result.is_err());
+        assert!(!running);
     }
 }

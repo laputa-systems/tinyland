@@ -16,7 +16,8 @@ Musl targets use the `kache` wrapper and link with `mold`; see [validation](doc/
 
 - Exactly-once ownership of every FD; unexpected incoming FDs are closed.
 - A logged revocation failure never clears the device's active flag.
-- Preserve live socket ownership and non-socket paths; concurrent startup remains an open defect.
+- Preserve live socket ownership and non-socket paths; inspection, reclamation, and listen run under one startup lock.
+- Acquire the inherited readiness descriptor before creating internal descriptors; POLLNVAL on a required internal FD is terminal.
 - Linux only; no D-Bus, systemd, logind, or supervision logic.
 
 ## Map
