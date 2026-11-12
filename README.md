@@ -6,11 +6,6 @@ The privileged seatd daemon runs as a separate process and brokers device file
 descriptors to the unprivileged compositor through the shared seatd protocol.
 
 This workspace is authoritative for `tinyland`, `seatd`, and `seatd-protocol`.
-It reconciles the Laputa and bctl implementations and retains their component
-histories. Laputa's window-close behavior remains alongside bctl's native Rust
-seat client and browser protocol support. mdevd-rs and doas-rs remain separate
-projects.
-
 On Linux, `make test` runs the workspace tests in the pinned Alpine image
 with its pinned XKB data. Docker and `~/.cargo/bin/kache` are required.
 
@@ -25,9 +20,8 @@ See [compositor verification](tinyland/docs/verification.md) and
 [daemon validation](seatd/doc/validation.md) for device and VM qualification.
 Previous guest proofs qualify their recorded inputs, not this merged workspace.
 
-Laputa and bctl must consume pinned commits from this repository. Send shared
-fixes, adjustments, and features upstream here before updating consumer pins.
-Do not maintain vendored source copies or consumer-only patches.
+Downstream projects consume pinned commits from this repository. Submit shared
+fixes, adjustments, and features here before updating downstream pins.
 
 The daemon retains its [MIT license](seatd/LICENSE). The compositor has no
 committed license declaration.

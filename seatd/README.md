@@ -43,10 +43,8 @@ pinned in [harness/protocol.golden](harness/protocol.golden) and exercised
 by a raw-protocol guest client with no C dependencies. Read
 [validation](doc/validation.md) for what the checks cover.
 
-VT-bound operation, virtio DRM/evdev handoff, and compositor input were
-qualified on Laputa's disposable x86_64 guest. The retained daemon harness is
-in `harness/`. Consumer image proofs remain in Laputa and bctl. See
-[../tinyland/docs/verification.md](../tinyland/docs/verification.md).
+Use the [disposable VM harness](harness/VM.md) to qualify VT transitions,
+device revocation, and restoration against the kernel and binary under test.
 
 ## License
 

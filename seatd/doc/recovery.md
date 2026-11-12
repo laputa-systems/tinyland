@@ -44,8 +44,8 @@ that a descriptor retained by another process has lost its authority.
 
 ## VT-bound operation
 
-VT switching and graceful restoration passed laputa's disposable-guest proof,
-which lives in laputa. A crash does not guarantee restoration of keyboard,
+Use the [disposable VM harness](../harness/VM.md) to qualify VT switching and
+graceful restoration. A crash does not guarantee restoration of keyboard,
 display, or VT modes.
 Use the VM's separate management console to recover its console state before
 restarting clients. Do not apply VM qualification steps to the host console.

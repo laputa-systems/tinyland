@@ -12,9 +12,8 @@ Run `cargo test --locked -p tinyland` from the workspace root. The optional
 
 The retained x86_64 QEMU harness builds a disposable guest with
 `/bin/bash tinyland/harness/build-guest.sh`. Run its proofs from `tinyland/`.
-The bctl SmolVM integration harness remains in
-[bctl](https://github.com/joshuarli/bctl/tree/main/guest/harness).
-Each consumer owns qualification of its own image and pinned input revision.
+Qualify downstream images against their own pinned kernel, broker, and client
+inputs.
 
 ```text
 usage: tinyland [--seat] [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]

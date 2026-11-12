@@ -49,8 +49,8 @@ string disable it.
 VT-bound operation passed switching, release/acquire, close restoration, and
 SIGTERM restoration in an x86_64 KVM guest running Alpine Linux 6.6.142-0-virt.
 Virtio DRM master handoff, evdev revocation/reopen, and dwl/foot rendering and
-keyboard input passed in that guest. That disposable-guest harness is laputa's
-and lives in laputa. These results do not qualify other kernels, physical
+keyboard input passed in that guest. The disposable-guest harness is in
+`../harness/VM.md`. These results do not qualify other kernels, physical
 devices, hidraw revocation, or ARM hardware. Never run the proof on host console, GPU, or input devices.
 
 ## Device and protocol scope
