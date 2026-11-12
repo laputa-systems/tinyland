@@ -9,8 +9,8 @@ captured at startup. A replacement daemon's socket remains available.
 
 Use a socket directory writable only by the supervisor or administrator.
 Identity checking does not make unlink atomic against a hostile writer in
-that directory. Startup replaces an existing socket unless `-z` is supplied.
-Use `-z` when a second instance must refuse to replace the first.
+that directory. Serialize starts while the admission race in the
+[workspace backlog](../../TODO.md) remains open.
 
 ## Daemon crash or SIGKILL
 
@@ -25,11 +25,10 @@ Recover in this order:
 2. Start the replacement daemon on the same socket path.
 3. Restart clients so they reconnect and reopen every device.
 
-A normal start reclaims only a stale socket left by a dead daemon; it
-refuses to steal the pathname from a live daemon and never removes a
-non-socket file. With `-z`, any existing socket or file at the path
-refuses startup; remove a stale socket from the
-administrator-controlled directory before restarting with `-z`.
+A sequential normal start reclaims a stale socket and refuses a live listener
+or a non-socket file. With `-z`, remove a stale socket from the
+administrator-controlled directory before restarting. That option rejects
+stale paths as well as live ones; it does not fix concurrent startup ordering.
 
 Input descriptors successfully revoked before the crash remain revoked.
 Clients must close every reference and reopen evdev and hidraw devices after

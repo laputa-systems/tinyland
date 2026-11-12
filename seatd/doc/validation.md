@@ -3,16 +3,18 @@
 Run from the workspace root with the pinned nightly. Local tests exercise
 protocol, descriptor ownership, admission, transitions, shutdown, and resource
 bounds. They do not qualify real devices or VT behavior.
+Use `RUSTC_WRAPPER=$HOME/.cargo/bin/kache`; Linux musl links use mold.
+Populate the locked dependency cache before using `--offline`.
 
 ```sh
+cargo build --offline --locked -p seatd
 cargo test --offline --locked -p seatd
 cargo test --offline --locked -p seatd-protocol
 cargo clippy --offline --locked -p seatd -p seatd-protocol --all-targets -- -D warnings
 ```
 
-On Linux, `make test` runs all workspace tests with the pinned Alpine toolchain
-and XKB data. The current workspace passes 173 tests with two deliberate
-ignores. Component test success does not establish device or kernel behavior.
+The [workspace verification guide](../../tinyland/docs/verification.md)
+owns the container command and historical component-test result.
 
 ## Wire protocol
 
@@ -36,9 +38,10 @@ DRM master handoff, and restoration after seat close. Shutdown mode checks
 restoration after SIGTERM while a client remains connected. Compositor mode
 checks pixels and keyboard input through a prepared compositor and client.
 
-Earlier virtual-device results do not qualify the merged workspace, other
-kernels, physical devices, hidraw revocation, or ARM hardware. An older test
-run reported an unidentified failure that remains unclassified.
+Earlier x86_64 KVM results used Alpine Linux 6.6.142-0-virt and virtio devices.
+They covered switching, restoration, and dwl/foot rendering and input. They do
+not qualify this workspace revision, other kernels, physical devices, hidraw
+revocation, or ARM hardware.
 
 ## Miri
 

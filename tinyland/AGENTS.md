@@ -17,11 +17,12 @@ The QEMU harness sends input as one 14-event QMP transaction, exits 75 on
 an uncertain outcome, and never resends.
 Exit 2 on bad CLI before opening devices, and shut down on HUP/INT/TERM/QUIT while reaping foot.
 Keep `src/` free of `unsafe`; the seat client in `src/seat.rs` speaks the
-seatd protocol through the shared `../seatd-protocol` crate. Isolate the
-single `libxkbcommon` dependency to input.
+seatd protocol through the shared `../seatd-protocol` crate. Runtime keyboard
+handling uses KBVM; libxkbcommon is confined to the optional test oracle.
 Treat guest-only root on `/dev/dri` and evdev as test harness, not a production seat claim.
 
-Map: proofs, guest image, thresholds, timeouts, modeset, and presentation in `docs/verification.md`.
+Map: [runtime and presentation](docs/session.md),
+[builds and verification](docs/verification.md), and [open defects](../TODO.md).
 Entry points are `src/main.rs`, `src/server.rs`, `src/output.rs`, `src/input.rs`,
 `harness/seat-proof.sh`, `guest/seat-proof`, and
 `guest/test-app`.

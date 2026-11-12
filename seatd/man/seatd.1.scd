@@ -46,9 +46,9 @@ authenticate users or provide login, power, or supervision management. See
 *-z*
 	Refuse to start if anything already exists at the socket path. This
 	option cannot be combined with *-u* or *-g*. Without *-z*, seatd probes
-	the existing socket: a live daemon is never stolen from, a non-socket
-	file is never removed, and only a stale socket left by a dead daemon is
-	reclaimed before binding.
+	the existing socket and normally reclaims only a stale socket.
+	Serialize startup attempts; concurrent reclamation is not yet protected
+	throughout startup. See *doc/runtime.md*.
 
 # ENVIRONMENT
 
@@ -57,9 +57,9 @@ authenticate users or provide login, power, or supervision management. See
 
 *SEATD_VTBOUND*
 	Enable VT binding only when the value is exactly *1*. The default is enabled
-	when the variable is unset. Every other value disables VT binding. VT-bound
-	operation has been qualified in a disposable x86_64 virtio guest by
-	laputa's own harness, which lives in laputa.
+	when the variable is unset. Every other value disables VT binding.
+	Use *harness/VM.md* for disposable-guest qualification of the actual
+	binary and kernel.
 
 # FILES
 

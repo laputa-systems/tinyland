@@ -1,8 +1,7 @@
 # Verify the compositor
 
-Run commands from the workspace root unless a command changes directory.
-The pinned nightly is in `rust-toolchain.toml`. Linux musl links use mold;
-Rust builds use the kache wrapper.
+Run commands from the workspace root with the toolchain and wrappers in
+[AGENTS.md](../../AGENTS.md).
 
 ## Component tests
 
@@ -12,7 +11,8 @@ On Linux, run the workspace tests in the pinned Alpine image:
 make test
 ```
 
-For local tests, set `XKB_CONFIG_ROOT` to xkeyboard-config 2.43-r0 data:
+For local tests, set `XKB_CONFIG_ROOT` to xkeyboard-config 2.43-r0 data and
+`RUSTC_WRAPPER` to the kache executable:
 
 ```sh
 cargo test --locked -p tinyland
@@ -25,11 +25,23 @@ translation, and broker failure. The optional `oracle` feature compares
 keyboard behavior with libxkbcommon. That feature requires the oracle library;
 it is not a runtime dependency of the compositor.
 
-The merged workspace passes 173 tests on the host and in the pinned Alpine
-musl image. The idle timing test and embedded-keymap regeneration are
-intentionally ignored. Restoring the broken toplevel retirement ordering
-makes both window-close regressions fail. These results cover component
-behavior, not a particular kernel or device configuration.
+The [workspace merge](https://github.com/laputa-systems/tinyland/commit/9e5a708679d43f95af6da5352688c72d0eb2d60c)
+records 173 passing tests on the host and in Alpine, two deliberate ignores,
+and a negative control for toplevel retirement. This is historical evidence
+for that revision. The idle timing and embedded-keymap regeneration tests
+remain opt-in.
+
+For a narrow harness check without a Rust build:
+
+```sh
+mkdir -p tinyland/.work/tmp
+python3 -B tinyland/harness/test-guest-lock.py
+python3 -B tinyland/harness/test-qmp.py
+```
+
+The first checks cached-package corruption before installation in an isolated
+fixture. The second checks QMP input transaction and uncertainty handling and
+requires Unix sockets. Neither launches a VM or qualifies the compositor.
 
 ## Disposable QEMU guest
 
@@ -62,7 +74,9 @@ and its pinned test runner are under `tinyland/harness/wlcs/`:
 ```
 
 Inspect each reported result. Passing selected cases does not establish full
-protocol conformance. The adapter does not exercise kernel scanout or input.
+protocol conformance. A headless pump composes and completes callbacks in one
+step; it does not reproduce commits arriving during an outstanding DRM flip.
+The adapter does not exercise kernel scanout, input revocation, or VT ordering.
 
 ## Dependency audit
 

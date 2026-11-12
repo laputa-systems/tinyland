@@ -4,19 +4,6 @@ This workspace contains a Linux Rust implementation of the seatd foreground
 daemon. It serves the existing libseat seatd protocol over a Unix socket. The
 daemon supports one seat, `seat0`.
 
-## Build
-
-The repository pins `nightly-2026-09-15` with `rust-src` and `clippy` in
-`rust-toolchain.toml`. Install that toolchain and build with the locked,
-offline dependency set:
-
-```sh
-cargo build --offline --locked -p seatd
-```
-
-Rust builds use the `kache` rustc wrapper. Linux musl targets link with `mold`.
-See [validation](doc/validation.md) for target builds and local checks.
-
 ## Run under a supervisor
 
 Run seatd as a supervised foreground process. For a seat group named `seat`,
@@ -34,14 +21,11 @@ before deployment.
 
 ## Protocol compatibility
 
-The daemon speaks the libseat seatd protocol over the socket: open and
-close seats and devices, enable and disable sessions, switch sessions,
-ping. The opcodes, framing, and SCM_RIGHTS descriptor passing live in the
-shared `../seatd-protocol` crate; tinyland's native client uses the same
-crate, so client and server cannot drift. The exact byte sequences are
-pinned in [harness/protocol.golden](harness/protocol.golden) and exercised
-by a raw-protocol guest client with no C dependencies. Read
-[validation](doc/validation.md) for what the checks cover.
+The daemon supports opening and closing seats and devices, session handoff,
+session switching, and ping. Its shared protocol crate owns wire constants,
+framing, and descriptor transfer; client and server behavior still require
+separate checks. See [runtime operation](doc/runtime.md) for limits and
+[validation](doc/validation.md) for builds and compatibility evidence.
 
 Use the [disposable VM harness](harness/VM.md) to qualify VT transitions,
 device revocation, and restoration against the kernel and binary under test.

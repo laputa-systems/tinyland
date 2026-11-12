@@ -952,8 +952,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                     return 1;
                 }
                 suspended = true;
-                // A suspend owns every device; an unplug verdict reached
-                // just before it is moot and its index is stale.
                 lost.clear();
             } else if broker.take_enabled() && suspended {
                 match open_brokered_devices(broker, device, width, height, &mut output, &mut drm_id, &mut inputs) {
@@ -964,8 +962,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
                         eprintln!("TINYLAND_SEAT_ENABLED");
                         seat_marker("laputa-seat-enabled");
                         if let Some(code) = vt_chord.take() {
-                            // Left/right variants plus the function key: only
-                            // the actually stuck ones change any state.
                             for release in [29, 97, 56, 100, code] {
                                 state.key(release, false);
                             }
@@ -1000,10 +996,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             match device.read() {
                 Ok(events) => arrived.extend(events),
                 Err(error) if input::is_gone(&error) => {
-                    // Revoke lands in the kernel before its disable
-                    // notification arrives; drain first so a suspend wins
-                    // over an unplug verdict, and a lost broker still
-                    // fails closed here.
                     if let Err(error) = broker.as_ref().map_or(Ok(()), |b| b.dispatch_wait(100)) {
                         eprintln!("seat dispatch failed: {error}");
                         return 1;
@@ -1025,12 +1017,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
             };
             state.key(code, down);
 
-            // Grabbed keyboards hide the combo from the console,
-            // so the compositor must hand the switch to the
-            // privileged broker itself. Forwarding stays intact
-            // for the fast path; releases dropped while suspended
-            // are replayed on resume, and the reset keeps this
-            // side clean for what comes next.
             if down {
                 if let Some(vt) = input::vt_switch_target(code, state.keyboard.modifiers()[0]) {
                     if let Some(broker) = broker.as_ref() {
@@ -1047,8 +1033,6 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         if !lost.is_empty() {
             let gone = std::mem::take(&mut lost);
             for position in gone.into_iter().rev() {
-                // Close on the daemon too: it caches open fds per path and
-                // would otherwise hand back the dead one on reopen.
                 if let Some((Some(id), _)) = inputs.get(position) {
                     let _ = broker.as_ref().map(|b| b.close_device(*id, "input"));
                 }
@@ -1151,8 +1135,6 @@ fn disable_seat_devices(
     Ok(())
 }
 
-/// Record a seat suspend/resume transition where the guest proof can wait
-/// on it. Best effort: a missing runtime dir must not fail the session.
 fn seat_marker(name: &str) {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         let _ = std::fs::write(std::path::Path::new(&dir).join(name), b"1\n");

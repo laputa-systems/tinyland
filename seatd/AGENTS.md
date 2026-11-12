@@ -16,7 +16,7 @@ Musl targets use the `kache` wrapper and link with `mold`; see [validation](doc/
 
 - Exactly-once ownership of every FD; unexpected incoming FDs are closed.
 - A logged revocation failure never clears the device's active flag.
-- Second daemon never steals a live socket; stale sockets are reclaimed, non-sockets never unlinked.
+- Preserve live socket ownership and non-socket paths; concurrent startup remains an open defect.
 - Linux only; no D-Bus, systemd, logind, or supervision logic.
 
 ## Map
@@ -28,3 +28,4 @@ Musl targets use the `kache` wrapper and link with `mold`; see [validation](doc/
 - Wire protocol → shared `seatd-protocol` crate, golden transcript → `harness/protocol.golden`
 - Guest qualification → `harness/VM.md`; compositor integration proofs remain consumer-owned
 - Runtime contract, recovery, validation, behavior rules → `doc/runtime.md`, `doc/recovery.md`, `doc/validation.md`, `doc/behavior.md`
+- Open defects and draft designs → [workspace backlog](../TODO.md)
