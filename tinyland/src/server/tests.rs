@@ -6,6 +6,7 @@ use wayland_server::{Client, Resource};
 use wayland_server::protocol::{wl_surface, wl_shm_pool};
 
 mod lifecycle;
+mod surfaces;
 
 struct Fixture {
     display: Display<State>,
