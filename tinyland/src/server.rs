@@ -540,6 +540,10 @@ impl State {
             .map(|top| top.surface.clone())
     }
 
+    fn held_key_bytes(&self) -> Vec<u8> {
+        self.held.keys().flat_map(|code| u32::from(code).to_ne_bytes()).collect()
+    }
+
     fn set_active(&mut self, top_id: ObjectId) {
         if self.active_toplevel.as_ref() == Some(&top_id) {
             return;
@@ -569,7 +573,7 @@ impl State {
             if let Some(surface) = self.surfaces.get(&new_surface) {
                 let new_client = surface.resource.client();
                 let [depressed, latched, locked, group] = self.keyboard.modifiers();
-                let held: Vec<u8> = self.held.keys().flat_map(|code| u32::from(code).to_ne_bytes()).collect();
+                let held = self.held_key_bytes();
                 for seat in &mut self.seats {
                     if seat.resource.client() != new_client {
                         continue;

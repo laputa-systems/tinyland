@@ -746,8 +746,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                             if let Some(surface) = state.surfaces.get(&focused) {
                                 let [depressed, latched, locked, group] =
                                     state.keyboard.modifiers();
+                                let held = state.held_key_bytes();
                                 for keyboard in &state.seats[index].keyboards {
-                                    keyboard.enter(serial, &surface.resource, Vec::new());
+                                    keyboard.enter(serial, &surface.resource, held.clone());
                                     keyboard.modifiers(serial, depressed, latched, locked, group);
                                 }
                             }

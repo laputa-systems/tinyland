@@ -409,3 +409,16 @@ fn enodev_without_a_disable_is_a_real_unplug() {
     release.send(()).unwrap();
     server.join().unwrap();
 }
+
+#[test]
+fn a_keyboard_bound_while_a_key_is_held_is_told_which_keys_are_held() {
+    let (mut f, _keyboard) = keyboard_world();
+    key(&mut f, 1, KEY_A, true);
+    f.events();
+    let seat = f.state.seats[0].resource.clone();
+    const NEW_KEYBOARD: u32 = 2;
+    let events = messages(&f.request(&seat, 1, &[NEW_KEYBOARD]));
+    let enter: Vec<_> = events.iter().filter(|(object, opcode, _)| *object == NEW_KEYBOARD && *opcode == KEYBOARD_ENTER).collect();
+    assert_eq!(enter.len(), 1);
+    assert_eq!(enter[0].2[2..], [4, u32::from(KEY_A)]);
+}
