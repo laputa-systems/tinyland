@@ -22,4 +22,3 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
 - Daemon operation and recovery: [runtime](seatd/doc/runtime.md) and [recovery](seatd/doc/recovery.md).
 - Daemon tests and device qualification: [validation](seatd/doc/validation.md).
 - Deferred fixes and draft designs: [TODO.md](TODO.md).
-- Draft designs: [presentation ownership](docs/rfc/TINY-1-presentation-state.md) and [input ownership](docs/rfc/TINY-6-input-state.md).

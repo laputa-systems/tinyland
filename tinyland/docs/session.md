@@ -36,17 +36,21 @@ a two-second deadline. The main loop polls display, socket, DRM, and input
 together. A matching CRTC event completes presentation. Queue errors and
 wrong-CRTC events return failure without completing callbacks.
 
-Two open defects limit that contract: completion can discard changes made
-after submission, and callbacks are selected from the current scene rather
-than the submitted frame. Direct device opens also lack the nonblocking flag
-needed to keep event reads within the deadline. See [open defects](../../TODO.md).
+Submission takes the scene's dirty state and the frame callbacks of the
+surfaces it shows; completion fires only that batch, so a commit that lands
+while a flip is in flight stays dirty for the next frame. Suspend abandons an
+in-flight frame and returns its callbacks to the scene. Direct device opens
+still lack the nonblocking flag needed to keep event reads within the
+deadline. See [open defects](../../TODO.md).
 
-The compositor renders subsurface trees, but pointer hit-testing currently
-visits only toplevel and popup roots and ignores input regions. Scale and
-transform limits are listed in the [compositor usage guide](../README.md).
+Pointer hit-testing walks the committed surface tree, subsurfaces included,
+in the order it is drawn, and honours each surface's input region as of its
+applied commit. Scale and transform limits are listed in the
+[compositor usage guide](../README.md).
 
-Broker calls are synchronous. A connected daemon that stops answering can
-block the compositor and delay shutdown indefinitely.
+Each broker transaction has one deadline, five seconds by default, and is
+cancelled when the compositor shuts down; a broker that stops answering ends
+the session instead of blocking it.
 
 ## Keyboard data
 
@@ -63,11 +67,12 @@ checkout. It requires no libseat or libxkbcommon runtime library.
 ## Input and device ownership
 
 Grabbed keyboards hide Ctrl+Alt+Fn from the console, so the compositor forwards
-it to the broker and replays the chord's releases on resume. Other delivered
-keys and buttons still need reconciliation on device loss. Revoked evdev
-descriptors must be reopened; removal must also close the broker's cached
-device ID. ENODEV recovery can currently receive disable yet still classify
-the device as unplugged; see the [backlog](../../TODO.md).
+it to the broker. Delivered keys and buttons are owned per input device:
+losing a device releases what it held, and suspend releases everything and
+resets the lock state, so clients never keep a stuck key or pointer grab.
+Revoked evdev descriptors must be reopened; removal must also close the
+broker's cached device ID. A disable that arrives while recovering from
+ENODEV suspends the seat instead of treating the device as unplugged.
 
 Suspend and resume write best-effort markers named `laputa-seat-disabled`
 and `laputa-seat-enabled` inside the runtime directory for guest observers.
