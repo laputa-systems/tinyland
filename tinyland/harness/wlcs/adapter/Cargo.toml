@@ -9,6 +9,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tinyland = { path = "../../..", features = ["headless"] }
-rustix = { version = "1.1", features = ["event", "net"] }
+rustix = { package = "laputa-rustix", version = "1.1", registry = "mycrates", features = ["event", "net"] }
 
 [workspace]
