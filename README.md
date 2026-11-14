@@ -12,5 +12,5 @@ See [running the compositor](tinyland/README.md) and
 Downstream projects consume pinned commits from this repository. Submit shared
 fixes, adjustments, and features here before updating downstream pins.
 
-The daemon retains its [MIT license](seatd/LICENSE). The compositor has no
+The [incremental damage campaign](docs/CAMPAIGN-DAMAGE.md) tracks transactional Wayland damage, partial software composition and double-buffered scanout qualification for downstream bctl.\n\nThe daemon retains its [MIT license](seatd/LICENSE). The compositor has no
 committed license declaration. Open defects are tracked in [TODO.md](TODO.md).
