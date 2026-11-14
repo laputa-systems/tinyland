@@ -18,7 +18,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUSTFLAGS="-Ctarget-feature=-crt-static"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh \
- && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-09-15 \
+ && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-11-09 \
  && rm /tmp/rustup-init.sh
 
 WORKDIR /src

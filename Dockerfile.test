@@ -4,7 +4,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /rustup-init.sh \
- && sh /rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-09-15 \
+ && sh /rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-11-09 \
  && rm /rustup-init.sh
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
