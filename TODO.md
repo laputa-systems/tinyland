@@ -1,5 +1,16 @@
 Prefix: TINY
-Next: 14
+Next: 15
+
+# Open work
+
+### TINY-14 · P2 · Incremental Wayland damage is discarded across composition and scanout
+
+- **Area:** Performance
+- **Where:** `tinyland/src/server/dispatch_impl.rs`, `tinyland/src/shm.rs`, `tinyland/src/server.rs`, `tinyland/src/output.rs`
+- **Problem:** Surface Damage/DamageBuffer are ignored; commits snapshot whole SHM buffers, composition clears/reblends whole output, and presentation copies whole DRM buffers. Cursor and popup changes also incur full-frame work. Alternating scanout buffers require missed-generation repair; blindly copying the latest dirty rectangle is incorrect.
+- **Recommendation:** Execute [the upstream damage campaign](docs/CAMPAIGN-DAMAGE.md) in parallel with bctl's headless work. Establish transactional pending/committed damage, bounded coordinate conversion, persistent snapshots/composition, exact scene recompose and per-scanout generation repair. Start with a real 16x16 change on two alternating buffers. Differential-test exact pixels and callback ordering across alpha/occlusion, cursor/popup changes, subsurfaces, resize, failed flips and sparse recovery. Keep full-frame fallback until proven safe; qualify the pinned downstream bctl integration.
+- **Fix with:** `make-it-fast`
+- **Effort:** L
 
 # Open work
 
