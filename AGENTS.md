@@ -22,3 +22,4 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
 - Daemon operation and recovery: [runtime](seatd/doc/runtime.md) and [recovery](seatd/doc/recovery.md).
 - Daemon tests and device qualification: [validation](seatd/doc/validation.md).
 - Deferred fixes and draft designs: [TODO.md](TODO.md).
+- Active incremental compositor/DRM damage campaign: [TINY-14](docs/CAMPAIGN-DAMAGE.md); keep upstream ownership and coordinate the pinned bctl integration.
