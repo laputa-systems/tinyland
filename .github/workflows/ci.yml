@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build the pinned Alpine test image
+        run: docker build -f Dockerfile.test -t tinyland-tests .
+      - name: run the test suite in the pinned Alpine image
+        run: docker run --rm tinyland-tests
