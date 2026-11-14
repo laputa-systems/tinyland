@@ -12,8 +12,6 @@ Next: 15
 - **Fix with:** `make-it-fast`
 - **Effort:** L
 
-# Open work
-
 Priorities are assigned from impact and likelihood. Source-confirmed findings
 below include a concrete event sequence; they are not claims of device or VM
 qualification. Runtime proof gaps are stated in each ticket.
