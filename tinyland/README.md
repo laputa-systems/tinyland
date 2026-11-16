@@ -16,7 +16,9 @@ LIBSEAT_BACKEND=seatd tinyland --seat -- foot
 
 Pass an explicit command. Omitting it launches the guest-only
 `foot /usr/local/bin/guest-test` command. The primary command's exit ends the
-compositor session. Use `tinyland --help` for the available options.
+compositor session. Use `tinyland -h` or `tinyland --help` for the complete
+offline option reference and an example. A bare invocation starts the
+compositor; it does not print help.
 
 Defaults are `/dev/dri/card0`, `1024x768`, and `wayland-0`. Invalid options
 exit 2 before opening devices. The first mode returned by the selected
