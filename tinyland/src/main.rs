@@ -32,7 +32,7 @@ fn help() -> String {
     }
     text.push_str("\nArguments:\n  COMMAND...  Client command and arguments (default: foot /usr/local/bin/guest-test)\n  --          End options; remaining arguments form the client command\n\nEnvironment:\n  XDG_RUNTIME_DIR  Wayland socket directory\n  LIBSEAT_BACKEND  Seat backend; seat mode requires seatd\n  SEATD_SOCK  Seatd socket path (default: /run/seatd.sock)\n  XKB_CONFIG_ROOT  XKB data root (default: /usr/share/X11/xkb)\n  XKB_CONFIG_EXTRA_PATH  Additional XKB data (default: /etc/xkb)\n  TINYLAND_XKB_ROOT  Override XKB data root\n  RUST_LOG  Log filter\n\nExamples:\n");
     for example in EXAMPLES { text.push_str(&format!("  {example}\n")); }
-    text.push_str("\n");
+    text.push('\n');
     text.push_str(FOOTER);
     text
 }
