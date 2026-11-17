@@ -489,3 +489,95 @@ fn remote_pointer_buttons_remain_owned_until_last_source_resets() {
     assert_eq!(buttons.len(), 1);
     assert_eq!(buttons[0][3], 0);
 }
+
+#[test]
+fn remote_clipboard_replacement_cancels_blocked_transfers_and_preserves_latest_on_reset() {
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use tinyland_remote::{HostMessage, Size};
+    use wayland_server::protocol::wl_data_offer;
+
+    let mut f = Fixture::new();
+    let size = Size::new(2, 1).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    transport.handle(&mut f.state, size, HostMessage::Clipboard { source: 1, text: "a".repeat(1024 * 1024) }).unwrap();
+    let offer = f.client.create_resource::<wl_data_offer::WlDataOffer, (), State>(&f.state.dh, 3, ()).unwrap();
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), f.state.selection.host.as_ref().unwrap().clone());
+    f.state.selection.service_transfers();
+    assert_eq!(f.state.selection.transfers.len(), 1);
+    transport.handle(&mut f.state, size, HostMessage::Clipboard { source: 2, text: "new".into() }).unwrap();
+    assert!(f.state.selection.transfers.is_empty());
+    let mut received = Vec::new();
+    reader.read_to_end(&mut received).unwrap();
+    assert!(!received.is_empty() && received.len() < 1024 * 1024);
+    transport.handle(&mut f.state, size, HostMessage::ResetInput { source: 2 }).unwrap();
+    assert_eq!(&**f.state.selection.host.as_ref().unwrap(), b"new");
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), f.state.selection.host.as_ref().unwrap().clone());
+    f.state.selection.service_transfers();
+    assert!(f.state.selection.transfers.is_empty());
+    let mut readers = Vec::new();
+    for _ in 0..17 {
+        let (reader, writer) = std::io::pipe().unwrap();
+        readers.push(reader);
+        f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), Arc::from(vec![b'x'; 1024 * 1024]));
+    }
+    assert_eq!(f.state.selection.transfers.len(), 16);
+    f.state.selection.service_transfers();
+    f.state.selection.transfers[0].deadline = std::time::Instant::now();
+    f.state.selection.service_transfers();
+    assert_eq!(f.state.selection.transfers.len(), 15);
+    f.state.selection.remove_offer(&offer.id());
+    assert!(f.state.selection.transfers.is_empty());
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let original = vec![b'z'; 1024 * 1024];
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), Arc::from(original.clone()));
+    let mut received = Vec::new();
+    while !f.state.selection.transfers.is_empty() {
+        f.state.selection.service_transfers();
+        let mut chunk = [0; 8192];
+        let count = reader.read(&mut chunk).unwrap();
+        received.extend_from_slice(&chunk[..count]);
+    }
+    reader.read_to_end(&mut received).unwrap();
+    assert_eq!(received, original);
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), Arc::from(&b"pending"[..]));
+    drop(f);
+    let mut received = Vec::new();
+    reader.read_to_end(&mut received).unwrap();
+    assert!(received.is_empty());
+}
+
+#[test]
+fn remote_and_client_clipboards_replace_each_other_without_reusing_host_offers() {
+    use tinyland_remote::{HostMessage, Size};
+    use wayland_server::protocol::{wl_data_device, wl_data_source};
+    let mut f = Fixture::new();
+    let surface = f.surface();
+    f.toplevel(&surface);
+    let top = f.state.toplevels.iter().find(|(_, top)| top.surface == surface.id()).unwrap().0.clone();
+    f.state.toplevels.get_mut(&top).unwrap().mapped = true;
+    f.state.set_active(top);
+    let device = f.client.create_resource::<wl_data_device::WlDataDevice, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.devices.insert(device.id(), device.clone());
+    let source = f.client.create_resource::<wl_data_source::WlDataSource, (), State>(&f.state.dh, 3, ()).unwrap();
+    f.state.selection.sources.insert(source.id(), crate::selection::DataSourceData { resource: source.clone(), mime_types: vec!["text/plain".into()] });
+    let mut transport = super::super::remote::Transport::test_transport();
+    let size = Size::new(2, 1).unwrap();
+    transport.handle(&mut f.state, size, HostMessage::Clipboard { source: 1, text: "first".into() }).unwrap();
+    let old_offer = f.state.selection.offers.keys().next().unwrap().clone();
+    f.request(&device, 1, &[source.id().protocol_id(), 0]);
+    assert!(f.state.selection.host.is_none());
+    assert_eq!(f.state.selection.selection, Some(source.id()));
+    assert!(!f.state.selection.offers.contains_key(&old_offer));
+    transport.handle(&mut f.state, size, HostMessage::Clipboard { source: 2, text: "second".into() }).unwrap();
+    let events = f.events();
+    assert!(events.iter().any(|(id, opcode, _)| *id == source.id().protocol_id() && *opcode == 2));
+    assert_eq!(&**f.state.selection.host.as_ref().unwrap(), b"second");
+    assert!(!f.state.selection.offers.contains_key(&old_offer));
+}

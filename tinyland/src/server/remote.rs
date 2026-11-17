@@ -107,6 +107,12 @@ impl Transport {
         if !self.sources.contains(&source) && self.sources.len() >= MAX_SOURCES { return Err("too many remote input sources".into()); }
         self.sources.insert(source);
         let frame = match msg {
+            HostMessage::Clipboard { text, .. } => {
+                state.selection.replace(None);
+                state.selection.host = Some(Arc::from(text.into_bytes()));
+                state.send_selection();
+                return Ok(());
+            }
             HostMessage::Key { code, pressed, .. } if code <= 0x2ff => { state.input_event(InputId(source), InputEvent::Key { code, down: pressed }); return Ok(()); }
             HostMessage::Pointer { x, y, .. } if x < size.width() && y < size.height() => PointerFrame { motion: Some(input::Motion::Absolute { x: f64::from(x) / f64::from(size.width().saturating_sub(1).max(1)), y: f64::from(y) / f64::from(size.height().saturating_sub(1).max(1)) }), ..Default::default() },
             HostMessage::Button { button, pressed, .. } => PointerFrame { buttons: vec![(match button { Button::Left => 0x110, Button::Right => 0x111, Button::Middle => 0x112, Button::Back => 0x116, Button::Forward => 0x115 }, pressed)], ..Default::default() },
@@ -144,9 +150,12 @@ fn run_session(config: &ServerConfig<'_>) -> Result<(), String> {
         let timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 100_000_000 };
         let mut fds = vec![rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN), rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN), rustix::event::PollFd::new(&transport.input, rustix::event::PollFlags::IN)];
         if !transport.outgoing.is_empty() { fds.push(rustix::event::PollFd::new(&transport.output, rustix::event::PollFlags::OUT)); }
+        fds.extend(state.selection.poll_fds());
         match rustix::event::poll(&mut fds, Some(&timeout)) {
             Ok(_) => {}, Err(e) if e == rustix::io::Errno::INTR => continue, Err(e) => break Err(format!("poll: {e}")),
         }
+        drop(fds);
+        state.selection.service_transfers();
         if let Err(e) = transport.write().and_then(|_| transport.read(&mut state, size)) { break Err(e); }
         if let Err(e) = app.reap() { break Err(e); }
         if app.exited() { break Ok(()); }

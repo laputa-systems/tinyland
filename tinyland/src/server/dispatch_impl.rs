@@ -840,16 +840,20 @@ impl State {
             if Some(client.clone()) != focused_client {
                 continue;
             }
-            let source = self.selection.selection.as_ref().and_then(|id| self.selection.sources.get(id));
-            if let Some(source) = source {
+            use crate::selection::Offer;
+            let offer_source = match self.selection.selection.as_ref() {
+                Some(id) => self.selection.sources.get(id).map(|source| (Offer::Client(source.resource.clone()), source.mime_types.clone())),
+                None => self.selection.host.as_ref().map(|bytes| (Offer::Host(bytes.clone()), vec!["text/plain;charset=utf-8".into(), "text/plain".into()])),
+            };
+            if let Some((source, mime_types)) = offer_source {
                 let offer = match client.create_resource::<wl_data_offer::WlDataOffer, (), State>(&self.dh, device.version(), ()) {
                     Ok(offer) => offer,
                     Err(error) => { eprintln!("clipboard offer creation: {error}"); continue; }
                 };
                 device.data_offer(&offer);
-                for mime in &source.mime_types { offer.offer(mime.clone()); }
+                for mime in mime_types { offer.offer(mime); }
                 device.selection(Some(&offer));
-                self.selection.offers.insert(offer.id(), source.resource.clone());
+                self.selection.offers.insert(offer.id(), source);
             } else {
                 device.selection(None);
             }
@@ -932,9 +936,8 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                     == Some(client);
                 if !focused_matches || serial > state.serial { return; }
                 let next = source.map(|source| source.id());
-                if next == state.selection.selection { return; }
-                if let Some(old) = state.selection.selection.take().and_then(|id| state.selection.sources.get(&id)) { old.resource.cancelled(); }
-                state.selection.selection = next;
+                if next == state.selection.selection && state.selection.host.is_none() { return; }
+                state.selection.replace(next);
                 state.send_selection();
             }
             wl_data_device::Request::StartDrag { source, .. } => {
@@ -952,19 +955,23 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
     fn request(state: &mut Self, _client: &Client, resource: &wl_data_offer::WlDataOffer,
         request: wl_data_offer::Request, _data: &(), _dh: &DisplayHandle, _data_init: &mut DataInit<'_, Self>) {
-        let Some(source) = state.selection.offers.get(&resource.id()).filter(|source| source.is_alive()) else { return; };
-        match request {
-            wl_data_offer::Request::Accept { mime_type, .. } => source.target(mime_type),
-            wl_data_offer::Request::Receive { mime_type, fd } => {
+        use crate::selection::Offer;
+        match (state.selection.offers.get(&resource.id()), request) {
+            (Some(Offer::Client(source)), wl_data_offer::Request::Accept { mime_type, .. }) if source.is_alive() => source.target(mime_type),
+            (Some(Offer::Client(source)), wl_data_offer::Request::Receive { mime_type, fd }) if source.is_alive() => {
                 use std::os::fd::AsFd;
                 source.send(mime_type, fd.as_fd());
+            }
+            (Some(Offer::Host(bytes)), wl_data_offer::Request::Receive { mime_type, fd }) if mime_type == "text/plain;charset=utf-8" || mime_type == "text/plain" => {
+                let bytes = bytes.clone();
+                state.selection.receive_host(resource.id(), fd, bytes);
             }
             _ => {}
         }
     }
 
     fn destroyed(state: &mut Self, _client: wayland_server::backend::ClientId,
-        resource: &wl_data_offer::WlDataOffer, _data: &()) { state.selection.offers.remove(&resource.id()); }
+        resource: &wl_data_offer::WlDataOffer, _data: &()) { state.selection.remove_offer(&resource.id()); }
 }
 
 impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for State {

@@ -1,6 +1,12 @@
 use std::collections::HashMap;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wayland_server::backend::ObjectId;
 use wayland_server::protocol::{wl_data_device, wl_data_source};
+
+const MAX_TRANSFERS: usize = 16;
+const TRANSFER_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct DataSourceData {
@@ -8,10 +14,74 @@ pub struct DataSourceData {
     pub mime_types: Vec<String>,
 }
 
+#[derive(Debug)]
+pub enum Offer {
+    Client(wl_data_source::WlDataSource),
+    Host(Arc<[u8]>),
+}
+
+#[derive(Debug)]
+pub struct Transfer {
+    offer: ObjectId,
+    fd: OwnedFd,
+    bytes: Arc<[u8]>,
+    written: usize,
+    pub(crate) deadline: Instant,
+}
+
 #[derive(Debug, Default)]
 pub struct SelectionState {
     pub sources: HashMap<ObjectId, DataSourceData>,
     pub devices: HashMap<ObjectId, wl_data_device::WlDataDevice>,
-    pub offers: HashMap<ObjectId, wl_data_source::WlDataSource>,
+    pub offers: HashMap<ObjectId, Offer>,
     pub selection: Option<ObjectId>,
+    pub host: Option<Arc<[u8]>>,
+    pub transfers: Vec<Transfer>,
+}
+
+impl SelectionState {
+    pub fn replace(&mut self, next: Option<ObjectId>) {
+        if let Some(id) = self.selection.take() {
+            if let Some(old) = self.sources.get(&id) { old.resource.cancelled(); }
+        }
+        self.offers.retain(|_, offer| matches!(offer, Offer::Client(_)));
+        self.transfers.clear();
+        self.host = None;
+        self.selection = next;
+    }
+
+    pub fn receive_host(&mut self, offer: ObjectId, fd: OwnedFd, bytes: Arc<[u8]>) {
+        if self.transfers.len() >= MAX_TRANSFERS { return; }
+        let Ok(stat) = rustix::fs::fstat(&fd) else { return; };
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo { return; }
+        let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        let Ok(fd) = rustix::fs::open(path, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty()) else { return; };
+        self.transfers.push(Transfer { offer, fd, bytes, written: 0, deadline: Instant::now() + TRANSFER_DEADLINE });
+    }
+
+    pub fn poll_fds(&self) -> Vec<rustix::event::PollFd<'_>> {
+        self.transfers.iter().map(|transfer| rustix::event::PollFd::new(&transfer.fd, rustix::event::PollFlags::OUT)).collect()
+    }
+
+    pub fn service_transfers(&mut self) {
+        let now = Instant::now();
+        self.transfers.retain_mut(|transfer| {
+            if now >= transfer.deadline { return false; }
+            while transfer.written < transfer.bytes.len() {
+                match rustix::io::write(&transfer.fd, &transfer.bytes[transfer.written..]) {
+                    Ok(0) => return false,
+                    Ok(n) => transfer.written += n,
+                    Err(rustix::io::Errno::AGAIN) => return true,
+                    Err(rustix::io::Errno::INTR) => return true,
+                    Err(_) => return false,
+                }
+            }
+            false
+        });
+    }
+
+    pub fn remove_offer(&mut self, id: &ObjectId) {
+        self.offers.remove(id);
+        self.transfers.retain(|transfer| &transfer.offer != id);
+    }
 }

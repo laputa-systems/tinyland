@@ -14,7 +14,9 @@ fn start(dir: &std::path::Path) -> Child {
 fn child_pid(dir: &std::path::Path) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(pid) = std::fs::read_to_string(dir.join("child.pid")) { return pid.trim().parse().unwrap(); }
+        if let Ok(pid) = std::fs::read_to_string(dir.join("child.pid")) {
+            if let Ok(pid) = pid.trim().parse() { return pid; }
+        }
         assert!(Instant::now() < deadline, "child did not start");
         std::thread::sleep(Duration::from_millis(10));
     }

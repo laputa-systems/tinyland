@@ -95,3 +95,12 @@ remain separate checks. Record their actual inputs and results when run.
 Remote protocol and presentation tests are included in the workspace suite.
 The macOS Nanos appliance and actual headed browser require separate runtime
 qualification by the appliance owner; these tests do not establish it.
+
+The remote clipboard can be exercised with a real terminal in the disposable
+Linux test image after building the workspace. Install `foot`, `python3`, and
+`font-dejavu` in the container, set `TINYLAND_BIN` to the built Tinyland binary,
+`TMPDIR` to a writable scratch directory, and `XKB_CONFIG_ROOT` to the image's
+xkeyboard-config data. Run `python3 tinyland/src/server/tests/remote_clipboard_proof.py`.
+The proof sends the remote Clipboard message and Ctrl+Shift+V to foot, then
+checks the text received by its shell. It uses a disposable local string and
+no account credentials.

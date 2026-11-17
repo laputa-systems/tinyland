@@ -98,9 +98,14 @@ Key (u32 source, u16 evdev code, u8 pressed), Pointer (u32 source, u32 x,
 u32 y), Button (u32 source, u8 button, u8 pressed), Wheel (u32 source, i32
 horizontal, i32 vertical), ResetInput (u32 source), and Clipboard (u32 source,
 UTF-8 bytes). Button values 1 through 5 mean left, right, middle, back, forward.
-Boolean values are 0 or 1. Clipboard is bounded to 1 MiB. The compositor does
-not yet accept Clipboard: the selection path currently forwards client-owned
-sources and lacks a nonblocking host-owned offer and transfer lifecycle.
+Boolean values are 0 or 1. Clipboard is UTF-8 bounded to 1 MiB and replaces the
+current selection with a host-owned text offer. The latest clipboard survives
+a viewer input reset until superseded or the session ends. Replacement cancels
+old host offers and transfers. At most 16 nonblocking transfers run at once;
+each expires after five seconds and receiver closure cancels it. Host transfers
+accept pipe descriptors, reopened through Linux `/proc/self/fd` with independent
+nonblocking flags. Other descriptors or an unavailable proc filesystem cancel the
+transfer.
 
 Frames contain exactly width times height times four bytes in XRGB8888
 little-endian order, B,G,R,X with a width times four stride. The host sends
