@@ -1046,3 +1046,69 @@ fn modifier_held_when_focus_is_lost_is_reported_to_the_next_focus_and_released_t
     let released = f.events();
     assert_eq!(sent(&released, &keyboard, KEYBOARD_MODIFIERS).last().map(|args| args[1]), Some(0));
 }
+
+#[test]
+fn a_popup_can_carry_a_subsurface_that_composes_over_it() {
+    use wayland_protocols::xdg::shell::server::xdg_positioner::{Anchor, ConstraintAdjustment, Gravity};
+    use wayland_server::protocol::wl_subcompositor;
+    let mut f = Fixture::with_output((100, 50));
+    let (_, parent_xdg, _) = mapped_toplevel(&mut f, 10);
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&base, 1, &[2]);
+    f.request_id(2, 1, &[30, 20]);
+    f.request_id(2, 2, &[10, 40, 20, 5]);
+    f.request_id(2, 3, &[Anchor::BottomLeft as u32]);
+    f.request_id(2, 4, &[Gravity::BottomRight as u32]);
+    f.request_id(2, 5, &[(ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX).bits()]);
+    let popup_surface = f.surface();
+    f.request(&base, 2, &[3, popup_surface.id().protocol_id()]);
+    f.request_id(3, 2, &[4, parent_xdg.id().protocol_id(), 2]);
+    let events = messages(&f.request(&popup_surface, 6, &[]));
+    let serial = events.iter().find(|(o, op, _)| *o == 3 && *op == 0).unwrap().2[0];
+    f.request_id(3, 4, &[serial]);
+    f.show(&popup_surface, 30, 20, 99);
+
+    let child = f.surface();
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    let response = f.request(&sub, 1, &[5, child.id().protocol_id(), popup_surface.id().protocol_id()]);
+    assert!(!String::from_utf8_lossy(&response).contains("bad parent"), "a popup is a valid subsurface parent");
+    f.show(&child, 10, 10, 77);
+    f.request(&popup_surface, 6, &[]);
+    let frame = f.state.compose();
+    assert_eq!(frame[(22 * 100 + 12) * 4], 77, "the popup's subsurface composes over the popup");
+    assert_eq!(frame[(35 * 100 + 30) * 4], 99, "the rest of the popup stays visible");
+}
+
+#[test]
+fn a_surface_can_become_a_subsurface_again_after_its_subsurface_is_destroyed() {
+    use wayland_server::protocol::{wl_subcompositor, wl_subsurface};
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let child = f.surface();
+    let xdg = f.toplevel(&parent);
+    f.request(&xdg, 4, &[7]);
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&sub, 1, &[2, child.id().protocol_id(), parent.id().protocol_id()]);
+    let first = wl_subsurface::WlSubsurface::from_id(&f.state.dh, f.state.subsurfaces.keys().next().unwrap().clone()).unwrap();
+    f.request(&first, 0, &[]);
+    assert!(f.state.subsurfaces.is_empty());
+    let response = f.request(&sub, 1, &[3, child.id().protocol_id(), parent.id().protocol_id()]);
+    assert!(!String::from_utf8_lossy(&response).contains("already has role"), "the subsurface role may be assigned again");
+    assert_eq!(f.state.subsurfaces.len(), 1);
+    assert_eq!(f.state.surfaces[&child.id()].parent, Some(parent.id()));
+    let response = f.request(&sub, 1, &[4, child.id().protocol_id(), parent.id().protocol_id()]);
+    assert!(String::from_utf8_lossy(&response).contains("already has role"), "a surface keeps at most one live subsurface");
+}
+
+#[test]
+fn a_toplevel_surface_cannot_become_a_subsurface() {
+    use wayland_server::protocol::wl_subcompositor;
+    let mut f = Fixture::new();
+    let parent = f.surface();
+    let other = f.surface();
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    f.request(&base, 2, &[2, other.id().protocol_id()]);
+    let sub = f.client.create_resource::<wl_subcompositor::WlSubcompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    let response = f.request(&sub, 1, &[3, other.id().protocol_id(), parent.id().protocol_id()]);
+    assert!(String::from_utf8_lossy(&response).contains("already has role"), "an xdg surface keeps its role");
+}

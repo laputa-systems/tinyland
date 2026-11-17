@@ -317,8 +317,9 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                         subtree.extend(surface.stacking.iter().filter(|child| **child != id).map(|child| (child.clone(), depth + 1)));
                     }
                 }
+                let has_live_subsurface = state.subsurfaces.values().any(|id| *id == surf_id);
                 let valid = match (state.surfaces.get(&surf_id), state.surfaces.get(&parent_id)) {
-                    (Some(s), Some(p)) => !s.has_role && !p.is_popup,
+                    (Some(s), Some(_)) => (!s.has_role || s.is_subsurface) && !has_live_subsurface,
                     _ => false,
                 };
                 if !valid {
@@ -330,6 +331,7 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for State {
                 }
                 if let Some(s) = state.surfaces.get_mut(&surf_id) {
                     s.has_role = true;
+                    s.is_subsurface = true;
                     s.parent = Some(parent_id.clone());
                     s.subsurface_sync = true;
                 }

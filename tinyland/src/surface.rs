@@ -75,6 +75,7 @@ pub struct SurfaceData {
     pub pending_pos: Option<(i32, i32)>,
     pub subsurface_sync: bool,
     pub has_role: bool,
+    pub is_subsurface: bool,
     pub is_popup: bool,
     pub is_cursor: bool,
 }
@@ -87,7 +88,7 @@ impl SurfaceData {
             cached_stacking: None, pixels: None, input_region: None,
             callbacks: Vec::new(), parent: None, stacking: vec![id], pending_stacking: None,
             subsurface_pos: (0, 0), pending_pos: None, subsurface_sync: true,
-            has_role: false, is_popup: false, is_cursor: false,
+            has_role: false, is_subsurface: false, is_popup: false, is_cursor: false,
         }
     }
 
