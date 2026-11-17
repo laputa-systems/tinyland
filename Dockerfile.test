@@ -11,6 +11,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo/ .cargo/
 COPY seatd/ seatd/
 COPY seatd-protocol/ seatd-protocol/
+COPY remote-protocol/ remote-protocol/
 COPY tinyland/ tinyland/
 RUN cargo fetch --locked
 CMD ["cargo", "test", "--locked", "--workspace"]
