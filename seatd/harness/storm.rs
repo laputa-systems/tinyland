@@ -40,23 +40,26 @@ fn unlink(path: &str) {
 
 fn spawn_rust(sock: &str) -> Daemon {
     unlink(sock);
-    let child = Daemon { child: Command::new(rust_bin())
+    let mut child = Daemon { child: Command::new(rust_bin())
         .arg("-l")
         .arg("silent")
+        .args(["-n", "1"])
         .stderr(Stdio::null())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .env("SEATD_VTBOUND", "0")
         .env("SEATD_SOCK", sock)
         .spawn()
         .expect("spawn rust seatd") };
-    for _ in 0..50 {
-        if std::path::Path::new(sock).exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(std::path::Path::new(sock).exists());
+    let mut readiness = child.child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut byte = [0];
+        let result = readiness.read_exact(&mut byte).map(|()| byte);
+        let _ = sender.send(result);
+    });
+    assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(5)).expect("daemon readiness timeout").expect("daemon readiness closed"), [b'\n']);
+    reader.join().unwrap();
     child
 }
 
