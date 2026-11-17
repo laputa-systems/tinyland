@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wayland_server::backend::ObjectId;
@@ -54,8 +54,10 @@ impl SelectionState {
         if self.transfers.len() >= MAX_TRANSFERS { return; }
         let Ok(stat) = rustix::fs::fstat(&fd) else { return; };
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo { return; }
-        let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
-        let Ok(fd) = rustix::fs::open(path, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty()) else { return; };
+        let Ok(flags) = rustix::fs::fcntl_getfl(&fd) else { return; };
+        if !flags.intersects(rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::RDWR) { return; }
+        if rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).is_err() { return; }
+        if rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC).is_err() { return; }
         self.transfers.push(Transfer { offer, fd, bytes, written: 0, deadline: Instant::now() + TRANSFER_DEADLINE });
     }
 

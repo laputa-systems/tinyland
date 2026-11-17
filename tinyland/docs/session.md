@@ -103,9 +103,10 @@ current selection with a host-owned text offer. The latest clipboard survives
 a viewer input reset until superseded or the session ends. Replacement cancels
 old host offers and transfers. At most 16 nonblocking transfers run at once;
 each expires after five seconds and receiver closure cancels it. Host transfers
-accept pipe descriptors, reopened through Linux `/proc/self/fd` with independent
-nonblocking flags. Other descriptors or an unavailable proc filesystem cancel the
-transfer.
+accept writable pipe descriptors and set the transferred write description to
+nonblocking. A client retaining a duplicate of that write description observes
+the changed flag; the read endpoint keeps its own flags. Other descriptors cancel
+the transfer. This path requires no proc filesystem.
 
 Frames contain exactly width times height times four bytes in XRGB8888
 little-endian order, B,G,R,X with a width times four stride. The host sends

@@ -581,3 +581,21 @@ fn remote_and_client_clipboards_replace_each_other_without_reusing_host_offers()
     assert_eq!(&**f.state.selection.host.as_ref().unwrap(), b"second");
     assert!(!f.state.selection.offers.contains_key(&old_offer));
 }
+
+#[test]
+fn clipboard_owns_a_nonblocking_write_description_and_rejects_other_targets() {
+    use std::os::fd::{AsFd, OwnedFd};
+    use wayland_server::protocol::wl_data_offer;
+    let mut f = Fixture::new();
+    let offer = f.client.create_resource::<wl_data_offer::WlDataOffer, (), State>(&f.state.dh, 3, ()).unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let retained = writer.as_fd().try_clone_to_owned().unwrap();
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(writer), Arc::from(&b"text"[..]));
+    assert_eq!(f.state.selection.transfers.len(), 1);
+    assert!(rustix::fs::fcntl_getfl(&retained).unwrap().contains(rustix::fs::OFlags::NONBLOCK));
+    assert!(!rustix::fs::fcntl_getfl(&reader).unwrap().contains(rustix::fs::OFlags::NONBLOCK));
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(reader), Arc::from(&b"invalid"[..]));
+    let file = tempfile::tempfile().unwrap();
+    f.state.selection.receive_host(offer.id(), OwnedFd::from(file), Arc::from(&b"invalid"[..]));
+    assert_eq!(f.state.selection.transfers.len(), 1);
+}

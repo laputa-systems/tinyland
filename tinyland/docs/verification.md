@@ -104,3 +104,9 @@ xkeyboard-config data. Run `python3 tinyland/src/server/tests/remote_clipboard_p
 The proof sends the remote Clipboard message and Ctrl+Shift+V to foot, then
 checks the text received by its shell. It uses a disposable local string and
 no account credentials.
+
+For Linux socket tests launched from macOS, put `TMPDIR=/src/.work/tmp` on a
+Docker volume mounted at that path. Stale-socket assertions failed on the
+host-shared directory and passed with a Linux volume. The target directory can
+remain on the source mount. An anonymous volume with `docker run --rm` is
+removed with the container.
