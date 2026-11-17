@@ -91,3 +91,7 @@ The audit rejects forbidden compositor libraries, runtime libxkbcommon,
 dynamic dependencies in the static build, and unsafe compositor source.
 The release build, device proof, binary size, startup, and idle measurements
 remain separate checks. Record their actual inputs and results when run.
+
+Remote protocol and presentation tests are included in the workspace suite.
+The macOS Nanos appliance and actual headed browser require separate runtime
+qualification by the appliance owner; these tests do not establish it.

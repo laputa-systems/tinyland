@@ -422,3 +422,70 @@ fn a_keyboard_bound_while_a_key_is_held_is_told_which_keys_are_held() {
     assert_eq!(enter.len(), 1);
     assert_eq!(enter[0].2[2..], [4, u32::from(KEY_A)]);
 }
+
+#[test]
+fn remote_ack_completes_only_its_submitted_callbacks() {
+    let mut f = Fixture::new();
+    let surface = mapped_frame(&mut f, 1);
+    f.request(&surface, 3, &[2]);
+    f.show(&surface, 2, 1, 2);
+    let size = tinyland_remote::Size::new(2, 1).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    transport.queue_frame(&mut f.state, size).unwrap();
+    transport.write().unwrap();
+    assert!(done_times(&f.events(), 2).is_empty());
+    f.request(&surface, 3, &[3]);
+    f.show(&surface, 2, 1, 3);
+    assert!(transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 2 }).is_err());
+    assert!(done_times(&f.events(), 2).is_empty());
+    transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 1 }).unwrap();
+    assert_eq!(done_times(&f.events(), 2).len(), 1);
+    assert!(transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 1 }).is_err());
+    assert!(f.state.pending_present);
+    assert!(done_times(&f.events(), 3).is_empty());
+    transport.queue_frame(&mut f.state, size).unwrap();
+    transport.write().unwrap();
+    transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 2 }).unwrap();
+    assert_eq!(done_times(&f.events(), 3).len(), 1);
+}
+
+#[test]
+fn remote_disconnect_releases_only_that_sources_modifiers_and_keys() {
+    use tinyland_remote::{HostMessage, Size};
+    let (mut f, keyboard) = keyboard_world();
+    let size = Size::new(100, 100).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    for source in [1, 2] {
+        transport.handle(&mut f.state, size, HostMessage::Key { source, code: KEY_LEFTSHIFT, pressed: true }).unwrap();
+    }
+    f.events();
+    transport.handle(&mut f.state, size, HostMessage::ResetInput { source: 1 }).unwrap();
+    assert!(key_events(&f.events(), &keyboard).is_empty());
+    transport.handle(&mut f.state, size, HostMessage::ResetInput { source: 2 }).unwrap();
+    let events = f.events();
+    assert_eq!(key_events(&events, &keyboard), [(u32::from(KEY_LEFTSHIFT), 0)]);
+    assert_eq!(last_depressed(&events, &keyboard), Some(0));
+}
+
+#[test]
+fn remote_pointer_buttons_remain_owned_until_last_source_resets() {
+    use tinyland_remote::{Button, HostMessage, Size};
+    let (mut f, pointer, _) = pointer_world();
+    let size = Size::new(100, 100).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    transport.handle(&mut f.state, size, HostMessage::Pointer { source: 1, x: 20, y: 30 }).unwrap();
+    assert!((f.state.pointer.position.0 - 20.0).abs() < 0.001);
+    assert!((f.state.pointer.position.1 - 30.0).abs() < 0.001);
+    for source in [1, 2] {
+        transport.handle(&mut f.state, size, HostMessage::Button { source, button: Button::Left, pressed: true }).unwrap();
+    }
+    let events = f.events();
+    assert_eq!(sent(&events, &pointer, POINTER_BUTTON).len(), 1);
+    transport.handle(&mut f.state, size, HostMessage::ResetInput { source: 1 }).unwrap();
+    assert!(sent(&f.events(), &pointer, POINTER_BUTTON).is_empty());
+    transport.handle(&mut f.state, size, HostMessage::ResetInput { source: 2 }).unwrap();
+    let events = f.events();
+    let buttons = sent(&events, &pointer, POINTER_BUTTON);
+    assert_eq!(buttons.len(), 1);
+    assert_eq!(buttons[0][3], 0);
+}

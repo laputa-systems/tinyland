@@ -77,3 +77,38 @@ ENODEV suspends the seat instead of treating the device as unplugged.
 Suspend and resume write best-effort markers named `laputa-seat-disabled`
 and `laputa-seat-enabled` inside the runtime directory for guest observers.
 Marker failure does not fail the session.
+
+## Remote session
+
+`tinyland --remote --width W --height H --socket NAME -- COMMAND...` runs a
+software output without opening a seat, DRM, or input device. Width and height
+must each be between 1 and 4096. The caller connects stdin and stdout to the
+trusted host transport; diagnostics use stderr. Remote mode cannot be combined
+with seat or DRM options. Input source identifiers own held keys and buttons;
+resetting a source releases its ownership. Pointer coordinates are output
+pixels and wheel values are signed whole steps, bounded to 120 per message.
+Transport closure, malformed input, an unexpected acknowledgment, or a stalled
+frame terminates the session. The child is terminated and reaped on shutdown.
+
+The `tinyland-remote` workspace crate defines the wire codec. Each message has
+`TLR1`, a one-byte type, and a little-endian u32 body length. Bodies use
+little-endian integers. Types 1 and 2 are Ready (u32 width, u32 height) and
+Frame (u64 serial, pixels); types 16 through 22 are Presented (u64 serial),
+Key (u32 source, u16 evdev code, u8 pressed), Pointer (u32 source, u32 x,
+u32 y), Button (u32 source, u8 button, u8 pressed), Wheel (u32 source, i32
+horizontal, i32 vertical), ResetInput (u32 source), and Clipboard (u32 source,
+UTF-8 bytes). Button values 1 through 5 mean left, right, middle, back, forward.
+Boolean values are 0 or 1. Clipboard is bounded to 1 MiB. The compositor does
+not yet accept Clipboard: the selection path currently forwards client-owned
+sources and lacks a nonblocking host-owned offer and transfer lifecycle.
+
+Frames contain exactly width times height times four bytes in XRGB8888
+little-endian order, B,G,R,X with a width times four stride. The host sends
+Presented only after publishing the validated framebuffer, independent of
+viewer presence. At most one frame is in flight; its callbacks complete only
+on the matching acknowledgment. New commits remain dirty until the next frame.
+`read_compositor` and `write_compositor` take `Option<Size>`: pass the
+negotiated size for frames and `None` for Ready. Clean EOF is returned as
+`None` only at a message boundary.
+For nonblocking receivers, `host_message_size` validates a complete nine-byte
+host header and returns the total encoded length before buffering the body.

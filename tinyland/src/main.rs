@@ -2,7 +2,7 @@ use tinyland::{output, server, shutdown};
 use std::ffi::OsString;
 use std::path::PathBuf;
 fn usage() -> &'static str {
-    "usage: tinyland [--seat] [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]"
+    "usage: tinyland [--remote] [--seat] [--drm-proof] [--wayland-pixels] [--smoke] [--drm-device PATH] [--width N] [--height N] [--socket NAME] [-- COMMAND...]"
 }
 
 fn argument_error(message: &str) -> ! {
@@ -24,8 +24,12 @@ fn main() {
     let mut socket_name = OsString::from("wayland-0");
     let mut command: Vec<OsString> = Vec::new();
     let mut seat_mode = false;
+    let mut remote = false;
+    let mut explicit_physical = false;
+    let mut separator = false;
     while let Some(a) = args.next() {
         if a == "--" {
+            separator = true;
             for rest in args.by_ref() {
                 command.push(rest);
             }
@@ -33,11 +37,13 @@ fn main() {
         }
         let text = a.to_str().unwrap_or_else(|| argument_error("option must be UTF-8")).to_string();
         match text.as_str() {
-            "--drm-proof" => mode = "drm-proof",
-            "--wayland-pixels" => mode = "wayland-pixels",
-            "--smoke" => mode = "smoke",
+            "--drm-proof" => { mode = "drm-proof"; explicit_physical = true; },
+            "--wayland-pixels" => { mode = "wayland-pixels"; explicit_physical = true; },
+            "--smoke" => { mode = "smoke"; explicit_physical = true; },
             "--seat" => seat_mode = true,
+            "--remote" => remote = true,
             "--drm-device" => {
+                explicit_physical = true;
                 drm_device = PathBuf::from(args.next().unwrap_or_else(|| argument_error("missing --drm-device value")));
             }
             "--width" => {
@@ -67,7 +73,12 @@ fn main() {
         }
     }
 
-    let code = match mode {
+    if remote && (seat_mode || explicit_physical || !separator || command.is_empty() || tinyland_remote::Size::new(width, height).is_none()) {
+        argument_error("invalid remote mode options");
+    }
+    let code = if remote {
+        server::remote::run(&server::ServerConfig { mode, device: &drm_device, width, height, socket_name: &socket_name, command: &command, shutdown: &shutdown, seat_mode })
+    } else { match mode {
         "drm-proof" => output::drm_proof(&drm_device, width, height, &shutdown),
         "wayland-pixels" | "smoke" => server::run(&server::ServerConfig {
             mode,
@@ -83,7 +94,7 @@ fn main() {
             eprintln!("unknown mode");
             1
         }
-    };
+    }};
     let signal = shutdown.signal();
     drop(shutdown);
     if let Some(signal) = signal {

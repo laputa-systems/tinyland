@@ -1388,6 +1388,7 @@ fn spawn_app(mode: &str, runtime_dir: &str, socket_name: &str, command: &[std::f
     Ok(App(Some(child)))
 }
 
+pub mod remote;
 mod dispatch_impl;
 mod display_error;
 mod pointer;

@@ -761,10 +761,15 @@ dependencies = [
  "seatd-protocol",
  "signal-hook",
  "tempfile",
+ "tinyland-remote",
  "wayland-protocols",
  "wayland-server",
  "xkbcommon",
 ]
+
+[[package]]
+name = "tinyland-remote"
+version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"
