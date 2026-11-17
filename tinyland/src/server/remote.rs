@@ -6,6 +6,7 @@ use tinyland_remote::{Button, CompositorMessage, HostMessage, Size};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const MAX_SOURCES: usize = 64;
+const WRITE_CHUNK: usize = 16 * 1024;
 
 pub(super) struct Transport {
     input: File,
@@ -51,7 +52,8 @@ impl Transport {
 
     pub(super) fn write(&mut self) -> Result<(), String> {
         while self.written < self.outgoing.len() {
-            match self.output.write(&self.outgoing[self.written..]) {
+            let end = self.outgoing.len().min(self.written + WRITE_CHUNK);
+            match self.output.write(&self.outgoing[self.written..end]) {
                 Ok(0) => return Err("remote output closed".into()),
                 Ok(n) => self.written += n,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
