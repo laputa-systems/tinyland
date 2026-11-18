@@ -110,7 +110,7 @@ nonblocking. A client retaining a duplicate of that write description observes
 the changed flag; the read endpoint keeps its own flags. Other descriptors cancel
 the transfer. This path requires no proc filesystem.
 
-Output writes are bounded to 16 KiB: transports such as Hydrogen vsock allocate
+Output writes are bounded to 64 KiB: transports such as Hydrogen vsock allocate
 a packet buffer for each write and cannot accept a whole framebuffer at once.
 Short writes and backpressure preserve the remaining encoded bytes.
 

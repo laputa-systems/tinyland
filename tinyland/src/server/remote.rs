@@ -6,7 +6,7 @@ use tinyland_remote::{Button, CompositorMessage, HostMessage, Size};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const MAX_SOURCES: usize = 64;
-const WRITE_CHUNK: usize = 16 * 1024;
+const WRITE_CHUNK: usize = 64 * 1024;
 
 pub(super) struct Transport {
     input: File,
