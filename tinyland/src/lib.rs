@@ -1,3 +1,4 @@
+mod damage;
 mod input;
 pub mod output;
 mod positioner;

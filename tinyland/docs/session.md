@@ -92,8 +92,10 @@ frame terminates the session. The child is terminated and reaped on shutdown.
 
 The `tinyland-remote` workspace crate defines the wire codec. Each message has
 `TLR1`, a one-byte type, and a little-endian u32 body length. Bodies use
-little-endian integers. Types 1 and 2 are Ready (u32 width, u32 height) and
-Frame (u64 serial, pixels); types 16 through 22 are Presented (u64 serial),
+little-endian integers. Types 1 through 3 are Ready (u32 width, u32 height),
+Frame (u64 serial, pixels) and Damage (u64 serial, u32 count, then count
+rectangles of u32 x, y, width, height, then each rectangle's pixel rows in
+order); types 16 through 22 are Presented (u64 serial),
 Key (u32 source, u16 evdev code, u8 pressed), Pointer (u32 source, u32 x,
 u32 y), Button (u32 source, u8 button, u8 pressed), Wheel (u32 source, i32
 horizontal, i32 vertical), ResetInput (u32 source), and Clipboard (u32 source,
@@ -113,9 +115,25 @@ a packet buffer for each write and cannot accept a whole framebuffer at once.
 Short writes and backpressure preserve the remaining encoded bytes.
 
 Frames contain exactly width times height times four bytes in XRGB8888
-little-endian order, B,G,R,X with a width times four stride. The host sends
+little-endian order, B,G,R,X with a width times four stride. Damage replaces
+only its rectangles of the previous output, in the same pixel order with each
+rectangle's width times four stride. Rectangles are nonempty, lie inside the
+output, and number at most 64. A Damage message with no rectangles changes no
+pixels but still completes a presentation. The compositor sends Damage for
+every frame; its first frame covers the whole output. The host sends
 Presented only after publishing the validated framebuffer, independent of
-viewer presence. At most one frame is in flight; its callbacks complete only
+viewer presence.
+
+The compositor keeps the presented output and the scene it showed. Commits
+retain each surface's Damage and DamageBuffer requests; a commit replaces only
+the damaged rows of the surface's retained pixels. A new buffer with no posted
+damage, a changed size or format, or a buffer scale or transform the renderer
+ignores counts as damage to the whole surface. At presentation, a surface that
+kept its place contributes its accumulated damage; a surface that moved,
+appeared, disappeared or changed size contributes its old and new extents; a
+changed drawing order redraws the whole output. Each damaged output rectangle
+is cleared and recomposed from every surface that intersects it, so alpha
+blending stays exact. More than 16 rectangles are sent as their bounding box. At most one frame is in flight; its callbacks complete only
 on the matching acknowledgment. New commits remain dirty until the next frame.
 `read_compositor` and `write_compositor` take `Option<Size>`: pass the
 negotiated size for frames and `None` for Ready. Clean EOF is returned as

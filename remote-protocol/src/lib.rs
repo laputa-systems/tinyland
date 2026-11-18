@@ -2,6 +2,8 @@ use std::io::{self, Read, Write};
 
 const MAGIC: [u8; 4] = *b"TLR1";
 const MAX_CLIPBOARD: usize = 1024 * 1024;
+/// The most rectangles one damage message may carry; a compositor with more sends their bounding box.
+pub const MAX_DAMAGE_RECTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size { width: u32, height: u32 }
@@ -20,8 +22,23 @@ impl Size {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button { Left, Right, Middle, Back, Forward }
 
+/// A nonempty rectangle of output pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
+
+impl Rect {
+    fn inside(self, size: Size) -> bool {
+        self.width > 0 && self.height > 0
+            && self.x.checked_add(self.width).is_some_and(|end| end <= size.width)
+            && self.y.checked_add(self.height).is_some_and(|end| end <= size.height)
+    }
+    fn pixel_len(self) -> usize { self.width as usize * self.height as usize * 4 }
+}
+
+/// `Frame` replaces the whole output. `Damage` replaces only its rectangles, each with its rows of BGRX pixels;
+/// with no rectangles it still asks the host to acknowledge a presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> } }
+pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> }, Damage { serial: u64, rects: Vec<(Rect, Vec<u8>)> } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostMessage {
@@ -124,6 +141,21 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
             let mut pixels = vec![0; len - 8]; reader.read_exact(&mut pixels)?;
             Ok(Some(CompositorMessage::Frame { serial: u64::from_le_bytes(serial), pixels }))
         }
+        3 if size.is_some() && len >= 12 => {
+            let size = size.unwrap();
+            let mut head = [0; 12]; reader.read_exact(&mut head)?;
+            let count = u32_at(&head, 8) as usize;
+            if count > MAX_DAMAGE_RECTS || len < 12 + count * 16 { return Err(invalid()); }
+            let mut table = vec![0; count * 16]; reader.read_exact(&mut table)?;
+            let rects: Vec<Rect> = table.chunks_exact(16).map(|b| Rect { x: u32_at(b, 0), y: u32_at(b, 4), width: u32_at(b, 8), height: u32_at(b, 12) }).collect();
+            if !rects.iter().all(|r| r.inside(size)) || rects.iter().map(|r| r.pixel_len()).sum::<usize>() != len - 12 - count * 16 { return Err(invalid()); }
+            let mut out = Vec::with_capacity(count);
+            for rect in rects {
+                let mut pixels = vec![0; rect.pixel_len()]; reader.read_exact(&mut pixels)?;
+                out.push((rect, pixels));
+            }
+            Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), rects: out }))
+        }
         _ => Err(invalid()),
     }
 }
@@ -137,7 +169,40 @@ pub fn write_compositor<W: Write>(writer: &mut W, message: &CompositorMessage, s
             writer.write_all(&((pixels.len() + 8) as u32).to_le_bytes())?;
             writer.write_all(&serial.to_le_bytes())?; writer.write_all(pixels)
         }
+        CompositorMessage::Damage { serial, rects } => {
+            let size = size.ok_or_else(invalid)?;
+            if rects.iter().any(|(rect, pixels)| pixels.len() != rect.pixel_len()) { return Err(invalid()); }
+            let table: Vec<Rect> = rects.iter().map(|(rect, _)| *rect).collect();
+            damage_header(writer, *serial, size, &table)?;
+            for (_, pixels) in rects { writer.write_all(pixels)?; }
+            Ok(())
+        }
     }
+}
+
+/// Writes a damage message whose rectangles are cut from `framebuffer`, a whole output of BGRX rows.
+pub fn write_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuffer: &[u8], rects: &[Rect]) -> io::Result<()> {
+    if framebuffer.len() != size.pixel_len() { return Err(invalid()); }
+    damage_header(writer, serial, size, rects)?;
+    let stride = size.width as usize * 4;
+    for rect in rects {
+        for y in rect.y as usize..(rect.y + rect.height) as usize {
+            let start = y * stride + rect.x as usize * 4;
+            writer.write_all(&framebuffer[start..start + rect.width as usize * 4])?;
+        }
+    }
+    Ok(())
+}
+
+fn damage_header<W: Write>(writer: &mut W, serial: u64, size: Size, rects: &[Rect]) -> io::Result<()> {
+    if rects.len() > MAX_DAMAGE_RECTS || !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
+    let len = 12 + rects.len() * 16 + rects.iter().map(|r| r.pixel_len()).sum::<usize>();
+    writer.write_all(&MAGIC)?; writer.write_all(&[3])?;
+    writer.write_all(&u32::try_from(len).map_err(|_| invalid())?.to_le_bytes())?;
+    writer.write_all(&serial.to_le_bytes())?;
+    writer.write_all(&(rects.len() as u32).to_le_bytes())?;
+    for r in rects { for v in [r.x, r.y, r.width, r.height] { writer.write_all(&v.to_le_bytes())?; } }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -165,6 +230,31 @@ mod tests {
         for n in 1..wire.len() { assert!(read_compositor(&mut &wire[..n], Some(size)).is_err()); }
         wire[0] = 0; assert!(read_compositor(&mut &wire[..], Some(size)).is_err());
     }
+    #[test]
+    fn damage_carries_only_its_rectangles_and_rejects_bad_geometry() {
+        let size = Size::new(4, 3).unwrap();
+        let framebuffer: Vec<u8> = (0..size.pixel_len() as u32).map(|n| n as u8).collect();
+        let rects = [Rect { x: 1, y: 1, width: 2, height: 2 }, Rect { x: 3, y: 0, width: 1, height: 1 }];
+        let mut wire = Vec::new(); write_damage(&mut wire, 9, size, &framebuffer, &rects).unwrap();
+        let Some(CompositorMessage::Damage { serial, rects: got }) = read_compositor(&mut &wire[..], Some(size)).unwrap() else { panic!("not damage") };
+        assert_eq!(serial, 9);
+        assert_eq!(got[0], (rects[0], [&framebuffer[20..28], &framebuffer[36..44]].concat()));
+        assert_eq!(got[1], (rects[1], framebuffer[12..16].to_vec()));
+        let mut again = Vec::new(); write_compositor(&mut again, &CompositorMessage::Damage { serial, rects: got }, Some(size)).unwrap();
+        assert_eq!(again, wire);
+        for n in 1..wire.len() { assert!(read_compositor(&mut &wire[..n], Some(size)).is_err()); }
+        let mut empty = Vec::new(); write_damage(&mut empty, 10, size, &framebuffer, &[]).unwrap();
+        assert_eq!(read_compositor(&mut &empty[..], Some(size)).unwrap(), Some(CompositorMessage::Damage { serial: 10, rects: vec![] }));
+        for bad in [Rect { x: 3, y: 0, width: 2, height: 1 }, Rect { x: 0, y: 0, width: 0, height: 1 }, Rect { x: u32::MAX, y: 0, width: 2, height: 1 }] {
+            assert!(write_damage(&mut Vec::new(), 1, size, &framebuffer, &[bad]).is_err());
+            let mut forged = Vec::new(); write_damage(&mut forged, 1, size, &framebuffer, &[Rect { x: 0, y: 0, width: 1, height: 1 }]).unwrap();
+            forged[21..37].copy_from_slice(&[bad.x, bad.y, bad.width, bad.height].map(u32::to_le_bytes).concat());
+            assert!(read_compositor(&mut &forged[..], Some(size)).is_err());
+        }
+        assert!(write_damage(&mut Vec::new(), 1, size, &framebuffer, &[Rect { x: 0, y: 0, width: 1, height: 1 }; MAX_DAMAGE_RECTS + 1]).is_err());
+        assert!(read_compositor(&mut &wire[..], None).is_err());
+    }
+
     #[test]
     fn rejects_invalid_lengths_values_and_utf8() {
         let mut wire = Vec::new(); write_host(&mut wire, &HostMessage::Clipboard { source: 1, text: "x".into() }).unwrap();

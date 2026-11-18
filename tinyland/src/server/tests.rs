@@ -5,6 +5,7 @@ use std::os::unix::net::UnixStream;
 use wayland_server::{Client, Resource};
 use wayland_server::protocol::{wl_surface, wl_shm_pool};
 
+mod damage;
 mod lifecycle;
 mod surfaces;
 

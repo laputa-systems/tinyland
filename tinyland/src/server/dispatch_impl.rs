@@ -144,7 +144,11 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                     let _ = (x, y);
                 }
             }
-            wl_surface::Request::Damage { .. } | wl_surface::Request::DamageBuffer { .. } => {}
+            wl_surface::Request::Damage { x, y, width, height } | wl_surface::Request::DamageBuffer { x, y, width, height } => {
+                if let Some(s) = state.surfaces.get_mut(&id) {
+                    s.pending.damage.add(crate::positioner::Rect { x, y, width, height });
+                }
+            }
             wl_surface::Request::Frame { callback: cb_id } => {
                 use crate::server::MAX_CALLBACKS_PER_SURFACE;
                 let pending = state.surfaces.get(&id).map(|s| s.pending.callbacks.len()).unwrap_or(0);
@@ -179,6 +183,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                 match transform {
                     wayland_server::WEnum::Value(wl_output::Transform::Normal) => {}
                     wayland_server::WEnum::Value(_) => {
+                        if let Some(s) = state.surfaces.get_mut(&id) { s.unscaled_damage_unknown = true; }
                         eprintln!("TINYLAND_TRANSFORM_IGNORED only normal transform rendered");
                     }
                     wayland_server::WEnum::Unknown(_) => {
@@ -198,6 +203,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                     return;
                 }
                 if scale != 1 {
+                    if let Some(s) = state.surfaces.get_mut(&id) { s.unscaled_damage_unknown = true; }
                     eprintln!("TINYLAND_SCALE_IGNORED only scale 1 rendered");
                 }
             }

@@ -2,7 +2,8 @@ use crate::input::{self, HeldInput, InputDevice, InputEvent, InputId, Keyboard, 
 use crate::output::DrmOutput;
 use crate::seat::Session;
 use crate::selection::SelectionState;
-use crate::positioner::Positioner;
+use crate::damage::Damage;
+use crate::positioner::{Positioner, Rect};
 use crate::shell::{PopupData, ToplevelData, XdgSurfaceData};
 use crate::shm::{self, ShmBufferData, ShmFormat, ShmPoolData};
 use crate::surface::{SurfaceData, SurfaceUpdate};
@@ -52,6 +53,9 @@ pub struct State {
     has_pointer: bool,
     pending_present: bool,
     submitted: Option<SubmittedFrame>,
+    /// The output as last sent by `submit_damage`, and the scene it showed.
+    framebuffer: Vec<u8>,
+    last_scene: Option<Vec<(ObjectId, Rect)>>,
     held: HeldInput,
     mapped_logged: bool,
     active_toplevel: Option<ObjectId>,
@@ -76,6 +80,8 @@ pub const MAX_SEATS_PER_CLIENT: usize = 8;
 pub const MAX_OUTPUTS_PER_CLIENT: usize = 8;
 pub const MAX_REGIONS_PER_CLIENT: usize = 32;
 pub const MAX_REGION_RECTS: usize = 128;
+/// Output rectangles per presented frame; more are sent as their bounding box.
+const MAX_OUTPUT_DAMAGE_RECTS: usize = 16;
 
 impl State {
     fn new(dh: DisplayHandle, out_size: (u32, u32), keyboard: Keyboard) -> Self {
@@ -100,6 +106,8 @@ impl State {
         has_pointer: false,
         pending_present: false,
         submitted: None,
+        framebuffer: Vec::new(),
+        last_scene: None,
         held: HeldInput::default(),
         mapped_logged: false,
         active_toplevel: None,
@@ -244,7 +252,7 @@ impl State {
     }
 
     fn apply_commit(&mut self, surf_id: &ObjectId) {
-        let (pending, pending_stacking) = match self.surfaces.get_mut(surf_id) {
+        let (mut pending, pending_stacking) = match self.surfaces.get_mut(surf_id) {
             Some(surface) => (std::mem::take(&mut surface.pending), surface.pending_stacking.take()),
             None => return,
         };
@@ -308,8 +316,41 @@ impl State {
                         return;
                     }
                 }
-                match shm::read_rows(data) {
-                    Ok(pixels) => {
+                let damage = std::mem::take(&mut pending.damage);
+                let surface = self.surfaces.get_mut(surf_id).unwrap();
+                let same_shape = |p: &shm::SurfacePixels| p.width == data.width as u32 && p.height == data.height as u32 && p.format == data.format;
+                let base = if damage.is_full() || damage.rects().is_empty() || surface.unscaled_damage_unknown {
+                    None
+                } else if is_sync {
+                    match surface.cached.as_mut().map(|cached| &mut cached.pixels) {
+                        Some(Some(slot @ Some(_))) if slot.as_ref().is_some_and(same_shape) => slot.take().map(|p| (p, true)),
+                        Some(Some(_)) => None,
+                        _ => surface.pixels.as_ref().filter(|p| same_shape(p)).cloned().map(|p| (p, false)),
+                    }
+                } else if surface.pixels.as_ref().is_some_and(same_shape) {
+                    surface.pixels.take().map(|p| (p, true))
+                } else {
+                    None
+                };
+                let read = match base {
+                    Some((mut pixels, taken)) => match shm::read_rects(data, &mut pixels, damage.rects()) {
+                        Ok(()) => Ok((pixels, damage)),
+                        Err(error) => {
+                            if taken {
+                                let surface = self.surfaces.get_mut(surf_id).unwrap();
+                                match surface.cached.as_mut().map(|cached| &mut cached.pixels) {
+                                    Some(Some(slot)) if is_sync => *slot = Some(pixels),
+                                    _ => surface.pixels = Some(pixels),
+                                }
+                            }
+                            Err(error)
+                        }
+                    },
+                    None => shm::read_rows(data).map(|pixels| (pixels, crate::damage::Damage::full())),
+                };
+                match read {
+                    Ok((pixels, damage)) => {
+                        pending.damage = damage;
                         buffer.release();
                         if let Some(client) = client_id.clone() {
                             let old = if is_sync { old_cached } else { old_current };
@@ -339,7 +380,7 @@ impl State {
             }
             None => None,
         };
-        let update = SurfaceUpdate { pixels, callbacks: pending.callbacks, input_region: pending.input_region };
+        let update = SurfaceUpdate { pixels, damage: pending.damage, callbacks: pending.callbacks, input_region: pending.input_region };
         if self.synchronized(surf_id) {
             self.surfaces.get_mut(surf_id).unwrap().cached.get_or_insert_with(SurfaceUpdate::default).merge(update);
             if let Some(order) = pending_stacking {
@@ -711,6 +752,81 @@ impl State {
         fb
     }
 
+    /// Visible surfaces with pixels, in drawing order, with their output extents.
+    fn scene(&self) -> Vec<(ObjectId, Rect)> {
+        let mut scene = Vec::new();
+        for (surface, (x, y)) in self.visible_surfaces() {
+            self.scene_surface(&surface, x, y, &mut scene);
+        }
+        scene
+    }
+
+    fn scene_surface(&self, surf_id: &ObjectId, ox: i32, oy: i32, scene: &mut Vec<(ObjectId, Rect)>) {
+        let Some(surface) = self.surfaces.get(surf_id) else { return; };
+        let x = ox.saturating_add(surface.subsurface_pos.0);
+        let y = oy.saturating_add(surface.subsurface_pos.1);
+        let Some(pixels) = &surface.pixels else { return; };
+        for id in &surface.stacking {
+            if id == surf_id {
+                scene.push((id.clone(), Rect { x, y, width: pixels.width as i32, height: pixels.height as i32 }));
+            } else { self.scene_surface(id, x, y, scene); }
+        }
+    }
+
+    /// Brings `framebuffer` up to date and returns the output rectangles, as `(x0, y0, x1, y1)`, that changed.
+    /// A surface keeping its place contributes its committed damage; anything that moved, appeared or
+    /// disappeared contributes its old and new extents; a changed drawing order redraws everything.
+    fn compose_damage(&mut self) -> Vec<(u32, u32, u32, u32)> {
+        let (width, height) = self.out_size;
+        let scene = self.scene();
+        let fresh = self.framebuffer.len() != width as usize * height as usize * 4;
+        let mut damage = Damage::default();
+        match &self.last_scene {
+            Some(previous) if !fresh && previous.len() == scene.len() && previous.iter().zip(&scene).all(|(a, b)| a.0 == b.0) => {
+                for ((_, old), (id, at)) in previous.iter().zip(&scene) {
+                    if old != at { damage.add(*old); damage.add(*at); continue; }
+                    let surface = &self.surfaces[id];
+                    if surface.damage.is_full() { damage.add(*at); continue; }
+                    for rect in surface.damage.rects() {
+                        let Some((x0, y0, x1, y1)) = crate::damage::clip(*rect, at.width as u32, at.height as u32) else { continue };
+                        damage.add(Rect {
+                            x: crate::positioner::clip_to_i32(i64::from(at.x) + i64::from(x0)),
+                            y: crate::positioner::clip_to_i32(i64::from(at.y) + i64::from(y0)),
+                            width: (x1 - x0) as i32, height: (y1 - y0) as i32,
+                        });
+                    }
+                }
+            }
+            _ => damage = Damage::full(),
+        }
+        if fresh { self.framebuffer = vec![0; width as usize * height as usize * 4]; }
+        for surface in self.surfaces.values_mut() { surface.damage.clear(); }
+        let rects = crate::damage::output_rects(&damage, width, height, MAX_OUTPUT_DAMAGE_RECTS);
+        for &clip in &rects {
+            let (x0, y0, x1, y1) = clip;
+            for y in y0..y1 {
+                let row = y as usize * width as usize * 4;
+                self.framebuffer[row + x0 as usize * 4..row + x1 as usize * 4].fill(0);
+            }
+            for (id, at) in &scene {
+                let Some(pixels) = &self.surfaces[id].pixels else { continue };
+                blit_clipped(&mut self.framebuffer, width, &pixels.bytes, pixels.width, pixels.height, pixels.format, at.x, at.y, clip);
+            }
+        }
+        self.last_scene = Some(scene);
+        rects
+    }
+
+    /// Like `submit_frame`, but leaves the output in `framebuffer` and returns only the rectangles that changed.
+    fn submit_damage(&mut self) -> Vec<(u32, u32, u32, u32)> {
+        assert!(self.submitted.is_none(), "a frame was submitted while another was in flight");
+        let rects = self.compose_damage();
+        let callbacks = self.take_visible_callbacks();
+        self.pending_present = false;
+        self.submitted = Some(SubmittedFrame { callbacks });
+        rects
+    }
+
     fn submit_frame(&mut self) -> Vec<u8> {
         assert!(self.submitted.is_none(), "a frame was submitted while another was in flight");
         let pixels = self.compose();
@@ -837,29 +953,36 @@ fn blit_rows(
     oy: i32,
     format: ShmFormat,
 ) {
-    for sy in 0..src_h as i32 {
-        let dy = oy as i64 + sy as i64;
-        if dy < 0 || dy >= out_h as i64 {
-            continue;
-        }
-        for sx in 0..src_w as i32 {
-            let dx = ox as i64 + sx as i64;
-            if dx < 0 || dx >= out_w as i64 {
-                continue;
-            }
-            let s = (sy as usize * src_w as usize + sx as usize) * 4;
-            let d = (dy as usize * out_w as usize + dx as usize) * 4;
-            let (blue, green, red) = format.channel_offsets();
-            let source = [rows[s + blue], rows[s + green], rows[s + red]];
-            if format.has_alpha() {
-                let a = rows[s + 3] as u32;
-                for (channel, value) in source.iter().enumerate() {
-                    fb[d + channel] = (*value as u32 + fb[d + channel] as u32 * (255 - a) / 255).min(255) as u8;
-                }
+    blit_clipped(fb, out_w, rows, src_w, src_h, format, ox, oy, (0, 0, out_w, out_h));
+}
+
+/// Draws `rows` with its top-left at (`ox`, `oy`), touching only output pixels inside `clip` = `(x0, y0, x1, y1)`.
+/// Alpha formats are premultiplied and composited over what is there; drawn pixels get an opaque fourth byte.
+#[allow(clippy::too_many_arguments)]
+fn blit_clipped(fb: &mut [u8], out_w: u32, rows: &[u8], src_w: u32, src_h: u32, format: ShmFormat, ox: i32, oy: i32, clip: (u32, u32, u32, u32)) {
+    let (ox, oy) = (i64::from(ox), i64::from(oy));
+    let x0 = i64::from(clip.0).max(ox);
+    let x1 = i64::from(clip.2).min(ox + i64::from(src_w));
+    let y0 = i64::from(clip.1).max(oy);
+    let y1 = i64::from(clip.3).min(oy + i64::from(src_h));
+    if x0 >= x1 || y0 >= y1 { return; }
+    let (blue, green, red) = format.channel_offsets();
+    let alpha = format.has_alpha();
+    let span = (x1 - x0) as usize * 4;
+    for dy in y0..y1 {
+        let s = ((dy - oy) as usize * src_w as usize + (x0 - ox) as usize) * 4;
+        let d = (dy as usize * out_w as usize + x0 as usize) * 4;
+        for (out, src) in fb[d..d + span].chunks_exact_mut(4).zip(rows[s..s + span].chunks_exact(4)) {
+            let source = [src[blue], src[green], src[red]];
+            let a = if alpha { u32::from(src[3]) } else { 255 };
+            if a == 255 {
+                out[..3].copy_from_slice(&source);
             } else {
-                fb[d..d + 3].copy_from_slice(&source);
+                for (channel, value) in source.iter().enumerate() {
+                    out[channel] = (u32::from(*value) + u32::from(out[channel]) * (255 - a) / 255).min(255) as u8;
+                }
             }
-            fb[d + 3] = 0xFF;
+            out[3] = 0xFF;
         }
     }
 }

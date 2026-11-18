@@ -116,6 +116,26 @@ pub fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
     Ok(SurfacePixels { bytes: out, width: buf.width as u32, height: buf.height as u32, format: buf.format })
 }
 
+/// Replaces `pixels` inside `rects` (clipped to the buffer) with the buffer's current rows there.
+/// `pixels` must already hold this buffer's size and format.
+pub fn read_rects(buf: &ShmBufferData, pixels: &mut SurfacePixels, rects: &[crate::positioner::Rect]) -> Result<(), String> {
+    use std::os::unix::fs::FileExt;
+    if pixels.width != buf.width as u32 || pixels.height != buf.height as u32 || pixels.format != buf.format {
+        return Err("partial read into a differently shaped surface".into());
+    }
+    let wbytes = buf.width as usize * 4;
+    for rect in rects {
+        let Some((x0, y0, x1, y1)) = crate::damage::clip(*rect, pixels.width, pixels.height) else { continue };
+        for y in y0 as usize..y1 as usize {
+            let src = buf.offset as u64 + y as u64 * buf.stride as u64 + u64::from(x0) * 4;
+            let dst = y * wbytes + x0 as usize * 4;
+            buf.file.read_exact_at(&mut pixels.bytes[dst..dst + (x1 - x0) as usize * 4], src)
+                .map_err(|e| format!("read shm buffer: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +199,23 @@ mod lifetime_tests {
         buffer.file.set_len(0).unwrap();
         assert!(read_rows(&buffer).is_err());
         assert_eq!(pixels.bytes[0], 1);
+    }
+
+    #[test]
+    fn partial_reads_replace_only_clipped_rectangles() {
+        use crate::positioner::Rect;
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(48).unwrap();
+        let fresh: Vec<u8> = (100..148).collect();
+        file.write_all_at(&fresh, 0).unwrap();
+        let buffer = ShmBufferData { file: std::sync::Arc::new(file), offset: 0, width: 3, height: 2, stride: 24, format: ShmFormat::Xrgb8888 };
+        let mut pixels = SurfacePixels { bytes: vec![0; 24], width: 3, height: 2, format: ShmFormat::Xrgb8888 };
+        read_rects(&buffer, &mut pixels, &[Rect { x: 2, y: -5, width: 9, height: 6 }, Rect { x: -1, y: 1, width: 2, height: 1 }]).unwrap();
+        let mut expected = vec![0; 24];
+        expected[8..12].copy_from_slice(&fresh[8..12]);
+        expected[12..16].copy_from_slice(&fresh[24..28]);
+        assert_eq!(pixels.bytes, expected);
+        let mut wrong = SurfacePixels { bytes: vec![0; 24], width: 3, height: 2, format: ShmFormat::Argb8888 };
+        assert!(read_rects(&buffer, &mut wrong, &[]).is_err());
     }
 }

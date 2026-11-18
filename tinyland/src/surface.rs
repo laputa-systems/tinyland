@@ -1,3 +1,4 @@
+use crate::damage::Damage;
 use crate::positioner::Rect;
 use crate::shm::SurfacePixels;
 use wayland_server::{backend::ObjectId, Resource};
@@ -39,6 +40,8 @@ impl Region {
 #[derive(Debug, Default)]
 pub struct PendingState {
     pub buffer: Option<Option<ObjectId>>,
+    /// Damage and DamageBuffer since the last commit, in buffer pixels.
+    pub damage: Damage,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub input_region: Option<Option<Region>>,
 }
@@ -46,13 +49,15 @@ pub struct PendingState {
 #[derive(Debug, Default)]
 pub struct SurfaceUpdate {
     pub pixels: Option<Option<SurfacePixels>>,
+    /// Where `pixels` differ from the pixels it replaces, in buffer pixels.
+    pub damage: Damage,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub input_region: Option<Option<Region>>,
 }
 
 impl SurfaceUpdate {
     pub fn merge(&mut self, mut newer: Self) {
-        if newer.pixels.is_some() { self.pixels = newer.pixels; }
+        if newer.pixels.is_some() { self.pixels = newer.pixels; self.damage.merge(&newer.damage); }
         if newer.input_region.is_some() { self.input_region = newer.input_region; }
         self.callbacks.append(&mut newer.callbacks);
     }
@@ -66,6 +71,10 @@ pub struct SurfaceData {
     pub cached_pos: Option<(i32, i32)>,
     pub cached_stacking: Option<Vec<ObjectId>>,
     pub pixels: Option<SurfacePixels>,
+    /// Where `pixels` changed since the output was last composed, in buffer pixels.
+    pub damage: Damage,
+    /// Set once the client asks for a buffer scale or transform the renderer ignores; its damage is then unknown.
+    pub unscaled_damage_unknown: bool,
     pub input_region: Option<Region>,
     pub callbacks: Vec<wl_callback::WlCallback>,
     pub parent: Option<ObjectId>,
@@ -85,7 +94,7 @@ impl SurfaceData {
         let id = resource.id();
         Self {
             resource, pending: PendingState::default(), cached: None, cached_pos: None,
-            cached_stacking: None, pixels: None, input_region: None,
+            cached_stacking: None, pixels: None, damage: Damage::default(), unscaled_damage_unknown: false, input_region: None,
             callbacks: Vec::new(), parent: None, stacking: vec![id], pending_stacking: None,
             subsurface_pos: (0, 0), pending_pos: None, subsurface_sync: true,
             has_role: false, is_subsurface: false, is_popup: false, is_cursor: false,
@@ -93,7 +102,7 @@ impl SurfaceData {
     }
 
     pub fn apply(&mut self, mut update: SurfaceUpdate) {
-        if let Some(pixels) = update.pixels { self.pixels = pixels; }
+        if let Some(pixels) = update.pixels { self.pixels = pixels; self.damage.merge(&update.damage); }
         if let Some(region) = update.input_region { self.input_region = region; }
         self.callbacks.append(&mut update.callbacks);
     }
