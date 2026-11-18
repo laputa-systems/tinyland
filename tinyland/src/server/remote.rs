@@ -71,13 +71,10 @@ impl Transport {
             if now < present_at { return Ok(Some(present_at - now)); }
             self.last_present = Some(now);
             self.present(state);
-            if self.unsent.is_full() || !self.unsent.rects().is_empty() {
-                if now >= ship_at { return self.ship(state, size, true, now).map(|()| None); }
-                state.complete_frame(now_ms());
-                return Ok(Some(ship_at - now));
-            }
+            let unsent = self.unsent.is_full() || !self.unsent.rects().is_empty();
+            if unsent && now >= ship_at { return self.ship(state, size, true, now).map(|()| None); }
             state.complete_frame(now_ms());
-            return Ok(None);
+            return Ok(unsent.then(|| ship_at - now));
         }
         if self.unsent.is_full() || !self.unsent.rects().is_empty() {
             if now >= ship_at { return self.ship(state, size, false, now).map(|()| None); }
