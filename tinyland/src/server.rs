@@ -743,6 +743,7 @@ impl State {
         visible
     }
 
+    #[cfg(any(test, feature = "headless"))]
     fn compose(&self) -> Vec<u8> {
         let (w, h) = self.out_size;
         let mut fb = vec![0; w as usize * h as usize * 4];
@@ -827,6 +828,7 @@ impl State {
         rects
     }
 
+    #[cfg(any(test, feature = "headless"))]
     fn submit_frame(&mut self) -> Vec<u8> {
         assert!(self.submitted.is_none(), "a frame was submitted while another was in flight");
         let pixels = self.compose();
@@ -928,6 +930,7 @@ impl State {
         }
     }
 
+    #[cfg(any(test, feature = "headless"))]
     fn blit_surface(&self, surf_id: &ObjectId, ox: i32, oy: i32, fb: &mut [u8]) {
         let Some(surface) = self.surfaces.get(surf_id) else { return; };
         let x = ox.saturating_add(surface.subsurface_pos.0);
@@ -942,6 +945,7 @@ impl State {
     }
 }
 
+#[cfg(any(test, feature = "headless"))]
 fn blit_rows(
     fb: &mut [u8],
     out_w: u32,
@@ -1410,8 +1414,8 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
         }
         if state.pending_present && !seat.devices.output.as_ref().is_some_and(|o| o.has_pending_flip()) {
             if let Some(out) = seat.devices.output.as_mut() {
-                let pixels = state.submit_frame();
-                if let Err(error) = out.queue_present(&pixels, w, h) {
+                let damage = state.submit_damage();
+                if let Err(error) = out.queue_present(&state.framebuffer, w, h, &damage) {
                     if shutdown.signal().is_some() { return 0; }
                     eprintln!("present failed: {error}");
                     return 1;

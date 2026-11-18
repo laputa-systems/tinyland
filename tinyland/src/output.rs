@@ -89,6 +89,36 @@ impl Drop for ScanoutBuffer {
     }
 }
 
+type OutputRect = (u32, u32, u32, u32);
+
+struct ScanoutBuffers {
+    missed: [crate::damage::Damage; 2],
+}
+
+impl ScanoutBuffers {
+    fn new() -> Self { Self { missed: [crate::damage::Damage::full(), crate::damage::Damage::full()] } }
+
+    fn invalidate(&mut self) { *self = Self::new(); }
+
+    fn copy(&mut self, back: usize, pixels: &[u8], target: &mut [u8], stride: usize, width: u32, height: u32, damage: &[OutputRect]) -> Vec<OutputRect> {
+        for &(x0, y0, x1, y1) in damage {
+            let rect = crate::positioner::Rect { x: x0 as i32, y: y0 as i32, width: (x1 - x0) as i32, height: (y1 - y0) as i32 };
+            for missed in &mut self.missed { missed.add(rect); }
+        }
+        let rects = crate::damage::output_rects(&self.missed[back], width, height, 32);
+        let row_bytes = width as usize * 4;
+        for &(x0, y0, x1, y1) in &rects {
+            for y in y0 as usize..y1 as usize {
+                let start = x0 as usize * 4;
+                let end = x1 as usize * 4;
+                target[y * stride + start..y * stride + end].copy_from_slice(&pixels[y * row_bytes + start..y * row_bytes + end]);
+            }
+        }
+        self.missed[back].clear();
+        rects
+    }
+}
+
 pub struct DrmOutput {
     card: std::sync::Arc<Card>,
     buffers: [ScanoutBuffer; 2],
@@ -98,6 +128,7 @@ pub struct DrmOutput {
     height: u32,
     mode_path: &'static str,
     in_flight: Option<InFlight>,
+    scanout: ScanoutBuffers,
 }
 
 struct InFlight {
@@ -211,7 +242,7 @@ impl DrmOutput {
         eprintln!("TINYLAND_SCANOUT format=XRGB8888 buffers=2 size={w}x{h}");
         let mut out = DrmOutput {
             card, buffers: [front, back], front: 0, crtc,
-            width: w, height: h, mode_path: "unset", in_flight: None,
+            width: w, height: h, mode_path: "unset", in_flight: None, scanout: ScanoutBuffers::new(),
         };
         if let Some(origin) = origin {
             eprintln!("TINYLAND_DRM_ORIGIN {origin}");
@@ -396,26 +427,32 @@ impl DrmOutput {
         self.in_flight.as_ref().map(|flight| flight.deadline)
     }
 
-    pub fn queue_present(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+    pub fn queue_present(&mut self, pixels: &[u8], width: u32, height: u32, damage: &[OutputRect]) -> Result<(), String> {
         if self.in_flight.is_some() {
             return Err("page flip already pending".into());
         }
         if (width, height) != self.size() || pixels.len() != width as usize * height as usize * 4 {
             return Err("presentation must cover the complete output".into());
         }
+        if damage.iter().any(|&(x0, y0, x1, y1)| x0 > x1 || y0 > y1 || x1 > width || y1 > height) {
+            return Err("invalid presentation damage".into());
+        }
         let back = 1 - self.front;
         let buffer = &mut self.buffers[back];
         let stride = buffer.db.pitch() as usize;
-        let row_bytes = width as usize * 4;
-        let mut map = self.card.map_dumb_buffer(&mut buffer.db).map_err(|error| format!("map scanout: {error}"))?;
-        for y in 0..height as usize {
-            map[y * stride..y * stride + row_bytes].copy_from_slice(&pixels[y * row_bytes..(y + 1) * row_bytes]);
-        }
-        drop(map);
-        let rect = drm::control::ClipRect::new(0, 0, width as u16, height as u16);
-        self.card.dirty_framebuffer(buffer.fb, &[rect]).map_err(|error| format!("dirty framebuffer: {error}"))?;
-        self.card.page_flip(self.crtc, buffer.fb, drm::control::PageFlipFlags::EVENT, None)
-            .map_err(|error| format!("queue page flip: {error}"))?;
+        let result = (|| {
+            let mut map = self.card.map_dumb_buffer(&mut buffer.db).map_err(|error| format!("map scanout: {error}"))?;
+            let copied = self.scanout.copy(back, pixels, &mut map, stride, width, height, damage);
+            drop(map);
+            let rects: Vec<_> = copied.iter().map(|&(x0, y0, x1, y1)| drm::control::ClipRect::new(x0 as u16, y0 as u16, x1 as u16, y1 as u16)).collect();
+            if !rects.is_empty() {
+                self.card.dirty_framebuffer(buffer.fb, &rects).map_err(|error| format!("dirty framebuffer: {error}"))?;
+            }
+            self.card.page_flip(self.crtc, buffer.fb, drm::control::PageFlipFlags::EVENT, None)
+                .map_err(|error| format!("queue page flip: {error}"))?;
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = result { self.scanout.invalidate(); return Err(error); }
         self.in_flight = Some(InFlight { back, deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
         Ok(())
     }
@@ -425,10 +462,10 @@ impl DrmOutput {
             Some(flight) => (flight.back, flight.deadline),
             None => return Ok(None),
         };
-        let events = self.card.receive_flip_events().map_err(|error| format!("page flip events: {error}"))?;
+        let events = self.card.receive_flip_events().map_err(|error| { self.scanout.invalidate(); format!("page flip events: {error}") })?;
         for event in events {
             if let drm::control::Event::PageFlip(event) = event {
-                if event.crtc != self.crtc { return Err("page flip on unexpected crtc".into()); }
+                if event.crtc != self.crtc { self.scanout.invalidate(); return Err("page flip on unexpected crtc".into()); }
                 self.front = back;
                 self.in_flight = None;
                 eprintln!("TINYLAND_PRESENTED sequence={} time_ms={} path={}", event.frame, event.duration.as_millis(), self.mode_path);
@@ -436,20 +473,22 @@ impl DrmOutput {
             }
         }
         if std::time::Instant::now() >= deadline {
+            self.scanout.invalidate();
             return Err("page flip timed out".into());
         }
         Ok(None)
     }
 
     pub fn present_pixels(&mut self, pixels: &[u8], width: u32, height: u32) -> Result<u32, String> {
-        self.queue_present(pixels, width, height)?;
+        self.queue_present(pixels, width, height, &[(0, 0, width, height)])?;
         let deadline = self.flip_deadline().ok_or("page flip timed out")?;
         loop {
-            let timeout = deadline.checked_duration_since(std::time::Instant::now()).ok_or("page flip timed out")?;
+            let timeout = deadline.checked_duration_since(std::time::Instant::now()).ok_or_else(|| { self.scanout.invalidate(); "page flip timed out" })?;
             let timeout = rustix::time::Timespec::try_from(timeout).map_err(|error| format!("page flip timeout: {error}"))?;
             let mut fds = [rustix::event::PollFd::new(self.card.as_ref(), rustix::event::PollFlags::IN)];
-            rustix::event::poll(&mut fds, Some(&timeout)).map_err(|error| format!("page flip poll: {error}"))?;
+            rustix::event::poll(&mut fds, Some(&timeout)).map_err(|error| { self.scanout.invalidate(); format!("page flip poll: {error}") })?;
             if !fds[0].revents().contains(rustix::event::PollFlags::IN) {
+                self.scanout.invalidate();
                 return Err("page flip timed out or device disconnected".into());
             }
             if let Some(time) = self.poll_flip()? {
@@ -482,6 +521,56 @@ pub fn drm_proof(device: &Path, width: u32, height: u32, shutdown: &crate::shutd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_scanout_repairs_each_buffer() {
+        let (width, height) = (1280, 800);
+        let mut model = ScanoutBuffers::new();
+        let mut pixels = vec![0; width * height * 4];
+        let mut buffers = [pixels.clone(), pixels.clone()];
+        for back in [1, 0] {
+            model.copy(back, &pixels, &mut buffers[back], width * 4, width as u32, height as u32, &[]);
+        }
+        let first: OutputRect = (10, 20, 26, 36);
+        for y in first.1..first.3 { for x in first.0..first.2 { pixels[(y as usize * width + x as usize) * 4] = 1; } }
+        assert_eq!(model.copy(1, &pixels, &mut buffers[1], width * 4, width as u32, height as u32, &[first]), vec![first]);
+        let second: OutputRect = (100, 120, 116, 136);
+        for y in second.1..second.3 { for x in second.0..second.2 { pixels[(y as usize * width + x as usize) * 4] = 2; } }
+        assert_eq!(model.copy(0, &pixels, &mut buffers[0], width * 4, width as u32, height as u32, &[second]), vec![first, second]);
+        assert_eq!(buffers[0], pixels);
+    }
+
+    #[test]
+    fn differential_scanout_with_delays_and_failed_flips() {
+        let (width, height, stride) = (43usize, 29usize, 43usize * 4 + 12);
+        let mut model = ScanoutBuffers::new();
+        let mut pixels = vec![0; width * height * 4];
+        let mut buffers = [vec![0; stride * height], vec![0; stride * height]];
+        let mut front = 0;
+        let mut pending = Vec::new();
+        let mut seed = 0x7f4a7c15u32;
+        for step in 0..1200 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let x = (seed as usize >> 8) % width;
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let y = (seed as usize >> 8) % height;
+            let x1 = (x + 1 + (seed as usize % 6)).min(width);
+            let y1 = (y + 1 + ((seed >> 4) as usize % 6)).min(height);
+            for row in y..y1 { for col in x..x1 {
+                pixels[(row * width + col) * 4..(row * width + col + 1) * 4].copy_from_slice(&seed.to_le_bytes());
+            } }
+            pending.push((x as u32, y as u32, x1 as u32, y1 as u32));
+            if step % 5 == 0 { continue; }
+            let back = 1 - front;
+            model.copy(back, &pixels, &mut buffers[back], stride, width as u32, height as u32, &pending);
+            pending.clear();
+            if step % 17 == 0 { model.invalidate(); continue; }
+            front = back;
+            for row in 0..height {
+                assert_eq!(&buffers[front][row * stride..row * stride + width * 4], &pixels[row * width * 4..(row + 1) * width * 4], "step {step}, row {row}");
+            }
+        }
+    }
 
     #[test]
     fn nonblocking_page_flip_poll_waits_for_an_event() {
