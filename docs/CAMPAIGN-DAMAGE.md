@@ -1,6 +1,8 @@
 # TINY-14: Incremental Wayland damage and scanout qualification
 
-Status: planned, P2, independent upstream campaign. This document is an execution contract, not evidence that optimizations are implemented. Downstream integration: joshuarli/bctl BCTL-22. Keep existing TINY-11–13 work independent.
+Status: remote path done, DRM path planned. P2. Downstream integration: joshuarli/bctl BCTL-22 and BCTL-28. Keep existing TINY-11–13 work independent.
+
+The remote session now tracks Damage and DamageBuffer, patches only damaged rows of retained surface pixels, recomposes only damaged output rectangles into a persistent framebuffer, and sends them as Damage messages paced to 30 frames a second ([session contract](../tinyland/docs/session.md#remote-session)). A differential test checks every presented frame of random damage, move and resize sequences against an independent full composition. In bctl's headed benchmark on 2026-11-18, idle, typing, scrolling and a small animation match a Sway and wayvnc reference in CPU, and the remote path sends fewer bytes. The DRM path still composes and copies whole frames; slice C below remains open.
 
 ## Why
 Current wl_surface Damage and DamageBuffer requests are discarded. SHM commits snapshot entire buffers; composition allocates/clears an entire output; presentation copies full output into DRM dumb buffers; cursor and popup changes trigger whole-output work. Event-driven pending_present prevents an unconditional render loop but is not incremental rendering. Fix at the source, without changing the deliberately minimal software-only/DRM/seatd architecture or requiring EGL, GBM, Vulkan, or GPU passthrough.

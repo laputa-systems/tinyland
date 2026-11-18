@@ -7,7 +7,7 @@ Next: 16
 
 - **Area:** Performance
 - **Where:** `tinyland/src/server/dispatch_impl.rs`, `tinyland/src/shm.rs`, `tinyland/src/server.rs`, `tinyland/src/output.rs`
-- **Problem:** Surface Damage/DamageBuffer are ignored; commits snapshot whole SHM buffers, composition clears/reblends whole output, and presentation copies whole DRM buffers. Cursor and popup changes also incur full-frame work. Alternating scanout buffers require missed-generation repair; blindly copying the latest dirty rectangle is incorrect.
+- **Problem:** The DRM path ignores damage: presentation composes and copies whole DRM buffers, and cursor and popup changes incur full-frame work. Alternating scanout buffers require missed-generation repair; blindly copying the latest dirty rectangle is incorrect. The remote path is done (2026-11-18): Damage and DamageBuffer are tracked, commits patch only damaged rows, and only damaged output rectangles are recomposed and sent, paced to 30 frames a second.
 - **Recommendation:** Execute [the upstream damage campaign](docs/CAMPAIGN-DAMAGE.md) in parallel with bctl's headless work. Establish transactional pending/committed damage, bounded coordinate conversion, persistent snapshots/composition, exact scene recompose and per-scanout generation repair. Start with a real 16x16 change on two alternating buffers. Differential-test exact pixels and callback ordering across alpha/occlusion, cursor/popup changes, subsurfaces, resize, failed flips and sparse recovery. Keep full-frame fallback until proven safe; qualify the pinned downstream bctl integration.
 - **Fix with:** `make-it-fast`
 - **Effort:** L

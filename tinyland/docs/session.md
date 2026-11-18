@@ -133,8 +133,19 @@ kept its place contributes its accumulated damage; a surface that moved,
 appeared, disappeared or changed size contributes its old and new extents; a
 changed drawing order redraws the whole output. Each damaged output rectangle
 is cleared and recomposed from every surface that intersects it, so alpha
-blending stays exact. More than 16 rectangles are sent as their bounding box. At most one frame is in flight; its callbacks complete only
-on the matching acknowledgment. New commits remain dirty until the next frame.
+blending stays exact. More than 16 rectangles are sent as their bounding box.
+
+At most one frame is in flight. The remote output behaves like a 60 Hz
+display that the host samples at up to 30 Hz. A dirty scene is presented at
+most once every 1/60 s: its damage is composed into the retained output and
+added to the unsent damage. When no frame was sent in the last 1/30 s, the
+unsent damage is sent and the presented callbacks complete on its
+acknowledgment. Otherwise they complete at once, and the unsent damage is sent
+when the interval ends, without callbacks. The first change after a quiet
+interval is therefore sent immediately, and continuous animation reaches the
+host at 30 frames a second while clients keep 60. Presentations that change no
+pixels send nothing. Commits made while a frame is in flight remain dirty until
+the next presentation.
 `read_compositor` and `write_compositor` take `Option<Size>`: pass the
 negotiated size for frames and `None` for Ready. Clean EOF is returned as
 `None` only at a message boundary.
