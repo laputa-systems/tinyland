@@ -5,6 +5,12 @@ use std::time::{Duration, Instant};
 use tinyland_remote::{Button, CompositorMessage, HostMessage, Size};
 
 const DEADLINE: Duration = Duration::from_secs(5);
+/// The virtual display refresh: surfaces are presented and their frame callbacks completed at most this often.
+const REFRESH: Duration = Duration::from_micros(16_667);
+/// The shortest time between two frames sent to the host; presentations in between accumulate their damage.
+const SHIP_INTERVAL: Duration = Duration::from_micros(33_333);
+/// Output rectangles per frame sent to the host; more are sent as their bounding box.
+const MAX_SHIP_RECTS: usize = 16;
 const MAX_SOURCES: usize = 64;
 const WRITE_CHUNK: usize = 64 * 1024;
 
@@ -17,14 +23,19 @@ pub(super) struct Transport {
     written: usize,
     deadline: Option<Instant>,
     serial: u64,
-    flight: Option<u64>,
+    /// The frame awaiting acknowledgment, and whether its acknowledgment completes the submitted callbacks.
+    flight: Option<(u64, bool)>,
     sources: BTreeSet<u32>,
+    last_present: Option<Instant>,
+    last_ship: Option<Instant>,
+    /// Output damage presented but not yet sent to the host.
+    unsent: crate::damage::Damage,
 }
 
 impl Transport {
     #[cfg(test)]
     pub(super) fn test_transport() -> Self {
-        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, deadline: None, serial: 0, flight: None, sources: BTreeSet::new() }
+        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, deadline: None, serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() }
     }
 
     fn new(size: Size) -> Result<Self, String> {
@@ -36,18 +47,62 @@ impl Transport {
         }
         let mut outgoing = Vec::new();
         tinyland_remote::write_compositor(&mut outgoing, &CompositorMessage::Ready { size }, None).map_err(|e| e.to_string())?;
-        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new() })
+        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() })
     }
 
+    /// The encoded bytes waiting to be written to the host.
+    #[cfg(test)]
+    pub(super) fn sent(&self) -> &[u8] { &self.outgoing[self.written..] }
+
+    /// Presents the scene now and sends everything unsent, completing the callbacks on acknowledgment.
+    #[cfg(test)]
     pub(super) fn queue_frame(&mut self, state: &mut State, size: Size) -> Result<(), String> {
+        self.present(state);
+        self.ship(state, size, true, Instant::now())
+    }
+
+    /// Advances presentation at `now`: presents a dirty scene at most once per refresh and sends accumulated
+    /// damage at most once per ship interval. Returns how long until the next step is due, if one is waiting.
+    pub(super) fn tick(&mut self, state: &mut State, size: Size, now: Instant) -> Result<Option<Duration>, String> {
+        if self.flight.is_some() || !self.outgoing.is_empty() { return Ok(None); }
+        let ship_at = self.last_ship.map_or(now, |at| at + SHIP_INTERVAL);
+        if state.pending_present {
+            let present_at = self.last_present.map_or(now, |at| at + REFRESH);
+            if now < present_at { return Ok(Some(present_at - now)); }
+            self.last_present = Some(now);
+            self.present(state);
+            if self.unsent.is_full() || !self.unsent.rects().is_empty() {
+                if now >= ship_at { return self.ship(state, size, true, now).map(|()| None); }
+                state.complete_frame(now_ms());
+                return Ok(Some(ship_at - now));
+            }
+            state.complete_frame(now_ms());
+            return Ok(None);
+        }
+        if self.unsent.is_full() || !self.unsent.rects().is_empty() {
+            if now >= ship_at { return self.ship(state, size, false, now).map(|()| None); }
+            return Ok(Some(ship_at - now));
+        }
+        Ok(None)
+    }
+
+    fn present(&mut self, state: &mut State) {
+        for (x0, y0, x1, y1) in state.submit_damage() {
+            self.unsent.add(crate::positioner::Rect { x: x0 as i32, y: y0 as i32, width: (x1 - x0) as i32, height: (y1 - y0) as i32 });
+        }
+    }
+
+    fn ship(&mut self, state: &State, size: Size, callbacks: bool, now: Instant) -> Result<(), String> {
         self.serial = self.serial.checked_add(1).ok_or("frame serial exhausted")?;
-        let rects: Vec<tinyland_remote::Rect> = state.submit_damage().into_iter()
+        let rects: Vec<tinyland_remote::Rect> = crate::damage::output_rects(&self.unsent, size.width(), size.height(), MAX_SHIP_RECTS).into_iter()
             .map(|(x0, y0, x1, y1)| tinyland_remote::Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }).collect();
+        self.unsent.clear();
         self.outgoing.clear();
         tinyland_remote::write_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &rects).map_err(|e| e.to_string())?;
         self.written = 0;
-        self.flight = Some(self.serial);
-        self.deadline = Some(Instant::now() + DEADLINE);
+        self.flight = Some((self.serial, callbacks));
+        self.last_ship = Some(now);
+        self.deadline = Some(now + DEADLINE);
         Ok(())
     }
 
@@ -95,9 +150,11 @@ impl Transport {
 
     pub(super) fn handle(&mut self, state: &mut State, size: Size, msg: HostMessage) -> Result<(), String> {
         if let HostMessage::Presented { serial } = msg {
-            if self.flight != Some(serial) || !self.outgoing.is_empty() { return Err("unexpected presentation acknowledgment".into()); }
+            let Some((_, callbacks)) = self.flight.filter(|(flight, _)| *flight == serial && self.outgoing.is_empty()) else {
+                return Err("unexpected presentation acknowledgment".into());
+            };
             self.flight = None; self.deadline = None;
-            state.complete_frame(now_ms());
+            if callbacks { state.complete_frame(now_ms()); }
             return Ok(());
         }
         let source = match &msg {
@@ -147,10 +204,12 @@ fn run_session(config: &ServerConfig<'_>) -> Result<(), String> {
     eprintln!("TINYLAND_COMPOSITOR_READY socket={socket_name} size={}x{} path=remote", size.width(), size.height());
     let display_fd = display.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?;
     let socket_fd = socket.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?;
+    let mut wake: Option<Duration> = None;
     let result = 'session: loop {
         if config.shutdown.signal().is_some() { break Ok(()); }
         if transport.deadline.is_some_and(|deadline| Instant::now() >= deadline) || transport.incoming_deadline.is_some_and(|deadline| Instant::now() >= deadline) { break Err("remote transport timed out".into()); }
-        let timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 100_000_000 };
+        let wait = wake.unwrap_or(Duration::from_millis(100)).min(Duration::from_millis(100));
+        let timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: i64::from(wait.subsec_nanos()) };
         let mut fds = vec![rustix::event::PollFd::new(&display_fd, rustix::event::PollFlags::IN), rustix::event::PollFd::new(&socket_fd, rustix::event::PollFlags::IN), rustix::event::PollFd::new(&transport.input, rustix::event::PollFlags::IN)];
         if !transport.outgoing.is_empty() { fds.push(rustix::event::PollFd::new(&transport.output, rustix::event::PollFlags::OUT)); }
         fds.extend(state.selection.poll_fds());
@@ -170,9 +229,7 @@ fn run_session(config: &ServerConfig<'_>) -> Result<(), String> {
             }
         }
         if let Err(e) = display.dispatch_clients(&mut state) { break Err(format!("dispatch: {e}")); }
-        if state.pending_present && transport.flight.is_none() && transport.outgoing.is_empty() {
-            if let Err(e) = transport.queue_frame(&mut state, size) { break Err(e); }
-        }
+        wake = match transport.tick(&mut state, size, Instant::now()) { Ok(wake) => wake, Err(e) => break Err(e) };
         if let Err(e) = display.flush_clients() { break Err(format!("flush: {e}")); }
     };
     state.suspend_input();

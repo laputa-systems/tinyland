@@ -599,3 +599,47 @@ fn clipboard_owns_a_nonblocking_write_description_and_rejects_other_targets() {
     f.state.selection.receive_host(offer.id(), OwnedFd::from(file), Arc::from(&b"invalid"[..]));
     assert_eq!(f.state.selection.transfers.len(), 1);
 }
+
+#[test]
+fn remote_frames_ship_at_most_once_per_interval_while_callbacks_follow_the_refresh() {
+    use std::time::{Duration, Instant};
+    let mut f = Fixture::with_output((4, 2));
+    let surface = mapped_frame(&mut f, 1);
+    let size = tinyland_remote::Size::new(4, 2).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    let shipped = |transport: &super::super::remote::Transport| match tinyland_remote::read_compositor(&mut &transport.sent()[..], Some(size)).unwrap() {
+        Some(tinyland_remote::CompositorMessage::Damage { serial, rects }) => (serial, rects.into_iter().map(|(r, _)| (r.x, r.y, r.width, r.height)).collect::<Vec<_>>()),
+        other => panic!("expected damage, got {other:?}"),
+    };
+    let start = Instant::now();
+    f.request(&surface, 3, &[2]);
+    f.show(&surface, 4, 2, 5);
+    assert_eq!(transport.tick(&mut f.state, size, start).unwrap(), None);
+    assert_eq!(shipped(&transport), (1, vec![(0, 0, 4, 2)]));
+    transport.write().unwrap();
+    assert!(done_times(&f.events(), 2).is_empty(), "a shipped frame completes its callbacks on acknowledgment");
+    transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 1 }).unwrap();
+    assert_eq!(done_times(&f.events(), 2).len(), 1);
+
+    f.request(&surface, 3, &[3]);
+    f.show(&surface, 4, 2, 6);
+    let early = transport.tick(&mut f.state, size, start + Duration::from_millis(5)).unwrap();
+    assert!(early.is_some_and(|wait| wait <= Duration::from_millis(12)), "presentation waits for the next refresh: {early:?}");
+    assert!(done_times(&f.events(), 3).is_empty());
+    let wait = transport.tick(&mut f.state, size, start + Duration::from_millis(17)).unwrap();
+    assert!(wait.is_some_and(|wait| wait <= Duration::from_millis(17)), "the second frame waits for the ship interval: {wait:?}");
+    assert_eq!(done_times(&f.events(), 3).len(), 1, "a presentation between ships completes its callbacks at once");
+    assert!(transport.sent().is_empty());
+
+    assert_eq!(transport.tick(&mut f.state, size, start + Duration::from_millis(34)).unwrap(), None);
+    assert_eq!(shipped(&transport), (2, vec![(0, 0, 4, 2)]), "accumulated damage is sent once the interval passes");
+    transport.write().unwrap();
+    transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 2 }).unwrap();
+    assert!(f.state.framebuffer.chunks_exact(4).all(|p| p[..3] == [6, 6, 6]));
+
+    f.request(&surface, 3, &[4]);
+    f.request(&surface, 6, &[]);
+    assert_eq!(transport.tick(&mut f.state, size, start + Duration::from_millis(60)).unwrap(), None);
+    assert!(transport.sent().is_empty(), "a callback-only presentation sends nothing");
+    assert_eq!(done_times(&f.events(), 4).len(), 1);
+}
