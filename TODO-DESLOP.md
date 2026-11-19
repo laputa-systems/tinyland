@@ -5,6 +5,38 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+DSLP-5 closed, Dead code, 2026-11-19, base 03d30cf: Linux ARM64 in the
+pinned Alpine image, nightly-2026-11-09, default and all features, all targets.
+Both `cargo check` runs with `-W dead_code -W unreachable_pub` report no such
+warnings. Cargo warns that `xkbcommon` is unused with all features: the
+`oracle` integration test uses it (`tinyland/tests/kbvm_oracle.rs:41`); it is
+not a runtime dependency. cargo-machete 0.10.1 found no unused dependencies.
+
+- Removed the unread `Daemon.sock` test-harness field: both constructors pass
+  the socket to the child and tests use their own path; Drop only uses the
+  child (`seatd/harness/adversarial.rs:14-65`). The adversarial suite passed.
+- Restricted the keyboard lookup table and `key_utf8` to unit tests: the
+  keymap tests call them (`tinyland/src/input.rs:541`); the compositor sends
+  keycodes and keymap to clients, and no runtime caller translates to UTF-8.
+  The previous `reset_stuck` suppression was unnecessary: suspend paths call
+  it (`tinyland/src/server.rs:898`, `tinyland/src/server/remote.rs:232`).
+- Narrowed 109 unreachable public declarations to crate or parent visibility.
+  Their modules are private (`tinyland/src/lib.rs:1-11`); the compositor server
+  uses their input, damage, seat, selection, positioning, shell, shm and
+  surface operations (`tinyland/src/server.rs:1-9`), and its dispatch and
+  pointer helpers are internal. No exported protocol crate API was removed.
+  Server lifecycle tests consume the remote transport test helpers
+  (`tinyland/src/server/tests/lifecycle.rs:433` and :610).
+
+Checked workspace manifests, entry points, feature gates, registrations,
+scripts and references for the removals; no external consumer or package
+reference to the removed private fields exists. `make test` and `make lint`
+passed; no downstream bctl candidate test was run because its public API and
+wire contracts are unchanged. Real devices, VT, VM and oracle runtime remain
+unqualified. No owner walk-back was identified. The structural debloat review
+was limited to the changed mechanisms and their callers; a complete structural
+sweep of every subsystem was not performed.
+
 Tests (DSLP-4): [docs/deslop-tests.md](docs/deslop-tests.md) maps the critical
 contracts to their protecting tests. New boundary tests pin the per-client
 region object and rectangle limits and the shm backing-file size boundary;
@@ -90,14 +122,6 @@ this change preserves the public and wire contracts.
 
 
 
-### DSLP-5 · P2 · Dead code: tools and debloat
-
-- **Area:** deslop · dead code
-- **Where:** whole repository
-- **Problem:** No dead-code scan has run.
-- **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
-- **Fix with:** deslop
-- **Effort:** M
 
 
 ### DSLP-6 · P2 · A Wayland client can create unbounded xdg_positioner and wl_pointer objects

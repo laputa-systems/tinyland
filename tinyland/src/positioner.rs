@@ -1,7 +1,7 @@
 use wayland_protocols::xdg::shell::server::xdg_positioner::{Anchor, ConstraintAdjustment, Gravity};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rect {
+pub(crate) struct Rect {
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -9,7 +9,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn contains(&self, x: f64, y: f64) -> bool {
+    pub(crate) fn contains(&self, x: f64, y: f64) -> bool {
         x >= f64::from(self.x)
             && y >= f64::from(self.y)
             && x < f64::from(self.x) + f64::from(self.width)
@@ -18,7 +18,7 @@ impl Rect {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Bounds {
+pub(crate) struct Bounds {
     pub x: i64,
     pub y: i64,
     pub width: i64,
@@ -32,9 +32,9 @@ impl From<Rect> for Bounds {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Unrepresentable;
+pub(crate) struct Unrepresentable;
 
-pub fn clip_to_i32(value: i64) -> i32 {
+pub(crate) fn clip_to_i32(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
@@ -92,7 +92,7 @@ fn gravity_sides(gravity: Gravity) -> Sides {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Positioner {
+pub(crate) struct Positioner {
     pub size: Option<(i32, i32)>,
     pub anchor_rect: Option<Rect>,
     pub anchor: Anchor,
@@ -115,7 +115,7 @@ impl Default for Positioner {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Complete {
+pub(crate) struct Complete {
     size: (i32, i32),
     anchor_rect: Rect,
     anchor: Sides,
@@ -125,7 +125,7 @@ pub struct Complete {
 }
 
 impl Positioner {
-    pub fn complete(&self) -> Option<Complete> {
+    pub(crate) fn complete(&self) -> Option<Complete> {
         Some(Complete {
             size: self.size?,
             anchor_rect: self.anchor_rect?,
@@ -213,7 +213,7 @@ impl Axis {
 }
 
 impl Complete {
-    pub fn place(&self, bounds: impl Into<Bounds>) -> Result<Rect, Unrepresentable> {
+    pub(crate) fn place(&self, bounds: impl Into<Bounds>) -> Result<Rect, Unrepresentable> {
         let bounds = bounds.into();
         let adjust = self.adjustment;
         let x = Axis {

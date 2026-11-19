@@ -5,10 +5,10 @@ use std::time::SystemTime;
 use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InputId(pub u32);
+pub(crate) struct InputId(pub u32);
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Released {
+pub(crate) struct Released {
     pub keys: Vec<u16>,
     pub buttons: Vec<u16>,
 }
@@ -39,38 +39,38 @@ fn relinquish_all(owners: &mut Owners, owner: InputId) -> Vec<u16> {
 }
 
 #[derive(Debug, Default)]
-pub struct HeldInput {
+pub(crate) struct HeldInput {
     keys: Owners,
     buttons: Owners,
 }
 
 impl HeldInput {
-    pub fn key(&mut self, owner: InputId, code: u16, down: bool) -> bool {
+    pub(crate) fn key(&mut self, owner: InputId, code: u16, down: bool) -> bool {
         if down { acquire(&mut self.keys, owner, code) } else { relinquish(&mut self.keys, owner, code) }
     }
 
-    pub fn button(&mut self, owner: InputId, code: u16, down: bool) -> bool {
+    pub(crate) fn button(&mut self, owner: InputId, code: u16, down: bool) -> bool {
         if down { acquire(&mut self.buttons, owner, code) } else { relinquish(&mut self.buttons, owner, code) }
     }
 
-    pub fn lose(&mut self, owner: InputId) -> Released {
+    pub(crate) fn lose(&mut self, owner: InputId) -> Released {
         Released { keys: relinquish_all(&mut self.keys, owner), buttons: relinquish_all(&mut self.buttons, owner) }
     }
 
-    pub fn release_all(&mut self) -> Released {
+    pub(crate) fn release_all(&mut self) -> Released {
         Released {
             keys: std::mem::take(&mut self.keys).into_keys().collect(),
             buttons: std::mem::take(&mut self.buttons).into_keys().collect(),
         }
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = u16> + '_ {
+    pub(crate) fn keys(&self) -> impl Iterator<Item = u16> + '_ {
         self.keys.keys().copied()
     }
 }
 
 #[derive(Debug)]
-pub struct SeatData {
+pub(crate) struct SeatData {
     pub resource: wl_seat::WlSeat,
     pub keyboards: Vec<wl_keyboard::WlKeyboard>,
     pub pointers: Vec<wl_pointer::WlPointer>,
@@ -78,16 +78,16 @@ pub struct SeatData {
 }
 
 impl SeatData {
-    pub fn new(resource: wl_seat::WlSeat) -> Self {
+    pub(crate) fn new(resource: wl_seat::WlSeat) -> Self {
         Self { resource, keyboards: Vec::new(), pointers: Vec::new(), keyboard_focus: None }
     }
 }
 
-pub struct Keyboard {
+pub(crate) struct Keyboard {
     machine: kbvm::state_machine::StateMachine,
     state: kbvm::state_machine::State,
     components: kbvm::Components,
-    #[allow(dead_code)]
+    #[cfg(test)]
     lookup: kbvm::lookup::LookupTable,
     pub keymap: File,
     pub keymap_size: u32,
@@ -145,7 +145,7 @@ fn keymap_embedded(context: &kbvm::xkb::Context) -> Result<kbvm::xkb::Keymap, St
 }
 
 impl Keyboard {
-    pub fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         let mut builder = kbvm::xkb::Context::builder();
         let source = if let Some(root) = std::env::var_os("TINYLAND_XKB_ROOT") {
             let path = std::path::PathBuf::from(&root);
@@ -174,12 +174,13 @@ impl Keyboard {
         let size = bytes.len() as u32;
         let agent = keymap.to_builder();
         let machine = agent.build_state_machine();
+        #[cfg(test)]
         let lookup = agent.build_lookup_table();
         let state = machine.create_state();
-        Ok(Self { machine, state, components: kbvm::Components::default(), lookup, keymap: file, keymap_size: size })
+        Ok(Self { machine, state, components: kbvm::Components::default(), #[cfg(test)] lookup, keymap: file, keymap_size: size })
     }
 
-    pub fn update(&mut self, code: u16, down: bool) -> [u32; 4] {
+    pub(crate) fn update(&mut self, code: u16, down: bool) -> [u32; 4] {
         let key = kbvm::Keycode::from_evdev(u32::from(code));
         let direction = if down {
             kbvm::state_machine::Direction::Down
@@ -194,26 +195,25 @@ impl Keyboard {
         self.modifiers()
     }
 
-    pub fn modifiers(&self) -> [u32; 4] {
+    pub(crate) fn modifiers(&self) -> [u32; 4] {
         [self.components.mods_pressed.0, self.components.mods_latched.0, self.components.mods_locked.0, self.components.group.0]
     }
 
-    #[allow(dead_code)]
-    pub fn key_utf8(&self, xkb_code: u32) -> String {
+    #[cfg(test)]
+    pub(crate) fn key_utf8(&self, xkb_code: u32) -> String {
         let evdev = xkb_code.saturating_sub(8);
         let key = kbvm::Keycode::from_evdev(evdev);
         self.lookup.lookup(self.components.group, self.components.mods, key).into_iter().flat_map(|p| p.char()).collect()
     }
 
-    #[allow(dead_code)]
-    pub fn reset_stuck(&mut self) -> [u32; 4] {
+    pub(crate) fn reset_stuck(&mut self) -> [u32; 4] {
         self.state = self.machine.create_state();
         self.components = kbvm::Components::default();
         self.modifiers()
     }
 }
 
-pub const BTN_LEFT: u16 = 0x110;
+pub(crate) const BTN_LEFT: u16 = 0x110;
 const BTN_TASK: u16 = 0x117;
 const BTN_MISC: u16 = 0x100;
 const BTN_GEAR_UP: u16 = 0x151;
@@ -236,20 +236,20 @@ impl AbsRange {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Motion {
+pub(crate) enum Motion {
     Absolute { x: f64, y: f64 },
     Relative { dx: f64, dy: f64 },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PointerFrame {
+pub(crate) struct PointerFrame {
     pub motion: Option<Motion>,
     pub buttons: Vec<(u16, bool)>,
     pub wheel: (i32, i32),
 }
 
 impl PointerFrame {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.motion.is_none() && self.buttons.is_empty() && self.wheel == (0, 0)
     }
 }
@@ -261,7 +261,7 @@ enum Axes {
 }
 
 #[derive(Debug)]
-pub struct PointerReader {
+pub(crate) struct PointerReader {
     axes: Axes,
     pending: PointerFrame,
 }
@@ -326,7 +326,7 @@ impl PointerReader {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum InputEvent {
+pub(crate) enum InputEvent {
     Key { code: u16, down: bool },
     Pointer(PointerFrame),
 }
@@ -335,7 +335,7 @@ fn is_button(code: u16) -> bool {
     (BTN_MISC..=BTN_GEAR_UP).contains(&code)
 }
 
-pub struct InputDevice {
+pub(crate) struct InputDevice {
     device: Device,
     pointer: Option<PointerReader>,
 }
@@ -347,11 +347,11 @@ impl std::os::fd::AsFd for InputDevice {
 }
 
 impl InputDevice {
-    pub fn is_pointer(&self) -> bool {
+    pub(crate) fn is_pointer(&self) -> bool {
         self.pointer.is_some()
     }
 
-    pub fn is_keyboard(&self) -> bool {
+    pub(crate) fn is_keyboard(&self) -> bool {
         is_keyboard(&self.device)
     }
 
@@ -369,7 +369,7 @@ impl InputDevice {
         out
     }
 
-    pub fn read(&mut self) -> Result<Vec<(SystemTime, InputEvent)>, std::io::Error> {
+    pub(crate) fn read(&mut self) -> Result<Vec<(SystemTime, InputEvent)>, std::io::Error> {
         let events: Vec<evdev::InputEvent> = match self.device.fetch_events() {
             Ok(events) => events.collect(),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(Vec::new()),
@@ -408,7 +408,7 @@ fn pointer_reader(device: &Device, origin: &str) -> Result<Option<PointerReader>
     Ok(relative.then(PointerReader::relative))
 }
 
-pub fn device_from_fd(fd: std::os::fd::OwnedFd, origin: &str) -> Result<Option<InputDevice>, String> {
+pub(crate) fn device_from_fd(fd: std::os::fd::OwnedFd, origin: &str) -> Result<Option<InputDevice>, String> {
     let device = Device::from_fd(fd).map_err(|e| format!("input from {origin}: {e}"))?;
     adopt(device, origin)
 }
@@ -431,7 +431,7 @@ fn adopt(mut device: Device, origin: &str) -> Result<Option<InputDevice>, String
     Ok(Some(InputDevice { device, pointer }))
 }
 
-pub fn discover_device_paths() -> Result<Vec<std::path::PathBuf>, String> {
+pub(crate) fn discover_device_paths() -> Result<Vec<std::path::PathBuf>, String> {
     let mut entries = std::fs::read_dir("/dev/input")
         .map_err(|e| format!("read /dev/input: {e}"))?
         .collect::<Result<Vec<_>, _>>().map_err(|e| format!("read input entry: {e}"))?;
@@ -444,7 +444,7 @@ pub fn discover_device_paths() -> Result<Vec<std::path::PathBuf>, String> {
     Ok(paths)
 }
 
-pub fn discover_devices() -> Result<Vec<InputDevice>, String> {
+pub(crate) fn discover_devices() -> Result<Vec<InputDevice>, String> {
     let mut devices = Vec::new();
     for path in discover_device_paths()? {
         let device = Device::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
@@ -456,7 +456,7 @@ pub fn discover_devices() -> Result<Vec<InputDevice>, String> {
     Ok(devices)
 }
 
-pub fn require_keyboard<'a>(devices: impl IntoIterator<Item = &'a InputDevice>) -> Result<(), String> {
+pub(crate) fn require_keyboard<'a>(devices: impl IntoIterator<Item = &'a InputDevice>) -> Result<(), String> {
     if devices.into_iter().any(InputDevice::is_keyboard) {
         Ok(())
     } else {
@@ -465,11 +465,11 @@ pub fn require_keyboard<'a>(devices: impl IntoIterator<Item = &'a InputDevice>) 
 }
 
 /// True when the read error means the device is gone (unplugged).
-pub fn is_gone(error: &std::io::Error) -> bool {
+pub(crate) fn is_gone(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error())
 }
 
-pub fn vt_switch_target(code: u16, depressed: u32) -> Option<i32> {
+pub(crate) fn vt_switch_target(code: u16, depressed: u32) -> Option<i32> {
     if depressed & 0x0c != 0x0c {
         return None;
     }

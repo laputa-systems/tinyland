@@ -1016,7 +1016,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     }
 }
 
-pub fn handle_get_xdg_surface(
+pub(super) fn handle_get_xdg_surface(
     state: &mut State,
     wm_base: &xdg_wm_base::XdgWmBase,
     id: New<xdg_surface::XdgSurface>,
@@ -1308,7 +1308,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
     }
 }
 
-pub fn route_xdg_wm_base_get_surface(
+pub(super) fn route_xdg_wm_base_get_surface(
     state: &mut State,
     resource: &xdg_wm_base::XdgWmBase,
     id: New<xdg_surface::XdgSurface>,

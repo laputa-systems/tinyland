@@ -5,35 +5,35 @@ const MAX_RECTS: usize = 32;
 
 /// Changed pixels since some earlier state, in one coordinate space. Bounded: too many rectangles become `full`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Damage {
+pub(crate) struct Damage {
     rects: Vec<Rect>,
     full: bool,
 }
 
 impl Damage {
-    pub fn full() -> Self { Self { rects: Vec::new(), full: true } }
+    pub(crate) fn full() -> Self { Self { rects: Vec::new(), full: true } }
 
-    pub fn is_full(&self) -> bool { self.full }
+    pub(crate) fn is_full(&self) -> bool { self.full }
 
-    pub fn rects(&self) -> &[Rect] { &self.rects }
+    pub(crate) fn rects(&self) -> &[Rect] { &self.rects }
 
     /// Adds a rectangle; empty and negative-size rectangles change nothing.
-    pub fn add(&mut self, rect: Rect) {
+    pub(crate) fn add(&mut self, rect: Rect) {
         if self.full || rect.width <= 0 || rect.height <= 0 { return; }
         if self.rects.len() == MAX_RECTS { *self = Self::full(); return; }
         self.rects.push(rect);
     }
 
-    pub fn merge(&mut self, other: &Damage) {
+    pub(crate) fn merge(&mut self, other: &Damage) {
         if other.full { *self = Self::full(); return; }
         for rect in &other.rects { self.add(*rect); }
     }
 
-    pub fn clear(&mut self) { *self = Self::default(); }
+    pub(crate) fn clear(&mut self) { *self = Self::default(); }
 }
 
 /// The part of `rect` inside a `width` x `height` area, as `(x0, y0, x1, y1)`.
-pub fn clip(rect: Rect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn clip(rect: Rect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
     let x0 = i64::from(rect.x).max(0);
     let y0 = i64::from(rect.y).max(0);
     let x1 = (i64::from(rect.x) + i64::from(rect.width)).min(i64::from(width));
@@ -44,7 +44,7 @@ pub fn clip(rect: Rect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)>
 
 /// `damage` clipped to a `width` x `height` area, with overlapping rectangles united, and at most `limit`
 /// rectangles: past that, their bounding box. Full damage is the whole area.
-pub fn output_rects(damage: &Damage, width: u32, height: u32, limit: usize) -> Vec<(u32, u32, u32, u32)> {
+pub(crate) fn output_rects(damage: &Damage, width: u32, height: u32, limit: usize) -> Vec<(u32, u32, u32, u32)> {
     if damage.full { return vec![(0, 0, width, height)]; }
     let mut rects: Vec<_> = damage.rects.iter().filter_map(|rect| clip(*rect, width, height)).collect();
     let mut merged = true;

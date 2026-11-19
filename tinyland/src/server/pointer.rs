@@ -6,7 +6,7 @@ use wayland_server::backend::{ClientId, ObjectId};
 use wayland_server::protocol::wl_pointer;
 use wayland_server::Resource;
 
-pub const WHEEL_STEP: f64 = 10.0;
+pub(super) const WHEEL_STEP: f64 = 10.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {

@@ -13,8 +13,6 @@ fn daemon_bin() -> String {
 
 struct Daemon {
     child: Child,
-    #[allow(dead_code)]
-    sock: String,
 }
 
 fn spawn_daemon(sock: &str, args: &[&str], capture_stderr: bool) -> (Daemon, Option<Vec<u8>>) {
@@ -46,7 +44,7 @@ fn spawn_daemon(sock: &str, args: &[&str], capture_stderr: bool) -> (Daemon, Opt
         libc::close(r);
     }
     assert_eq!((n, one), (1, *b"\n"), "readiness byte");
-    (Daemon { child, sock: sock.to_string() }, None)
+    (Daemon { child }, None)
 }
 
 fn terminate(child: &mut Child) {
@@ -807,7 +805,7 @@ fn spawn_with_env(sock: &str, vtbound: Option<&str>) -> Daemon {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(std::path::Path::new(sock).exists(), "daemon socket");
-    Daemon { child, sock: sock.to_string() }
+    Daemon { child }
 }
 
 #[test]

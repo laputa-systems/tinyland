@@ -2,23 +2,23 @@ use crate::positioner::{Complete, Rect};
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_server::backend::ObjectId;
 
-pub const MAX_UNACKED_CONFIGURES: usize = 32;
+pub(crate) const MAX_UNACKED_CONFIGURES: usize = 32;
 
 #[derive(Debug, Default)]
-pub struct Configures {
+pub(crate) struct Configures {
     sent: Vec<u32>,
     acked: Option<u32>,
 }
 
 impl Configures {
-    pub fn send(&mut self, serial: u32) {
+    pub(crate) fn send(&mut self, serial: u32) {
         if self.sent.len() == MAX_UNACKED_CONFIGURES {
             self.sent.remove(0);
         }
         self.sent.push(serial);
     }
 
-    pub fn ack(&mut self, serial: u32) -> bool {
+    pub(crate) fn ack(&mut self, serial: u32) -> bool {
         match self.sent.iter().position(|sent| *sent == serial) {
             Some(index) => {
                 self.sent.drain(..=index);
@@ -29,21 +29,21 @@ impl Configures {
         }
     }
 
-    pub fn acked(&self) -> bool {
+    pub(crate) fn acked(&self) -> bool {
         self.acked.is_some()
     }
 
-    pub fn started(&self) -> bool {
+    pub(crate) fn started(&self) -> bool {
         self.acked.is_some() || !self.sent.is_empty()
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         *self = Configures::default();
     }
 }
 
 #[derive(Debug)]
-pub struct ToplevelData {
+pub(crate) struct ToplevelData {
     pub resource: xdg_toplevel::XdgToplevel,
     pub xdg_surface: xdg_surface::XdgSurface,
     pub surface: ObjectId,
@@ -53,7 +53,7 @@ pub struct ToplevelData {
 }
 
 impl ToplevelData {
-    pub fn new(
+    pub(crate) fn new(
         resource: xdg_toplevel::XdgToplevel,
         xdg_surface: xdg_surface::XdgSurface,
         surface: ObjectId,
@@ -70,7 +70,7 @@ impl ToplevelData {
 }
 
 #[derive(Debug)]
-pub struct PopupData {
+pub(crate) struct PopupData {
     pub resource: xdg_popup::XdgPopup,
     pub xdg_surface: xdg_surface::XdgSurface,
     pub surface: ObjectId,
@@ -83,13 +83,13 @@ pub struct PopupData {
 }
 
 impl PopupData {
-    pub fn live(&self) -> bool {
+    pub(crate) fn live(&self) -> bool {
         self.mapped && !self.dismissed
     }
 }
 
 #[derive(Debug)]
-pub struct XdgSurfaceData {
+pub(crate) struct XdgSurfaceData {
     pub wm_base: xdg_wm_base::XdgWmBase,
     pub surface: ObjectId,
     pub has_toplevel: bool,
@@ -98,7 +98,7 @@ pub struct XdgSurfaceData {
 }
 
 impl XdgSurfaceData {
-    pub fn new(wm_base: xdg_wm_base::XdgWmBase, surface: ObjectId) -> Self {
+    pub(crate) fn new(wm_base: xdg_wm_base::XdgWmBase, surface: ObjectId) -> Self {
         XdgSurfaceData {
             wm_base,
             surface,

@@ -116,7 +116,7 @@ enum Wait {
 
 /// An open seatd session. Owns the connection, a duplicated poll descriptor,
 /// and the listener transition flags.
-pub struct Session<'a> {
+pub(crate) struct Session<'a> {
     conn: RefCell<Conn>,
     fd: OwnedFd,
     cancel: &'a dyn Fn() -> bool,
@@ -128,7 +128,7 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Require the seatd backend and open the seat.
-    pub fn open(cancel: &'a dyn Fn() -> bool) -> Result<Self, String> {
+    pub(crate) fn open(cancel: &'a dyn Fn() -> bool) -> Result<Self, String> {
         require_seatd_backend(std::env::var("LIBSEAT_BACKEND").ok())?;
         let path = seatd_socket_path(std::env::var("SEATD_SOCK").ok());
         Self::open_path(&path, cancel)
@@ -165,12 +165,12 @@ impl<'a> Session<'a> {
     }
 
     /// Borrow the duplicated session fd for the shared poll set.
-    pub fn poll_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn poll_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 
     /// Dispatch pending seat events without waiting. Daemon loss is fatal.
-    pub fn dispatch(&self) -> Result<(), String> {
+    pub(crate) fn dispatch(&self) -> Result<(), String> {
         self.check()?;
         if let Err(error) = daemon_liveness(self.fd.as_fd()) {
             return self.fail(error);
@@ -185,7 +185,7 @@ impl<'a> Session<'a> {
     /// reports a revoked device as gone before the daemon's disable
     /// notification arrives, so drain first and let a suspend win over
     /// an unplug verdict. Daemon loss is fatal here too.
-    pub fn dispatch_wait(&self, timeout: Duration) -> Result<(), String> {
+    pub(crate) fn dispatch_wait(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         self.check()?;
         if let Err(error) = daemon_liveness(self.fd.as_fd()) {
@@ -205,7 +205,7 @@ impl<'a> Session<'a> {
     /// number is the VT number, so this is how a compositor whose keyboards
     /// are grabbed hands a Ctrl+Alt+Fn switch to the privileged broker.
     /// Failure leaves the session unaffected by design.
-    pub fn switch_session(&self, session: i32) -> Result<(), String> {
+    pub(crate) fn switch_session(&self, session: i32) -> Result<(), String> {
         self.check()?;
         if session < 0 {
             return Err(format!("seatd switch_session: invalid session {session}"));
@@ -218,17 +218,17 @@ impl<'a> Session<'a> {
     }
 
     /// True after disable_seat until devices are dropped and acknowledged.
-    pub fn take_disabled(&self) -> bool {
+    pub(crate) fn take_disabled(&self) -> bool {
         self.disabled.replace(false)
     }
 
     /// True after enable_seat until the session reopens its devices.
-    pub fn take_enabled(&self) -> bool {
+    pub(crate) fn take_enabled(&self) -> bool {
         self.enabled.replace(false)
     }
 
     /// Acknowledge a disable event after all seat devices are dropped.
-    pub fn acknowledge_disable(&self) -> Result<(), String> {
+    pub(crate) fn acknowledge_disable(&self) -> Result<(), String> {
         self.check()?;
         let deadline = self.deadline();
         self.send(CLIENT_DISABLE_SEAT, &[], deadline)?;
@@ -239,7 +239,7 @@ impl<'a> Session<'a> {
 
     /// Open one brokered device. The returned fd is owned by the caller;
     /// pass the id to close_device when the fd is dropped or revoked.
-    pub fn open_device(&self, path: &Path) -> Result<(OwnedFd, i32), String> {
+    pub(crate) fn open_device(&self, path: &Path) -> Result<(OwnedFd, i32), String> {
         self.check()?;
         let raw = path.as_os_str().as_encoded_bytes();
         if raw.contains(&0) {
@@ -295,7 +295,7 @@ impl<'a> Session<'a> {
     }
 
     /// Release the broker side of a device whose fd was already dropped.
-    pub fn close_device(&self, id: i32, origin: &str) -> Result<(), String> {
+    pub(crate) fn close_device(&self, id: i32, origin: &str) -> Result<(), String> {
         self.check()?;
         if id < 0 {
             return Err(format!("seatd close_device {origin}: invalid id {id}"));
