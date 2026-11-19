@@ -634,6 +634,36 @@ fn two_toplevels_from_same_client_share_one_active_surface() {
 }
 
 #[test]
+fn region_object_limit_rejects_the_next_creation() {
+    use wayland_server::protocol::{wl_compositor, wl_region};
+    let mut f = Fixture::new();
+    let compositor = f.client.create_resource::<wl_compositor::WlCompositor, (), State>(&f.state.dh, 1, ()).unwrap();
+    for _ in 0..MAX_REGIONS_PER_CLIENT {
+        let region = f.client.create_resource::<wl_region::WlRegion, (), State>(&f.state.dh, 1, ()).unwrap();
+        f.state.regions.insert(region.id(), crate::surface::Region::default());
+    }
+    let response = f.request(&compositor, 1, &[2]);
+    assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
+    assert!(String::from_utf8_lossy(&response).contains("too many regions for client"));
+}
+
+#[test]
+fn region_rectangle_limit_rejects_add_and_subtract() {
+    use wayland_server::protocol::wl_region;
+    for opcode in [1, 2] {
+        let mut f = Fixture::new();
+        let region = f.client.create_resource::<wl_region::WlRegion, (), State>(&f.state.dh, 1, ()).unwrap();
+        f.state.regions.insert(region.id(), crate::surface::Region::default());
+        for _ in 0..MAX_REGION_RECTS {
+            assert!(f.request(&region, opcode, &[0, 0, 1, 1]).is_empty());
+        }
+        let response = f.request(&region, opcode, &[0, 0, 1, 1]);
+        assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
+        assert!(String::from_utf8_lossy(&response).contains("too many region rectangles"));
+    }
+}
+
+#[test]
 fn per_client_memory_budget_rejects_without_harming_healthy_client() {
     use std::sync::Arc;
     let mut f = Fixture::new();

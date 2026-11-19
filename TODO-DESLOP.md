@@ -5,6 +5,14 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+Tests (DSLP-4): [docs/deslop-tests.md](docs/deslop-tests.md) maps the critical
+contracts to their protecting tests. New boundary tests pin the per-client
+region object and rectangle limits and the shm backing-file size boundary;
+each fails with its fault injected. A bounded cargo-mutants trial on the
+region-object guard (32 runner-seconds) found no survivor. Ephemeral coverage
+reported 77.76% lines and 58.56% branches. No retained mutation or coverage
+lane is added: cargo-mutants and cargo-llvm-cov are not on the crate mirror.
+
 Ground, 2026-11-19, base 109c678: the pinned Alpine suite passed on Linux
 ARM64 under Docker on macOS ARM64. With an initially empty persistent Linux
 kache cache and fresh Cargo target each time, `make test` took 49.69s cold and
@@ -81,14 +89,6 @@ this change preserves the public and wire contracts.
 
 
 
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 
