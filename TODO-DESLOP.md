@@ -1,9 +1,35 @@
 Prefix: DSLP
-Next: 9
+Next: 11
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier B). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
+
+Bench, 2026-11-19, base 78f1588: [driver and workload details](docs/bench.md).
+Ranked missing-evidence gaps are P3: DSLP-9 covers shipped frame/damage
+throughput and attribution; DSLP-10 covers per-client memory, seatd response
+and startup. DSLP-6 through DSLP-8 already track reproduced resource defects.
+
+| Outcome | Evidence and limits |
+| --- | --- |
+| Frame/damage throughput | The headless 300-step differential checks every output against full composition and asserts sparse work (`tinyland/src/server/tests/damage.rs:27`, `:88`, `:143`); it measures neither frames/s nor CPU. TINY-14 reports historical headed bctl CPU and bytes versus Sway/wayvnc (`docs/CAMPAIGN-DAMAGE.md:5`), without retained paired samples or artifact identities here. Device and downstream coverage remain separate. |
+| Memory per client | The switch storm records daemon RSS before and after three clients and 60 transitions, asserting FD recovery and <=1 MiB growth (`seatd/harness/storm.rs:201`); it is neither peak nor per-client memory and excludes children/container charges. DSLP-6 has a separate reproduced growth defect. |
+| Seatd responsiveness | The switch and slow-reader tests assert ordered responses and 64 replies (`seatd/harness/storm.rs:201`, `:236`), but do not time latency or throughput. The ignored idle case samples daemon CPU ticks and voluntary switches for five seconds (`seatd/harness/storm.rs:278`); it requires a pre/post host gate (`seatd/doc/validation.md:55`), has no interleaved reference, and says nothing about throughput. |
+| Startup | Daemon readiness has a five-second failure deadline (`seatd/harness/storm.rs:49`), not a startup measurement. Tinyland release startup remains unmeasured (`tinyland/docs/verification.md:92`). |
+
+No retained per-stage CPU profile, allocation profile, syscall/I/O counts,
+operation trace or protocol byte counter explains these outcomes. Cheapest next
+instruments are separate CPU sampling per process, allocation/heap snapshots
+for density, syscall counts for seatd/startup, and frame boundaries plus byte
+counters for damage; all add overhead and must be separate from timed samples.
+No existing comparison gate or enough samples establish a performance verdict;
+no stale numerical gate was found. The idle assertion is a coarse daemon-only
+resource check, not a throughput gate. The image is pinned but its local tag can
+be stale; the driver warns and uses checkout sources, records the image ID and
+creates isolated scratch. Host load, image freshness and cleanup beyond Docker's
+container lifecycle are not established. The driver records exclusions and
+inconclusive timing; it does not run the host-gated idle scenario or Full.
+
 
 DSLP-5 closed, Dead code, 2026-11-19, base 03d30cf: Linux ARM64 in the
 pinned Alpine image, nightly-2026-11-09, default and all features, all targets.
@@ -152,4 +178,24 @@ this change preserves the public and wire contracts.
 - **Recommendation:** Reject a damage message whose rectangle areas sum past size.pixel_len(), or require rectangles to be disjoint, in both tag 3 and tag 4; keep the writers' current invariants. Add tests for overlapping and repeated rectangles in both encodings.
 - **Fix with:** os-boundaries
 - **Effort:** S
+
+
+### DSLP-9 · P3 · Establish representative compositor performance evidence
+
+- **Area:** Performance
+- **Where:** docs/CAMPAIGN-DAMAGE.md; tinyland/src/server/tests/damage.rs:88
+- **Problem:** The 300-step headless damage differential checks pixels and sparse updates but does not measure shipped frame throughput, latency, CPU, allocations or bytes. The headed bctl comparison is historical and lacks a reproducible pinned baseline and retained samples here. No current evidence detects a performance regression or attributes it across compositor, guest and viewer.
+- **Recommendation:** Extend the existing headed damage campaign with pinned candidate and reference, completed-frame and pixel checks, interleaved gated samples, stage CPU and byte counters, and separate sampling or tracing for attribution. Qualify actual devices and downstream separately.
+- **Fix with:** bench-pyramid
+- **Effort:** L
+
+
+### DSLP-10 · P3 · Measure client density, seatd responsiveness and startup
+
+- **Area:** Performance
+- **Where:** seatd/harness/storm.rs:201; seatd/doc/validation.md:55; tinyland/docs/verification.md:92
+- **Problem:** The switch storm checks 60 completed transitions and post-cleanup daemon RSS and descriptors, not per-client retained or peak memory, latency or throughput. The ignored idle test samples only daemon CPU ticks and voluntary switches over five seconds. Neither component has a startup measurement or an interleaved baseline; regressions in these outcomes can go unnoticed.
+- **Recommendation:** Add representative client-density, request-response and startup journeys with completion checks, per-process and container memory scope, operation counts, gated interleaved samples and an accepted reference. Use separate CPU sampling, allocation and syscall tracing for attribution; document overhead and host validity.
+- **Fix with:** bench-pyramid
+- **Effort:** M
 
