@@ -717,8 +717,12 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                     resource.post_error(wl_seat::Error::MissingCapability as u32, "seat has no pointer");
                     return;
                 }
-                let pointer = data_init.init(id, ());
                 let Some(index) = state.seats.iter().position(|seat| seat.resource == *resource) else { return };
+                if state.seats[index].pointers.len() >= super::MAX_POINTERS_PER_SEAT {
+                    super::display_error::post(resource, super::display_error::DisplayError::NoMemory, "too many pointers for seat");
+                    return;
+                }
+                let pointer = data_init.init(id, ());
                 state.seats[index].pointers.push(pointer.clone());
                 state.enter_pointer(&pointer);
             }
@@ -726,12 +730,16 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                 resource.post_error(wl_seat::Error::MissingCapability as u32, "seat has no touch");
             }
             wl_seat::Request::GetKeyboard { id } => {
+                let Some(index) = state.seats.iter().position(|seat| seat.resource == *resource) else { return };
+                if state.seats[index].keyboards.len() >= super::MAX_KEYBOARDS_PER_SEAT {
+                    super::display_error::post(resource, super::display_error::DisplayError::NoMemory, "too many keyboards for seat");
+                    return;
+                }
                 let kb = data_init.init(id, ());
                 use std::os::fd::AsFd;
                 kb.keymap(wl_keyboard::KeymapFormat::XkbV1, state.keyboard.keymap.as_fd(), state.keyboard.keymap_size);
                 if kb.version() >= 4 { kb.repeat_info(25, 600); }
-                let seat_index = state.seats.iter().position(|seat| seat.resource == *resource);
-                if let Some(index) = seat_index {
+                {
                     state.seats[index].keyboards.push(kb);
                     if let Some(focused) = state.active_surface() {
                         let focused_client = state
@@ -986,7 +994,7 @@ impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for State {
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &xdg_wm_base::XdgWmBase,
         request: xdg_wm_base::Request,
         _data: &(),
@@ -995,6 +1003,13 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     ) {
         match request {
             xdg_wm_base::Request::CreatePositioner { id } => {
+                let count = state.positioners.keys().filter(|id| {
+                    state.dh.get_client((*id).clone()).map(|owner| owner.id() == client.id()).unwrap_or(false)
+                }).count();
+                if count >= super::MAX_POSITIONERS_PER_CLIENT {
+                    super::display_error::post(resource, super::display_error::DisplayError::NoMemory, "too many positioners for client");
+                    return;
+                }
                 let positioner = data_init.init(id, ());
                 state.positioners.insert(positioner.id(), Positioner::default());
             }

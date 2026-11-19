@@ -150,14 +150,6 @@ this change preserves the public and wire contracts.
 
 
 
-### DSLP-6 · P2 · A Wayland client can create unbounded xdg_positioner and wl_pointer objects
-
-- **Area:** Security
-- **Where:** tinyland/src/server/dispatch_impl.rs:997 (xdg_wm_base.create_positioner), tinyland/src/server/dispatch_impl.rs:715 (wl_seat.get_pointer) and :728 (wl_seat.get_keyboard), tinyland/src/server.rs:69-83 (per-client caps)
-- **Problem:** The compositor caps the object types it retains in per-client maps (surfaces 128, toplevels 32, buffers 64, pools 16, regions 32, sources 32, devices 16, seats 8, outputs 8, callbacks 32), but two creation paths have no count check and are not charged to the per-client byte budget: `xdg_wm_base.create_positioner` inserts into `State::positioners` (dispatch_impl.rs:997-1000), and `wl_seat.get_pointer`/`get_keyboard` push into `SeatData::pointers`/`keyboards` (dispatch_impl.rs:715-756) for each of up to eight seats. Reproduced against the headless compositor: one client created 300000 positioners, received no error, and still completed a wl_display.sync round trip, while resident memory grew by 61.4 MiB (about 215 bytes each); the same client created 300000 pointers on one seat, again with no error, growing memory by 39.5 MiB. The same harness shows the region cap rejecting the 33rd region with `too many regions for client`, so the policy is real for the other object types. A buggy or hostile client can exhaust compositor memory and end the session; 1M each would be roughly 200 MiB and 130 MiB.
-- **Recommendation:** Add a per-client positioner cap and a per-seat pointer and keyboard cap beside the existing limits, and reject past each with the same wl_display NoMemory error the other caps use, so the offender is disconnected. Do not count an object after the client destroys it. Verify with headless tests that the create past each limit errors and the client keeps its earlier objects.
-- **Fix with:** lifecycle-concurrency
-- **Effort:** S
 
 
 ### DSLP-7 · P3 · seatd spins and refuses new clients when accept fails

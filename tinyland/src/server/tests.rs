@@ -634,6 +634,74 @@ fn two_toplevels_from_same_client_share_one_active_surface() {
 }
 
 #[test]
+fn positioner_object_limit_and_reuse() {
+    let mut f = Fixture::new();
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    for id in 2..130 {
+        assert!(display_errors(&messages(&f.request(&base, 1, &[id]))).is_empty());
+    }
+    for id in 2..130 { f.request_id(id, 0, &[]); }
+    for id in 130..258 {
+        assert!(display_errors(&messages(&f.request(&base, 1, &[id]))).is_empty());
+    }
+    let response = f.request(&base, 1, &[258]);
+    assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
+    assert!(String::from_utf8_lossy(&response).contains("too many positioners for client"));
+    assert_eq!(f.socket.read(&mut [0; 1]).unwrap(), 0);
+}
+
+fn seat_input_object_limit_and_reuse(opcode: u16, release: u16, message: &str) {
+    let mut f = Fixture::new();
+    f.state.has_pointer = true;
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    let other = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat.clone()));
+    f.state.seats.push(SeatData::new(other.clone()));
+    for id in 2..34 {
+        assert!(display_errors(&messages(&f.request(&seat, opcode, &[id]))).is_empty());
+    }
+    assert!(display_errors(&messages(&f.request(&other, opcode, &[34]))).is_empty());
+    for id in 2..34 { f.request_id(id, release, &[]); }
+    for id in 35..67 {
+        assert!(display_errors(&messages(&f.request(&seat, opcode, &[id]))).is_empty());
+    }
+    let response = f.request(&seat, opcode, &[67]);
+    assert_eq!(display_errors(&messages(&response)), [(DISPLAY_OBJECT, DISPLAY_NO_MEMORY)]);
+    assert!(String::from_utf8_lossy(&response).contains(message));
+    assert_eq!(f.socket.read(&mut [0; 1]).unwrap(), 0);
+}
+
+#[test]
+fn input_and_positioner_objects_are_released_on_disconnect() {
+    let mut f = Fixture::new();
+    f.state.has_pointer = true;
+    let base = f.client.create_resource::<xdg_wm_base::XdgWmBase, (), State>(&f.state.dh, 1, ()).unwrap();
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat.clone()));
+    f.request(&base, 1, &[2]);
+    f.request(&seat, 0, &[3]);
+    f.request(&seat, 1, &[4]);
+    assert_eq!(f.state.positioners.len(), 1);
+    assert_eq!(f.state.seats[0].pointers.len(), 1);
+    assert_eq!(f.state.seats[0].keyboards.len(), 1);
+    f.socket.shutdown(std::net::Shutdown::Both).unwrap();
+    f.display.dispatch_clients(&mut f.state).unwrap();
+    assert!(f.state.positioners.is_empty());
+    assert!(f.state.seats[0].pointers.is_empty());
+    assert!(f.state.seats[0].keyboards.is_empty());
+}
+
+#[test]
+fn pointer_object_limit_and_reuse() {
+    seat_input_object_limit_and_reuse(0, 1, "too many pointers for seat");
+}
+
+#[test]
+fn keyboard_object_limit_and_reuse() {
+    seat_input_object_limit_and_reuse(1, 0, "too many keyboards for seat");
+}
+
+#[test]
 fn region_object_limit_rejects_the_next_creation() {
     use wayland_server::protocol::{wl_compositor, wl_region};
     let mut f = Fixture::new();
@@ -844,6 +912,11 @@ fn popup_is_placed_inside_the_output_takes_pointer_input_and_is_dismissed_by_an_
     let popup_surface = f.surface();
     f.request(&base, 2, &[3, popup_surface.id().protocol_id()]);
     f.request_id(3, 2, &[4, parent_xdg.id().protocol_id(), 2]);
+    f.request_id(2, 0, &[]);
+    let seat = f.client.create_resource::<wl_seat::WlSeat, (), State>(&f.state.dh, 5, ()).unwrap();
+    f.state.seats.push(SeatData::new(seat.clone()));
+    assert!(display_errors(&messages(&f.request(&seat, 0, &[5]))).is_empty());
+    assert!(display_errors(&messages(&f.request(&seat, 1, &[6]))).is_empty());
     let events = messages(&f.request(&popup_surface, 6, &[]));
     let configure: Vec<_> = events.iter().filter(|(o, op, _)| *o == 4 && *op == POPUP_CONFIGURE).collect();
     assert_eq!(configure.len(), 1, "{events:?}");
