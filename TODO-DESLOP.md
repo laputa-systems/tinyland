@@ -5,7 +5,18 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
-Not started.
+Ground, 2026-11-19, base f4e6b5e: `make test-ci
+TEST_IMAGE=tinyland-deslop1-f4e6b5e-20261119:local` passed in the pinned
+Alpine image on Linux arm64. Idle timing and keymap regeneration were
+ignored. The host kache binary is Darwin ARM64, and `perf-gate-ready`
+reported a busy host. The Linux kache path and cold and warm costs remain
+open, along with device, VT, guest, oracle, and downstream qualification.
+
+`make lint` has no target. In the same Alpine image,
+`cargo clippy --offline --locked --workspace --all-targets -- -D warnings`
+reported ten existing diagnostics in damage accounting, output, and
+dispatch. Install the pinned toolchain's Clippy component in the disposable
+container before running this command.
 
 ## Tickets
 
@@ -13,8 +24,8 @@ Not started.
 
 - **Area:** deslop · ground
 - **Where:** AGENTS.md, Makefile, .github/workflows/
-- **Problem:** Base d45f17b; code lines Rust 13.8k, Python 0.3k (fleet/loc/v1, vendored included); timings not yet measured. CI does not run make test: no pull request workflow runs make test; add a make test step. Open fleet lint findings: linux-musl-toolchain 17, registry-sources 4, rust-collections 2, audit-registry 1, audit-upgrades 1, gha-lint-workflow 1, make-clean-target 1, make-lint-target 1, and 3 more. Consumers in the fleet: bctl; their tests are the consumer check for API changes. Perf gate: decide in Ground whether a user-visible hot path needs a workload.
-- **Recommendation:** Run the deslop Ground step. Accept: CI runs make test and is green, and AGENTS.md has a Verification section.
+- **Problem:** At base f4e6b5e, The pinned CI suite passed locally on Linux ARM64. The Linux kache path and cold and warm costs are unverified. make lint has no target, and the strict Clippy baseline reports ten diagnostics. bctl is a downstream consumer with separate device gates.
+- **Recommendation:** Complete Ground: qualify make test with a Linux kache on a suitable host, collect valid empty-target and warm costs when perf-gate-ready permits, and resolve the missing make lint target within authorized scope. Keep AGENTS.md Verification current.
 - **Fix with:** deslop
 - **Effort:** S
 
