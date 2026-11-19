@@ -475,29 +475,26 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_shm::Request::CreatePool { id, fd, size } => {
-                use crate::server::MAX_POOLS_PER_CLIENT;
-                if state.count_client_pools(&client.id()) >= MAX_POOLS_PER_CLIENT {
-                    super::display_error::post(_resource, super::display_error::DisplayError::NoMemory, "too many shm pools for client");
+        if let wl_shm::Request::CreatePool { id, fd, size } = request {
+            use crate::server::MAX_POOLS_PER_CLIENT;
+            if state.count_client_pools(&client.id()) >= MAX_POOLS_PER_CLIENT {
+                super::display_error::post(_resource, super::display_error::DisplayError::NoMemory, "too many shm pools for client");
+                return;
+            }
+            let pool_size = match shm::validate_pool_size(size) {
+                Ok(n) => n,
+                Err(msg) => {
+                    _resource.post_error(wl_shm::Error::InvalidFd as u32, msg.to_string());
                     return;
                 }
-                let pool_size = match shm::validate_pool_size(size) {
-                    Ok(n) => n,
-                    Err(msg) => {
-                        _resource.post_error(wl_shm::Error::InvalidFd as u32, msg.to_string());
-                        return;
-                    }
-                };
-                let file = std::fs::File::from(fd as OwnedFd);
-                let pool_data = match shm::ShmPoolData::new(file, pool_size as i32) {
-                    Ok(pool) => pool,
-                    Err(error) => { _resource.post_error(wl_shm::Error::InvalidFd as u32, error); return; }
-                };
-                let pool = data_init.init(id, ());
-                state.pools.insert(pool.id(), pool_data);
-            }
-            _ => {}
+            };
+            let file = std::fs::File::from(fd as OwnedFd);
+            let pool_data = match shm::ShmPoolData::new(file, pool_size as i32) {
+                Ok(pool) => pool,
+                Err(error) => { _resource.post_error(wl_shm::Error::InvalidFd as u32, error); return; }
+            };
+            let pool = data_init.init(id, ());
+            state.pools.insert(pool.id(), pool_data);
         }
     }
 
@@ -599,10 +596,7 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_buffer::Request::Destroy => {}
-            _ => {}
-        }
+        let _ = request;
     }
 
     fn destroyed(
@@ -660,10 +654,7 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_output::Request::Release => {}
-            _ => {}
-        }
+        let _ = request;
     }
 
     fn destroyed(
@@ -817,10 +808,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_keyboard::Request::Release => {}
-            _ => {}
-        }
+        let _ = request;
     }
 
     fn destroyed(
@@ -1286,10 +1274,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            xdg_toplevel::Request::Destroy => {}
-            _ => {}
-        }
+        let _ = request;
     }
 
     fn destroyed(

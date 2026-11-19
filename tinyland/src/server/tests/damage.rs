@@ -122,7 +122,7 @@ fn random_damage_moves_and_resizes_always_match_a_full_composition() {
                 commit(&mut f, &child, Some(&buffer), &[(x, y, 1, 1)]);
             }
             3 => {
-                f.request(&sub, SET_POSITION, &[rng.below(90) as u32, (rng.below(80) as i32 - 10) as u32]);
+                f.request(&sub, SET_POSITION, &[rng.below(90), (rng.below(80) as i32 - 10) as u32]);
                 f.request(&parent, COMMIT, &[]);
             }
             4 => {

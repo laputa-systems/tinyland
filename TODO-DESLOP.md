@@ -5,29 +5,17 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
-Ground, 2026-11-19, base f4e6b5e: `make test-ci
-TEST_IMAGE=tinyland-deslop1-f4e6b5e-20261119:local` passed in the pinned
-Alpine image on Linux arm64. Idle timing and keymap regeneration were
-ignored. The host kache binary is Darwin ARM64, and `perf-gate-ready`
-reported a busy host. The Linux kache path and cold and warm costs remain
-open, along with device, VT, guest, oracle, and downstream qualification.
-
-`make lint` has no target. In the same Alpine image,
-`cargo clippy --offline --locked --workspace --all-targets -- -D warnings`
-reported ten existing diagnostics in damage accounting, output, and
-dispatch. Install the pinned toolchain's Clippy component in the disposable
-container before running this command.
+Ground, 2026-11-19, base 109c678: the pinned Alpine suite passed on Linux
+ARM64 under Docker on macOS ARM64. With an initially empty persistent Linux
+kache cache and fresh Cargo target each time, `make test` took 49.69s cold and
+17.41s warm. `make lint` passed strict Clippy in 54.64s including an image
+rebuild. The host was busy, so these are observations, not performance gates.
+The suite leaves idle timing and keymap regeneration ignored; device, VT, guest,
+oracle, and downstream qualification remain separate. No vendored source trees
+are tracked; the generated keymap provenance is recorded in AGENTS.md.
 
 ## Tickets
 
-### DSLP-1 · P2 · Ground: baseline, boundaries, and CI test entry point
-
-- **Area:** deslop · ground
-- **Where:** AGENTS.md, Makefile, .github/workflows/
-- **Problem:** At base f4e6b5e, The pinned CI suite passed locally on Linux ARM64. The Linux kache path and cold and warm costs are unverified. make lint has no target, and the strict Clippy baseline reports ten diagnostics. bctl is a downstream consumer with separate device gates.
-- **Recommendation:** Complete Ground: qualify make test with a Linux kache on a suitable host, collect valid empty-target and warm costs when perf-gate-ready permits, and resolve the missing make lint target within authorized scope. Keep AGENTS.md Verification current.
-- **Fix with:** deslop
-- **Effort:** S
 
 ### DSLP-2 · P2 · Diagnose: ultrareview into this backlog
 

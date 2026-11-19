@@ -6,6 +6,20 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /rustup-init.sh \
  && sh /rustup-init.sh -y --profile minimal --default-toolchain nightly-2026-11-09 \
  && rm /rustup-init.sh
+# kache is the workspace's required Rust wrapper; pin both supported Linux binaries.
+RUN arch="$(uname -m)"; case "$arch" in \
+      aarch64) kache_sum=b393dc01b8bb3c30d2dec3796cdb932b64fb1356f66db5b84530af95995d4b41; engine_sum=8caef4f5bd9a3a3bb3b87ca3d9fb4ac2eeecfa426df78b7c98aea56c808f41fa ;; \
+      x86_64) kache_sum=64c402c579de9648b766ff262745a7454a828b3a57627daf8a3e8ed2380f79a1; engine_sum=124fa8529d6b55c6aa7a4a6d91a89fcc09a83e57fd0a3cdfb864397c3671aa83 ;; \
+      *) exit 1 ;; esac; \
+    for name in kache kache-engine; do \
+      asset="$name-$arch-unknown-linux-musl-static.zip"; \
+      curl -fsSL "https://github.com/joshuarli/kache/releases/download/release-2343033e183f5b0d72f4c023400cbdbc099a8450/$asset" -o "/tmp/$asset" || exit; \
+      case "$name" in kache) sum="$kache_sum" ;; *) sum="$engine_sum" ;; esac; \
+      echo "$sum  /tmp/$asset" | sha256sum -c || exit; \
+      unzip -p "/tmp/$asset" "$name-$arch-unknown-linux-musl-static" > "/usr/local/bin/$name" || exit; \
+      chmod +x "/usr/local/bin/$name"; rm "/tmp/$asset"; \
+    done
+ENV RUSTC_WRAPPER=/usr/local/bin/kache
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo/ .cargo/

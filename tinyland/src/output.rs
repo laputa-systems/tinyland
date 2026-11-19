@@ -100,6 +100,7 @@ impl ScanoutBuffers {
 
     fn invalidate(&mut self) { *self = Self::new(); }
 
+    #[allow(clippy::too_many_arguments)] // Buffer geometry and damage describe one copy.
     fn copy(&mut self, back: usize, pixels: &[u8], target: &mut [u8], stride: usize, width: u32, height: u32, damage: &[OutputRect]) -> Vec<OutputRect> {
         for &(x0, y0, x1, y1) in damage {
             let rect = crate::positioner::Rect { x: x0 as i32, y: y0 as i32, width: (x1 - x0) as i32, height: (y1 - y0) as i32 };
@@ -311,7 +312,7 @@ impl DrmOutput {
                     .get_property(*id)
                     .map_err(|error| AtomicError::new("prop info", error))?;
                 if pinfo.name().to_str().map(|x| x == "type").unwrap_or(false)
-                    && *val == (drm::control::PlaneType::Primary as u64).into()
+                    && *val == drm::control::PlaneType::Primary as u64
                 {
                     is_primary = true;
                 }
@@ -410,7 +411,7 @@ impl DrmOutput {
     }
 
     pub fn mode_path(&self) -> &str {
-        &self.mode_path
+        self.mode_path
     }
 
     pub fn fill_solid(&mut self, r: u8, g: u8, b: u8) -> Result<u32, String> {
