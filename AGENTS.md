@@ -15,6 +15,27 @@ Keep installation, supervision, and distribution policy outside the workspace.
 Do not run formatters or change the pinned nightly. Use kache for Rust builds
 and mold for Linux musl links. Keep scratch in ignored `.work/`.
 
+## Verification
+
+- `make test` builds the pinned image and mounts Linux host kache; `make test-ci`
+  runs the same locked workspace suite without the mount. CI uses `make test-ci`.
+- The kache mount expects a Linux binary. Cold and warm costs remain open.
+  See `TODO-DESLOP.md` for the baseline and the missing lint target.
+- Tinyland CLI and exit 2: `tinyland/tests/cli.rs`; Wayland and presentation:
+  `tinyland/src/server/tests.rs` and its test modules; remote stream:
+  `tinyland/tests/remote.rs` and `remote-protocol/src/lib.rs` tests.
+- seatd CLI flags and exit codes: no dedicated CLI test. Socket admission and
+  daemon behavior: `seatd/harness/adversarial.rs`; libseat wire and FD transfer:
+  `seatd/harness/differential.rs`, `seatd/harness/protocol.golden`, and
+  `seatd-protocol` tests. The transcript is finite, not universal compatibility.
+- Embedded keymap `tinyland/data/us.xkb` is checked against pinned XKB data by
+  `tinyland/src/input.rs`; regeneration is ignored in the ordinary suite.
+- The headed bctl damage workload and pending device gates are described in
+  `docs/CAMPAIGN-DAMAGE.md`; it is relevant to composition and presentation.
+  bctl is a downstream consumer; test it against candidate changes to its contract.
+- VM, real device, VT, oracle, and downstream appliance proofs are separate;
+  see `tinyland/docs/verification.md` and `seatd/doc/validation.md`.
+
 ## Map
 
 - Compositor runtime and limits: [session contract](tinyland/docs/session.md).
