@@ -27,6 +27,10 @@ const SEARCH: u32 = 512;
 const MIN_ROWS: u32 = 32;
 /// A row whose hash appears more often than this in the shipped band, such as a flat background, does not vote.
 const MAX_CANDIDATES: usize = 4;
+/// Frames planned without finding a move before planning backs off, and the frames it then skips. Video and
+/// other content that never scrolls would otherwise pay for hashing every damaged row of every frame.
+const MISSES_BEFORE_BACKOFF: u32 = 2;
+const BACKOFF_FRAMES: u32 = 7;
 /// Rectangles one damaged rectangle may become; with more, it is sent whole.
 const MAX_PIECES: usize = 4;
 
@@ -37,6 +41,10 @@ pub struct Shipped {
     hashes: Vec<u64>,
     /// Row hashes of the frame being planned, for [`Shipped::record`] to keep; `None` where not computed.
     fresh: Vec<Option<u64>>,
+    /// Hashes not updated since their pixels were recorded while planning was backed off.
+    stale: Vec<bool>,
+    misses: u32,
+    skip: u32,
 }
 
 fn source(m: Move) -> Rect { Rect { x: m.x, y: m.src_y, width: m.width, height: m.height } }
@@ -53,9 +61,10 @@ fn hash(row: &[u8]) -> u64 {
 
 impl Shipped {
     pub fn new(size: Size) -> Self {
-        let mut shipped = Self { size, pixels: vec![0; size.pixel_len()], hashes: Vec::new(), fresh: Vec::new() };
+        let mut shipped = Self { size, pixels: vec![0; size.pixel_len()], hashes: Vec::new(), fresh: Vec::new(), stale: Vec::new(), misses: 0, skip: 0 };
         shipped.hashes = (0..size.height()).flat_map(|y| (0..shipped.bands()).map(move |b| (y, b))).map(|(y, b)| shipped.band_hash(&shipped.pixels, y, b)).collect();
         shipped.fresh = vec![None; shipped.hashes.len()];
+        shipped.stale = vec![false; shipped.hashes.len()];
         shipped
     }
 
@@ -76,6 +85,10 @@ impl Shipped {
     /// rectangles still to send. Applying the moves to the shipped output, then the returned rectangles of
     /// `current`, reproduces `current` inside `rects`.
     pub fn plan(&mut self, current: &[u8], rects: &[Rect]) -> (Vec<Move>, Vec<Rect>) {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return (Vec::new(), rects.to_vec());
+        }
         let (mut moves, mut rest) = (Vec::new(), Vec::new());
         for (i, &r) in rects.iter().enumerate() {
             let overlaps = rects.iter().enumerate().any(|(j, o)| j != i && intersects(r, *o));
@@ -86,6 +99,12 @@ impl Shipped {
                 Some((found, pieces)) => { moves.extend(found); rest.extend(pieces); }
                 None => rest.push(r),
             }
+        }
+        if moves.is_empty() {
+            self.misses += 1;
+            if self.misses >= MISSES_BEFORE_BACKOFF { self.misses = 0; self.skip = BACKOFF_FRAMES; }
+        } else {
+            self.misses = 0;
         }
         (moves, rest)
     }
@@ -99,7 +118,9 @@ impl Shipped {
         for band in first_band..=last_band {
             previous.clear();
             for y in lo..hi {
-                let rows = previous.entry(self.hashes[(y * bands + band) as usize]).or_default();
+                let at = (y * bands + band) as usize;
+                if std::mem::take(&mut self.stale[at]) { self.hashes[at] = self.band_hash(&self.pixels, y, band); }
+                let rows = previous.entry(self.hashes[at]).or_default();
                 if rows.len() <= MAX_CANDIDATES { rows.push(y); }
             }
             for y in r.y..r.y + r.height {
@@ -161,7 +182,7 @@ impl Shipped {
             for y in r.y..r.y + r.height {
                 for band in r.x / BAND..=(r.x + r.width - 1) / BAND {
                     let at = (y * bands + band) as usize;
-                    self.hashes[at] = match self.fresh[at].take() { Some(h) => h, None => self.band_hash(current, y, band) };
+                    match self.fresh[at].take() { Some(h) => { self.hashes[at] = h; self.stale[at] = false; } None => self.stale[at] = true }
                 }
             }
         }
@@ -225,6 +246,27 @@ mod tests {
         assert!(!moves.is_empty(), "the scrolled blocks move");
         assert!(rects.iter().map(|r| r.width * r.height).sum::<u32>() < 320 * 400 / 4);
         assert_eq!(rebuild(size, &before, &after, &moves, &rects), after);
+    }
+
+    #[test]
+    fn planning_backs_off_after_misses_and_finds_scrolls_again() {
+        let size = Size::new(200, 300).unwrap();
+        let tall = page(Size::new(200, 900).unwrap(), 5);
+        let stride = 200 * 4;
+        let whole = [Rect { x: 0, y: 0, width: 200, height: 300 }];
+        let mut shipped = Shipped::new(size);
+        let mut host = vec![0; size.pixel_len()];
+        let mut found = Vec::new();
+        for frame in 0..30usize {
+            let current = if frame < 10 { page(size, frame as u32 + 20) } else { tall[(frame - 10) * 11 * stride..][..300 * stride].to_vec() };
+            let (moves, sent) = shipped.plan(&current, &whole);
+            found.push(!moves.is_empty());
+            host = rebuild(size, &host, &current, &moves, &sent);
+            assert_eq!(host, current, "frame {frame}");
+            shipped.record(&current, &whole);
+        }
+        assert!(found[..10].iter().all(|f| !f), "unrelated frames have no moves");
+        assert!(found[20..].iter().filter(|f| **f).count() >= 8, "a sustained scroll is found again after backing off");
     }
 
     #[test]
