@@ -38,7 +38,7 @@ pub fn clip(rect: Rect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)>
     let y0 = i64::from(rect.y).max(0);
     let x1 = (i64::from(rect.x) + i64::from(rect.width)).min(i64::from(width));
     let y1 = (i64::from(rect.y) + i64::from(rect.height)).min(i64::from(height));
-    (x0 < x1 && y0 < y1).then(|| (x0 as u32, y0 as u32, x1 as u32, y1 as u32))
+    (x0 < x1 && y0 < y1).then_some((x0 as u32, y0 as u32, x1 as u32, y1 as u32))
 }
 
 /// `damage` clipped to a `width` x `height` area, with overlapping rectangles united, and at most `limit`

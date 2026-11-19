@@ -447,7 +447,7 @@ fn contains_opcode(data: &[u8], opcode: u16) -> bool {
     let mut offset = 0;
     while offset + 8 <= data.len() {
         let size = (u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap()) >> 16) as usize;
-        let found = u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as u16 & 0xffff == opcode;
+        let found = u32::from_ne_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as u16 == opcode;
         if found {
             return true;
         }

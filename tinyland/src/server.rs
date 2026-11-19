@@ -946,6 +946,7 @@ impl State {
 }
 
 #[cfg(any(test, feature = "headless"))]
+#[allow(clippy::too_many_arguments)] // Source and destination geometry are independent.
 fn blit_rows(
     fb: &mut [u8],
     out_w: u32,
@@ -1322,7 +1323,7 @@ pub fn run(config: &ServerConfig<'_>) -> i32 {
     eprintln!("TINYLAND_COMPOSITOR_READY socket={sock_name} size={w}x{h} path={ready_path}");
 
     let display_fd = display.as_fd().try_clone_to_owned().expect("clone display fd");
-    let socket_fd = (&socket).as_fd().try_clone_to_owned().expect("clone socket fd");
+    let socket_fd = socket.as_fd().try_clone_to_owned().expect("clone socket fd");
     let base_timeout = rustix::time::Timespec { tv_sec: 0, tv_nsec: 500_000_000 };
     loop {
         if shutdown.signal().is_some() { return 0; }

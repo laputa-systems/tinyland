@@ -27,4 +27,4 @@ jobs:
         with:
           persist-credentials: false
       - name: run the test suite in the pinned Alpine image
-        run: make test-ci
+        run: make test
