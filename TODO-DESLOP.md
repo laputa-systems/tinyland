@@ -1,146 +1,52 @@
 Prefix: DSLP
-Next: 11
+Next: 12
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier B). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
 
-Bench, 2026-11-19, base 78f1588: [driver and workload details](docs/bench.md).
-Ranked missing-evidence gaps are P3: DSLP-9 covers shipped frame/damage
-throughput and attribution; DSLP-10 covers per-client memory, seatd response
-and startup. DSLP-6 through DSLP-8 already track reproduced resource defects.
+The DSLP-1 base is `109c6781ec88f92d6405d58ee15934d4e74b3cdc`.
+Ground through caps landed in #7–#13. The Report review covers that base
+through `1f2770a`. All open tickets are P3.
 
-| Outcome | Evidence and limits |
+| Measure | Before | After and limits |
+| --- | --- | --- |
+| Rust source and test lines | 12,840 source, 3,816 test | 12,964 source, 3,814 test. Tracked `.rs` lines; test and harness directories count as test, inline tests as source. |
+| Warm `make test` | 17.41 s | 22.54 s at Tests. Both observations were on a busy host, not valid performance gates. |
+| Coverage | 77.61% lines, 58.37% branches | 77.76% lines, 58.56% branches. Ephemeral Alpine ARM64 run includes harnesses. |
+| Mutation | Region-object guard: 1 caught, 0 missed, 0 timeout, 0 unviable | Same result. One guard, 32 runner-seconds total; no wider survivor claim. Three boundary fault controls protected region object count, rectangle count and shm backing size. |
+| Escape hatches | unsafe 60, allow 6, unwrap/expect 44, casts 276 | 60, 6, 44, 272 respectively. Production lexical approximation, including possible comments and aliases. |
+| Dead code | Unread daemon test field and runtime keyboard lookup | Field removed and lookup restricted to tests; two net harness lines removed, no dependencies removed. 109 private-module declarations narrowed. |
+| Findings | Diagnose filed one P2 and two P3 | DSLP-6 P2 fixed with positioner, pointer and keyboard caps and reuse tests. DSLP-7 and DSLP-8 remain P3. Bench filed DSLP-9 and DSLP-10 P3. Report filed DSLP-11 P3. |
+| Performance | No qualified comparison | Deferred: host busy. #12 supplies a workload entrypoint, not a throughput gate. |
+| Escaped regressions | Not measured | No demonstrated regression in this review. DSLP-11 records retained seat state and an unproven cap bypass. Device, VT, VM, oracle and downstream behavior remain unqualified. |
+
+The campaign fixed one reproduced resource-exhaustion finding. Tests added
+three fault-proven boundary behaviors and cover three input-object caps,
+capacity reuse and disconnect. The mutation result is not a count of defects.
+
+| Step | Finding and cost |
 | --- | --- |
-| Frame/damage throughput | The headless 300-step differential checks every output against full composition and asserts sparse work (`tinyland/src/server/tests/damage.rs:27`, `:88`, `:143`); it measures neither frames/s nor CPU. TINY-14 reports historical headed bctl CPU and bytes versus Sway/wayvnc (`docs/CAMPAIGN-DAMAGE.md:5`), without retained paired samples or artifact identities here. Device and downstream coverage remain separate. |
-| Memory per client | The switch storm records daemon RSS before and after three clients and 60 transitions, asserting FD recovery and <=1 MiB growth (`seatd/harness/storm.rs:201`); it is neither peak nor per-client memory and excludes children/container charges. DSLP-6 has a separate reproduced growth defect. |
-| Seatd responsiveness | The switch and slow-reader tests assert ordered responses and 64 replies (`seatd/harness/storm.rs:201`, `:236`), but do not time latency or throughput. The ignored idle case samples daemon CPU ticks and voluntary switches for five seconds (`seatd/harness/storm.rs:278`); it requires a pre/post host gate (`seatd/doc/validation.md:55`), has no interleaved reference, and says nothing about throughput. |
-| Startup | Daemon readiness has a five-second failure deadline (`seatd/harness/storm.rs:49`), not a startup measurement. Tinyland release startup remains unmeasured (`tinyland/docs/verification.md:92`). |
+| Ground #7 | Pinned Alpine test and strict lint entrypoints, Linux kache and mold. Cold test 49.69 s, warm 17.41 s, lint 54.64 s including image rebuild. Host busy; CI minutes not retained. |
+| Diagnose #8 | Reproduced DSLP-6, DSLP-7 and DSLP-8 across untrusted input and admission paths. Wall time and CI minutes not retained. |
+| Types #9 | No strict candidate met the noise and witness rule. Four clipping casts became checked conversions with a boundary witness. Wall time and CI minutes not retained. |
+| Tests #10 | Three boundary tests and fault controls; coverage and bounded mutation results above. Candidate warm test 22.54 s, lint 18.07 s on a busy host; CI minutes not retained. [Contract map and method](docs/deslop-tests.md). |
+| Dead code #11 | Rust dead-code checks and cargo-machete found no remaining actionable dependency removal. Default and all features, all targets checked. Wall time and CI minutes not retained. |
+| Bench #12 | Added Edit and Change driver workloads. Frame throughput, per-client memory, seatd response and startup lack a qualified baseline; DSLP-9 and DSLP-10 track them. [Workloads and limits](docs/bench.md). Wall time and CI minutes not retained. |
+| Caps #13 | Fixed DSLP-6 with limits and destroy/reuse checks. Wall time and CI minutes not retained. |
+| Report | Reviewed the cumulative diff, emphasizing caps, destruction, clipping and image/CI entrypoints. Filed DSLP-11; no concrete failing check justified a code fix. Review wall time and CI minutes not retained. |
 
-No retained per-stage CPU profile, allocation profile, syscall/I/O counts,
-operation trace or protocol byte counter explains these outcomes. Cheapest next
-instruments are separate CPU sampling per process, allocation/heap snapshots
-for density, syscall counts for seatd/startup, and frame boundaries plus byte
-counters for damage; all add overhead and must be separate from timed samples.
-No existing comparison gate or enough samples establish a performance verdict;
-no stale numerical gate was found. The idle assertion is a coarse daemon-only
-resource check, not a throughput gate. The image is pinned but its local tag can
-be stale; the driver warns and uses checkout sources, records the image ID and
-creates isolated scratch. Host load, image freshness and cleanup beyond Docker's
-container lifecycle are not established. The driver records exclusions and
-inconclusive timing; it does not run the host-gated idle scenario or Full.
+Method feedback: test resource bounds across parent destruction and rebinding,
+not just child destruction and disconnect. The narrow mutation trial found no
+survivor and cannot assess seat lifetime. Strict lint candidates found no
+setting with both a useful witness and acceptable noise. The bench driver
+records inconclusive timing because it cannot establish host readiness or image
+freshness. No owner walk-back was identified.
 
-
-DSLP-5 closed, Dead code, 2026-11-19, base 03d30cf: Linux ARM64 in the
-pinned Alpine image, nightly-2026-11-09, default and all features, all targets.
-Both `cargo check` runs with `-W dead_code -W unreachable_pub` report no such
-warnings. Cargo warns that `xkbcommon` is unused with all features: the
-`oracle` integration test uses it (`tinyland/tests/kbvm_oracle.rs:41`); it is
-not a runtime dependency. cargo-machete 0.10.1 found no unused dependencies.
-
-- Removed the unread `Daemon.sock` test-harness field: both constructors pass
-  the socket to the child and tests use their own path; Drop only uses the
-  child (`seatd/harness/adversarial.rs:14-65`). The adversarial suite passed.
-- Restricted the keyboard lookup table and `key_utf8` to unit tests: the
-  keymap tests call them (`tinyland/src/input.rs:541`); the compositor sends
-  keycodes and keymap to clients, and no runtime caller translates to UTF-8.
-  The previous `reset_stuck` suppression was unnecessary: suspend paths call
-  it (`tinyland/src/server.rs:898`, `tinyland/src/server/remote.rs:232`).
-- Narrowed 109 unreachable public declarations to crate or parent visibility.
-  Their modules are private (`tinyland/src/lib.rs:1-11`); the compositor server
-  uses their input, damage, seat, selection, positioning, shell, shm and
-  surface operations (`tinyland/src/server.rs:1-9`), and its dispatch and
-  pointer helpers are internal. No exported protocol crate API was removed.
-  Server lifecycle tests consume the remote transport test helpers
-  (`tinyland/src/server/tests/lifecycle.rs:433` and :610).
-
-Checked workspace manifests, entry points, feature gates, registrations,
-scripts and references for the removals; no external consumer or package
-reference to the removed private fields exists. `make test` and `make lint`
-passed; no downstream bctl candidate test was run because its public API and
-wire contracts are unchanged. Real devices, VT, VM and oracle runtime remain
-unqualified. No owner walk-back was identified. The structural debloat review
-was limited to the changed mechanisms and their callers; a complete structural
-sweep of every subsystem was not performed.
-
-Tests (DSLP-4): [docs/deslop-tests.md](docs/deslop-tests.md) maps the critical
-contracts to their protecting tests. New boundary tests pin the per-client
-region object and rectangle limits and the shm backing-file size boundary;
-each fails with its fault injected. A bounded cargo-mutants trial on the
-region-object guard (32 runner-seconds) found no survivor. Ephemeral coverage
-reported 77.76% lines and 58.56% branches. No retained mutation or coverage
-lane is added: cargo-mutants and cargo-llvm-cov are not on the crate mirror.
-
-Ground, 2026-11-19, base 109c678: the pinned Alpine suite passed on Linux
-ARM64 under Docker on macOS ARM64. With an initially empty persistent Linux
-kache cache and fresh Cargo target each time, `make test` took 49.69s cold and
-17.41s warm. `make lint` passed strict Clippy in 54.64s including an image
-rebuild. The host was busy, so these are observations, not performance gates.
-The suite leaves idle timing and keymap regeneration ignored; device, VT, guest,
-oracle, and downstream qualification remain separate. No vendored source trees
-are tracked; the generated keymap provenance is recorded in AGENTS.md.
-
-Diagnose, 2026-11-19, base 5a58058: reviewed the untrusted-input and privilege
-paths through the ultrareview lenses (os-boundaries, security, error-model,
-lifecycle-concurrency, durable-state). Read and assessed: Wayland request
-dispatch and commit transactions, shm pool and buffer geometry and fd handling,
-damage arithmetic, the remote protocol reader and writer, seatd admission,
-device path resolution and identity checks, the SCM_RIGHTS transport, the
-session and VT state machine, and the compositor's per-client caps. Filed
-DSLP-6 (P2, uncapped positioner and pointer creation), DSLP-7 (P3, seatd spins
-on accept failure), and DSLP-8 (P3, remote damage area unbounded); each was
-reproduced against the built product with a headless compositor client, the
-pinned-image daemon, or the remote-protocol reader before filing. Not covered:
-real DRM devices, VT transitions and logind signals, libseat ABI compatibility
-against an external client, the WLCS adapter, the QEMU guest proofs, downstream
-bctl, and performance. One observation is recorded here and not filed because it
-was not reproduced: `Region::contains` (tinyland/src/surface.rs:31-44) takes the
-last matching operation, so subtract-then-add of overlapping rectangles keeps
-the subtracted area, unlike the order-independent set semantics of `wl_region`.
-
-DSLP-3 closed, Types, 2026-11-19, base 7d1bb584: measured each Rust strict-profile
-candidate in the pinned Alpine image using workspace all-target Clippy, one
-`-W` candidate per run. Counts below are unique primary diagnostic locations
-across all targets (including tests); production counts exclude harnesses, test
-files and inline test modules. There are 16,643 tracked Rust lines, so more than
-three false positives exceeds one per 5,000 lines. No new profile setting was
-adopted; the existing `-D warnings` profile remains clean.
-
-- `unsafe_code`: 126 total, 61 production; reject `forbid`: daemon and shared
-  transport use libc for actual FD, socket, VT and device operations.
-- `wildcard_enum_match_arm`: 10 total, 9 production; reject: fallback cases
-  include Wayland protocol enums and intentionally ignore unsupported requests.
-- `match_wildcard_for_single_variants`: 0; reject, no defect or hatch witness.
-- `cast_possible_truncation`: 97 total, 51 production; reject: bounded wire
-  lengths and clipped geometry yield many findings. Four geometry casts were
-  replaced with checked conversions, but the setting exceeds the noise budget.
-- `cast_sign_loss`: 83 total, 39 production; reject: e.g. recvmsg's negative
-  result is handled before its conversion; other validated dimensions recur.
-- `unwrap_used`: 666 total, 36 production; reject: guarded map/FD invariants and
-  fixed-width slice conversions produce numerous findings. Tests account for
-  most occurrences; no test policy was adopted.
-- `expect_used`: 46 total, 7 production; reject: internal lifecycle invariants
-  and infallible fixed error strings are flagged; test assertions dominate.
-- `redundant_clone`: 8 total; reject: no demonstrated type defect or escape
-  hatch removed by this setting; clone elimination is outside this type audit.
-- `needless_pass_by_value`: 4 total; reject: ownership can itself be intentional
-  (shutdown consumes the server), and no type defect or hatch was demonstrated.
-
-The clipped damage coordinate contract formerly depended on four unchecked
-signed-to-unsigned casts. `damage::clip` now uses checked conversions after its
-intersection guard; its existing clipping test and a large-coordinate boundary
-witness cover the result. The old bounds establish that all four conversions
-succeed when the guard passes, so this does not change accepted geometry.
-First-party Rust lexical counts, excluding harness/test files and text after
-the first `#[cfg(test)]` in each remaining file: unsafe blocks 60 -> 60, allow
-attributes 6 -> 6, unwrap/expect 44 -> 44, `as` tokens 276 -> 272. Whole
-tracked Rust counts respectively: 132 -> 132, 7 -> 7, 726 -> 726, 440 -> 436.
-These conservative lexical counts may include comments and `as` import aliases;
-the production approximation excludes any code after an inline test module. DSLP-6, DSLP-7 and DSLP-8 remain open. Remaining
-leads, ranked: seatd FD lifecycle unwraps, compositor surface-map unwraps,
-and shm validated signed dimensions; these need separate contract tracing.
-Real devices, VT transitions, downstream bctl and performance are unqualified;
-this change preserves the public and wire contracts.
+Shared-file gaps: the crate mirror lacks `cargo-mutants` and `cargo-llvm-cov`,
+so no retained coverage or mutation lane was qualified. Mirror both tools and
+qualify a bounded recipe with negative controls before adding a lane. The
+region trial and coverage report used ephemeral tools, not a CI guarantee.
 
 ## Tickets
 
@@ -189,5 +95,15 @@ this change preserves the public and wire contracts.
 - **Problem:** The switch storm checks 60 completed transitions and post-cleanup daemon RSS and descriptors, not per-client retained or peak memory, latency or throughput. The ignored idle test samples only daemon CPU ticks and voluntary switches over five seconds. Neither component has a startup measurement or an interleaved baseline; regressions in these outcomes can go unnoticed.
 - **Recommendation:** Add representative client-density, request-response and startup journeys with completion checks, per-process and container memory scope, operation counts, gated interleaved samples and an accepted reference. Use separate CPU sampling, allocation and syscall tracing for attribution; document overhead and host validity.
 - **Fix with:** bench-pyramid
+- **Effort:** M
+
+
+### DSLP-11 · P3 · Retire destroyed seats without losing input object accounting
+
+- **Area:** Resource lifecycle
+- **Where:** tinyland/src/server/dispatch_impl.rs:675-703, :717-740, :772-779, :796-831
+- **Problem:** The seat destroyed callback does nothing, so State.seats retains seat records after release or disconnect. On seat release, input children may remain live and their vectors remain attached to the retained seat. The new pointer and keyboard limits are per seat, while seat admission counts only resources whose client lookup succeeds. Rebinding after release may therefore evade the intended per-client resource bound; repeated disconnects also retain seat records. The current disconnect test checks emptied input vectors but not removal of the seat. The rebind impact has not been reproduced.
+- **Recommendation:** Exercise release, rebind and disconnect with live pointer and keyboard children, then account for their actual lifetimes and retire seat state without losing live input resources. Assert bounded retained state and continued input delivery.
+- **Fix with:** lifecycle-concurrency
 - **Effort:** M
 
