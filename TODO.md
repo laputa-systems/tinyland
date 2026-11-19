@@ -1,5 +1,5 @@
 Prefix: TINY
-Next: 16
+Next: 17
 
 # Open work
 
@@ -51,4 +51,13 @@ qualification. Runtime proof gaps are stated in each ticket.
 - **Recommendation:** Add an explicit upstream remote-only build configuration that excludes unused physical device plumbing without duplicating compositor ownership in bctl. Preserve the physical backend and seatd consumers. Verify Linux remote workspace/render/input/clipboard/lifecycle tests, inspect dependency closure, then pin and qualify the downstream Nanos image in both modes.
 - **Fix with:** `api-surface-and-module-boundaries`
 - **Effort:** M
+
+### TINY-16 · P3 · seatd's crash-reclaim admission test fails intermittently
+
+- **Area:** Tests
+- **Where:** `seatd/src/admit.rs`, `admit::tests::crash_without_unlink_is_reclaimed_by_next_owner`
+- **Problem:** On 2026-11-18 one `cargo test --locked --workspace` run in the pinned test image failed this test at `seatd/src/admit.rs:434`, and an immediate rerun of `cargo test -p seatd --lib` passed all 49 tests. No seatd code had changed. A flaky test can hide a real admission regression or block unrelated changes.
+- **Recommendation:** Run the test in a loop to measure its failure rate, find the timing or shared-state assumption that the assertion depends on, and make the test deterministic without weakening what it checks.
+- **Fix with:** `root-cause`
+- **Effort:** S
 
