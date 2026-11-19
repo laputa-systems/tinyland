@@ -16,6 +16,14 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
 
 ## Verification
 
+- Edit: a named test in the pinned image (`region_`: 0.13s execution,
+  build separate). Change: `make test` (ground 17.41s warm; candidate 22.54s,
+  both observed on a busy host); `make lint` candidate 18.07s. Scenario:
+  adversarial and differential harnesses (3.60s and 0.20s execution at ground).
+  Full: real device, VT, VM, oracle and downstream qualification are separate.
+- Critical contract and test map, mutation and coverage observations, and
+  unverified boundaries: [Tests pass](docs/deslop-tests.md).
+
 - `make test` runs the locked workspace suite in pinned Alpine with Linux kache and mold.
   `make test-ci` aliases it. `make lint` runs strict workspace Clippy in the image.
   On Linux ARM64 under Docker on macOS ARM64, observed cold and warm kache runs

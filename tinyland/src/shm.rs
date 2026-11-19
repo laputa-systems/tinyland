@@ -174,6 +174,16 @@ mod lifetime_tests {
     use std::os::unix::fs::FileExt;
 
     #[test]
+    fn pool_rejects_a_backing_file_shorter_than_its_declared_size() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(15).unwrap();
+        assert!(ShmPoolData::new(file, 16).is_err());
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(16).unwrap();
+        assert!(ShmPoolData::new(file, 16).is_ok());
+    }
+
+    #[test]
     fn grown_pool_accepts_buffers_in_the_extended_range() {
         let file = tempfile::tempfile().unwrap();
         file.set_len(2304).unwrap();
