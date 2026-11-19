@@ -9,19 +9,19 @@ const MAX_TRANSFERS: usize = 16;
 const TRANSFER_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
-pub struct DataSourceData {
+pub(crate) struct DataSourceData {
     pub resource: wl_data_source::WlDataSource,
     pub mime_types: Vec<String>,
 }
 
 #[derive(Debug)]
-pub enum Offer {
+pub(crate) enum Offer {
     Client(wl_data_source::WlDataSource),
     Host(Arc<[u8]>),
 }
 
 #[derive(Debug)]
-pub struct Transfer {
+pub(crate) struct Transfer {
     offer: ObjectId,
     fd: OwnedFd,
     bytes: Arc<[u8]>,
@@ -30,7 +30,7 @@ pub struct Transfer {
 }
 
 #[derive(Debug, Default)]
-pub struct SelectionState {
+pub(crate) struct SelectionState {
     pub sources: HashMap<ObjectId, DataSourceData>,
     pub devices: HashMap<ObjectId, wl_data_device::WlDataDevice>,
     pub offers: HashMap<ObjectId, Offer>,
@@ -40,7 +40,7 @@ pub struct SelectionState {
 }
 
 impl SelectionState {
-    pub fn replace(&mut self, next: Option<ObjectId>) {
+    pub(crate) fn replace(&mut self, next: Option<ObjectId>) {
         if let Some(id) = self.selection.take() {
             if let Some(old) = self.sources.get(&id) { old.resource.cancelled(); }
         }
@@ -50,7 +50,7 @@ impl SelectionState {
         self.selection = next;
     }
 
-    pub fn receive_host(&mut self, offer: ObjectId, fd: OwnedFd, bytes: Arc<[u8]>) {
+    pub(crate) fn receive_host(&mut self, offer: ObjectId, fd: OwnedFd, bytes: Arc<[u8]>) {
         if self.transfers.len() >= MAX_TRANSFERS { return; }
         let Ok(stat) = rustix::fs::fstat(&fd) else { return; };
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo { return; }
@@ -61,11 +61,11 @@ impl SelectionState {
         self.transfers.push(Transfer { offer, fd, bytes, written: 0, deadline: Instant::now() + TRANSFER_DEADLINE });
     }
 
-    pub fn poll_fds(&self) -> Vec<rustix::event::PollFd<'_>> {
+    pub(crate) fn poll_fds(&self) -> Vec<rustix::event::PollFd<'_>> {
         self.transfers.iter().map(|transfer| rustix::event::PollFd::new(&transfer.fd, rustix::event::PollFlags::OUT)).collect()
     }
 
-    pub fn service_transfers(&mut self) {
+    pub(crate) fn service_transfers(&mut self) {
         let now = Instant::now();
         self.transfers.retain_mut(|transfer| {
             if now >= transfer.deadline { return false; }
@@ -82,7 +82,7 @@ impl SelectionState {
         });
     }
 
-    pub fn remove_offer(&mut self, id: &ObjectId) {
+    pub(crate) fn remove_offer(&mut self, id: &ObjectId) {
         self.offers.remove(id);
         self.transfers.retain(|transfer| &transfer.offer != id);
     }

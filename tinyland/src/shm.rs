@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShmFormat {
+pub(crate) enum ShmFormat {
     Argb8888,
     Xrgb8888,
     Abgr8888,
@@ -8,25 +8,25 @@ pub enum ShmFormat {
 
 impl ShmFormat {
     /// Byte offsets of the blue, green and red channels inside one pixel.
-    pub fn channel_offsets(self) -> (usize, usize, usize) {
+    pub(crate) fn channel_offsets(self) -> (usize, usize, usize) {
         match self {
             Self::Argb8888 | Self::Xrgb8888 => (0, 1, 2),
             Self::Abgr8888 | Self::Xbgr8888 => (2, 1, 0),
         }
     }
 
-    pub fn has_alpha(self) -> bool {
+    pub(crate) fn has_alpha(self) -> bool {
         matches!(self, Self::Argb8888 | Self::Abgr8888)
     }
 }
 
-pub struct ShmPoolData {
+pub(crate) struct ShmPoolData {
     pub file: std::sync::Arc<std::fs::File>,
     pub size: i64,
 }
 
 impl ShmPoolData {
-    pub fn new(file: std::fs::File, size: i32) -> Result<Self, String> {
+    pub(crate) fn new(file: std::fs::File, size: i32) -> Result<Self, String> {
         validate_pool_size(size)?;
         if file.metadata().map_err(|e| format!("pool metadata: {e}"))?.len() < size as u64 {
             return Err("pool size exceeds backing file".into());
@@ -34,7 +34,7 @@ impl ShmPoolData {
         Ok(Self { file: std::sync::Arc::new(file), size: size as i64 })
     }
 
-    pub fn resize(&mut self, size: i32) -> Result<(), String> {
+    pub(crate) fn resize(&mut self, size: i32) -> Result<(), String> {
         if size as i64 <= self.size { return Err("pool resize must grow".into()); }
         if self.file.metadata().map_err(|e| format!("pool metadata: {e}"))?.len() < size as u64 {
             return Err("pool resize exceeds backing file".into());
@@ -44,7 +44,7 @@ impl ShmPoolData {
     }
 }
 
-pub struct ShmBufferData {
+pub(crate) struct ShmBufferData {
     pub file: std::sync::Arc<std::fs::File>,
     pub offset: i32,
     pub width: i32,
@@ -54,21 +54,21 @@ pub struct ShmBufferData {
 }
 
 #[derive(Debug, Clone)]
-pub struct SurfacePixels {
+pub(crate) struct SurfacePixels {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub format: ShmFormat,
 }
 
-pub fn validate_pool_size(size: i32) -> Result<usize, &'static str> {
+pub(crate) fn validate_pool_size(size: i32) -> Result<usize, &'static str> {
     if size <= 0 {
         return Err("pool size must be positive");
     }
     Ok(size as usize)
 }
 
-pub fn validate_buffer(
+pub(crate) fn validate_buffer(
     pool_size: i64,
     offset: i32,
     width: i32,
@@ -100,7 +100,7 @@ pub fn validate_buffer(
     Ok(())
 }
 
-pub fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
+pub(crate) fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
     use std::os::unix::fs::FileExt;
     let wbytes = buf.width as usize * 4;
     let total = wbytes.checked_mul(buf.height as usize).ok_or("buffer size overflow")?;
@@ -118,7 +118,7 @@ pub fn read_rows(buf: &ShmBufferData) -> Result<SurfacePixels, String> {
 
 /// Replaces `pixels` inside `rects` (clipped to the buffer) with the buffer's current rows there.
 /// `pixels` must already hold this buffer's size and format.
-pub fn read_rects(buf: &ShmBufferData, pixels: &mut SurfacePixels, rects: &[crate::positioner::Rect]) -> Result<(), String> {
+pub(crate) fn read_rects(buf: &ShmBufferData, pixels: &mut SurfacePixels, rects: &[crate::positioner::Rect]) -> Result<(), String> {
     use std::os::unix::fs::FileExt;
     if pixels.width != buf.width as u32 || pixels.height != buf.height as u32 || pixels.format != buf.format {
         return Err("partial read into a differently shaped surface".into());

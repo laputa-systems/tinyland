@@ -11,24 +11,24 @@ enum RegionOp {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Region {
+pub(crate) struct Region {
     ops: Vec<(RegionOp, Rect)>,
 }
 
 impl Region {
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.ops.len()
     }
 
-    pub fn add(&mut self, rect: Rect) {
+    pub(crate) fn add(&mut self, rect: Rect) {
         self.ops.push((RegionOp::Add, rect));
     }
 
-    pub fn subtract(&mut self, rect: Rect) {
+    pub(crate) fn subtract(&mut self, rect: Rect) {
         self.ops.push((RegionOp::Subtract, rect));
     }
 
-    pub fn contains(&self, x: f64, y: f64) -> bool {
+    pub(crate) fn contains(&self, x: f64, y: f64) -> bool {
         self.ops
             .iter()
             .rev()
@@ -38,7 +38,7 @@ impl Region {
 }
 
 #[derive(Debug, Default)]
-pub struct PendingState {
+pub(crate) struct PendingState {
     pub buffer: Option<Option<ObjectId>>,
     /// Damage and DamageBuffer since the last commit, in buffer pixels.
     pub damage: Damage,
@@ -47,7 +47,7 @@ pub struct PendingState {
 }
 
 #[derive(Debug, Default)]
-pub struct SurfaceUpdate {
+pub(crate) struct SurfaceUpdate {
     pub pixels: Option<Option<SurfacePixels>>,
     /// Where `pixels` differ from the pixels it replaces, in buffer pixels.
     pub damage: Damage,
@@ -56,7 +56,7 @@ pub struct SurfaceUpdate {
 }
 
 impl SurfaceUpdate {
-    pub fn merge(&mut self, mut newer: Self) {
+    pub(crate) fn merge(&mut self, mut newer: Self) {
         if newer.pixels.is_some() { self.pixels = newer.pixels; self.damage.merge(&newer.damage); }
         if newer.input_region.is_some() { self.input_region = newer.input_region; }
         self.callbacks.append(&mut newer.callbacks);
@@ -64,7 +64,7 @@ impl SurfaceUpdate {
 }
 
 #[derive(Debug)]
-pub struct SurfaceData {
+pub(crate) struct SurfaceData {
     pub resource: wl_surface::WlSurface,
     pub pending: PendingState,
     pub cached: Option<SurfaceUpdate>,
@@ -90,7 +90,7 @@ pub struct SurfaceData {
 }
 
 impl SurfaceData {
-    pub fn new(resource: wl_surface::WlSurface) -> Self {
+    pub(crate) fn new(resource: wl_surface::WlSurface) -> Self {
         let id = resource.id();
         Self {
             resource, pending: PendingState::default(), cached: None, cached_pos: None,
@@ -101,7 +101,7 @@ impl SurfaceData {
         }
     }
 
-    pub fn apply(&mut self, mut update: SurfaceUpdate) {
+    pub(crate) fn apply(&mut self, mut update: SurfaceUpdate) {
         if let Some(pixels) = update.pixels { self.pixels = pixels; self.damage.merge(&update.damage); }
         if let Some(region) = update.input_region { self.input_region = region; }
         self.callbacks.append(&mut update.callbacks);
