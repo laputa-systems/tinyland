@@ -79,6 +79,12 @@ pub const MAX_DEVICES_PER_CLIENT: usize = 16;
 pub const MAX_SEATS_PER_CLIENT: usize = 8;
 pub const MAX_OUTPUTS_PER_CLIENT: usize = 8;
 pub const MAX_REGIONS_PER_CLIENT: usize = 32;
+/// Allows many simultaneous popup positioners while bounding client-owned objects.
+pub const MAX_POSITIONERS_PER_CLIENT: usize = 128;
+/// Allows multiple input consumers per seat while bounding client-owned objects.
+pub const MAX_POINTERS_PER_SEAT: usize = 32;
+/// Allows multiple input consumers per seat while bounding client-owned objects.
+pub const MAX_KEYBOARDS_PER_SEAT: usize = 32;
 pub const MAX_REGION_RECTS: usize = 128;
 /// Output rectangles per presented frame; more are sent as their bounding box.
 const MAX_OUTPUT_DAMAGE_RECTS: usize = 16;
