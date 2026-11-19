@@ -2,13 +2,28 @@
 //! instead of as pixels. Scrolling repaints a whole viewport whose rows mostly reappear a few rows away.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use tinyland_remote::{Move, Rect, Size};
+
+/// Passes a row hash through unchanged: map keys here are already hashes.
+#[derive(Default)]
+struct Identity(u64);
+
+impl Hasher for Identity {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, bytes: &[u8]) { for &b in bytes { self.0 = self.0.rotate_left(8) ^ u64::from(b); } }
+    fn write_u64(&mut self, n: u64) { self.0 = n; }
+}
+
+type HashedMap<V> = HashMap<u64, V, BuildHasherDefault<Identity>>;
 
 /// Width of the column bands rows are hashed in. A scrollbar or other column that changes differently from the
 /// scrolled content only spoils its own band.
 const BAND: u32 = 64;
 /// The fewest rows worth sending as a move.
 const MIN_ROWS: u32 = 32;
+/// A row whose hash appears more often than this in the shipped band, such as a flat background, does not vote.
+const MAX_CANDIDATES: usize = 4;
 /// Rectangles one damaged rectangle may become; with more, it is sent whole.
 const MAX_PIECES: usize = 4;
 
@@ -17,6 +32,8 @@ pub struct Shipped {
     size: Size,
     pixels: Vec<u8>,
     hashes: Vec<u64>,
+    /// Row hashes of the frame being planned, for [`Shipped::record`] to keep; `None` where not computed.
+    fresh: Vec<Option<u64>>,
 }
 
 fn hash(row: &[u8]) -> u64 {
@@ -29,8 +46,9 @@ fn hash(row: &[u8]) -> u64 {
 
 impl Shipped {
     pub fn new(size: Size) -> Self {
-        let mut shipped = Self { size, pixels: vec![0; size.pixel_len()], hashes: Vec::new() };
+        let mut shipped = Self { size, pixels: vec![0; size.pixel_len()], hashes: Vec::new(), fresh: Vec::new() };
         shipped.hashes = (0..size.height()).flat_map(|y| (0..shipped.bands()).map(move |b| (y, b))).map(|(y, b)| shipped.band_hash(&shipped.pixels, y, b)).collect();
+        shipped.fresh = vec![None; shipped.hashes.len()];
         shipped
     }
 
@@ -50,7 +68,7 @@ impl Shipped {
     /// Splits `rects`, the damage of `current` since the shipped output, into moves of shipped pixels and the
     /// rectangles still to send. Applying the moves to the shipped output, then the returned rectangles of
     /// `current`, reproduces `current` inside `rects`.
-    pub fn plan(&self, current: &[u8], rects: &[Rect]) -> (Vec<Move>, Vec<Rect>) {
+    pub fn plan(&mut self, current: &[u8], rects: &[Rect]) -> (Vec<Move>, Vec<Rect>) {
         let (mut moves, mut rest) = (Vec::new(), Vec::new());
         for (i, &r) in rects.iter().enumerate() {
             let overlaps = rects.iter().enumerate().any(|(j, o)| j != i && r.x < o.x + o.width && o.x < r.x + r.width && r.y < o.y + o.height && o.y < r.y + r.height);
@@ -62,23 +80,27 @@ impl Shipped {
         (moves, rest)
     }
 
-    fn plan_rect(&self, current: &[u8], r: Rect) -> Option<(Vec<Move>, Vec<Rect>)> {
+    fn plan_rect(&mut self, current: &[u8], r: Rect) -> Option<(Vec<Move>, Vec<Rect>)> {
         let (first_band, last_band) = (r.x / BAND, (r.x + r.width - 1) / BAND);
         let bands = self.bands();
         let mut votes: HashMap<i64, u32> = HashMap::new();
+        let mut previous: HashedMap<Vec<u32>> = HashedMap::default();
         for band in first_band..=last_band {
-            let mut previous: HashMap<u64, Option<u32>> = HashMap::new();
+            previous.clear();
             for y in r.y..r.y + r.height {
-                previous.entry(self.hashes[(y * bands + band) as usize]).and_modify(|seen| *seen = None).or_insert(Some(y));
+                let rows = previous.entry(self.hashes[(y * bands + band) as usize]).or_default();
+                if rows.len() <= MAX_CANDIDATES { rows.push(y); }
             }
             for y in r.y..r.y + r.height {
-                if let Some(Some(from)) = previous.get(&self.band_hash(current, y, band)) {
-                    if *from != y { *votes.entry(i64::from(*from) - i64::from(y)).or_default() += 1; }
-                }
+                let now = self.band_hash(current, y, band);
+                self.fresh[(y * bands + band) as usize] = Some(now);
+                let Some(rows) = previous.get(&now) else { continue };
+                if rows.len() > MAX_CANDIDATES { continue; }
+                for &from in rows.iter().filter(|&&from| from != y) { *votes.entry(i64::from(from) - i64::from(y)).or_default() += 1; }
             }
         }
         let (dy, count) = votes.into_iter().max_by_key(|&(dy, count)| (count, -dy.abs()))?;
-        if count < MIN_ROWS.max(r.height * (last_band - first_band + 1) / 8) { return None; }
+        if count < MIN_ROWS { return None; }
         let columns = |band: u32| ((band * BAND).max(r.x), ((band + 1) * BAND).min(r.x + r.width));
         let same = |band: u32, y: u32| {
             let from = i64::from(y) + dy;
@@ -127,7 +149,8 @@ impl Shipped {
             }
             for y in r.y..r.y + r.height {
                 for band in r.x / BAND..=(r.x + r.width - 1) / BAND {
-                    self.hashes[(y * bands + band) as usize] = self.band_hash(current, y, band);
+                    let at = (y * bands + band) as usize;
+                    self.hashes[at] = match self.fresh[at].take() { Some(h) => h, None => self.band_hash(current, y, band) };
                 }
             }
         }
@@ -172,6 +195,24 @@ mod tests {
         assert!(moves[0].width < 300, "the scrollbar's band does not move");
         let sent: u32 = rects.iter().map(|r| r.width * r.height).sum();
         assert!(sent < 300 * 240 / 3);
+        assert_eq!(rebuild(size, &before, &after, &moves, &rects), after);
+    }
+
+    #[test]
+    fn flat_blocks_with_short_labels_still_scroll_as_a_move() {
+        let size = Size::new(320, 400).unwrap();
+        let block = |y: u32, x: u32| -> [u8; 4] {
+            let (i, within) = (y / 40, y % 40);
+            if x < 60 && (10..30).contains(&within) && (x * 7 + within * 3 + i) % 5 == 0 { [0, 0, 0, 0] } else { [(i * 7) as u8, (i * 13) as u8, 200, 0] }
+        };
+        let render = |top: u32| -> Vec<u8> { (0..400).flat_map(|y| (0..320).flat_map(move |x| block(y + top, x))).collect() };
+        let (before, after) = (render(0), render(37));
+        let whole = [Rect { x: 0, y: 0, width: 320, height: 400 }];
+        let mut shipped = Shipped::new(size);
+        shipped.record(&before, &whole);
+        let (moves, rects) = shipped.plan(&after, &whole);
+        assert!(!moves.is_empty(), "the scrolled blocks move");
+        assert!(rects.iter().map(|r| r.width * r.height).sum::<u32>() < 320 * 400 / 4);
         assert_eq!(rebuild(size, &before, &after, &moves, &rects), after);
     }
 
