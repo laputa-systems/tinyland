@@ -162,43 +162,49 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
         }
         4 if size.is_some() && len >= 12 => {
             let size = size.unwrap();
-            let mut head = [0; 12]; reader.read_exact(&mut head)?;
-            let count = u32_at(&head, 8) as usize;
+            let mut body = vec![0; len]; reader.read_exact(&mut body)?;
+            let count = u32_at(&body, 8) as usize;
             if count > MAX_DAMAGE_RECTS || len < 12 + count * 16 { return Err(invalid()); }
-            let mut table = vec![0; count * 16]; reader.read_exact(&mut table)?;
-            let rects: Vec<Rect> = table.chunks_exact(16).map(|b| Rect { x: u32_at(b, 0), y: u32_at(b, 4), width: u32_at(b, 8), height: u32_at(b, 12) }).collect();
+            let rects: Vec<Rect> = body[12..12 + count * 16].chunks_exact(16).map(|b| Rect { x: u32_at(b, 0), y: u32_at(b, 4), width: u32_at(b, 8), height: u32_at(b, 12) }).collect();
             if !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
-            let mut remaining = len - 12 - count * 16;
+            let mut at = 12 + count * 16;
             let mut out = Vec::with_capacity(count);
             for rect in rects {
-                let mut pixels = vec![0; rect.pixel_len()];
-                let stride = rect.width as usize * 4;
-                for (tx, ty, tw, th) in tiles(rect) {
-                    let mut kind = [0; 1];
-                    remaining = remaining.checked_sub(1).ok_or_else(invalid)?; reader.read_exact(&mut kind)?;
-                    match kind[0] {
+                let (columns, rows) = tile_grid(rect);
+                let mut solids = Vec::with_capacity(columns * rows);
+                for _ in 0..columns * rows {
+                    match *body.get(at).ok_or_else(invalid)? {
+                        TILE_RAW => { solids.push(None); at += 1; }
                         TILE_SOLID => {
-                            let mut pixel = [0; 4];
-                            remaining = remaining.checked_sub(4).ok_or_else(invalid)?; reader.read_exact(&mut pixel)?;
-                            for y in ty..ty + th {
-                                let row = y * stride + tx * 4;
-                                for p in pixels[row..row + tw * 4].chunks_exact_mut(4) { p.copy_from_slice(&pixel); }
-                            }
-                        }
-                        TILE_RAW => {
-                            remaining = remaining.checked_sub(tw * th * 4).ok_or_else(invalid)?;
-                            for y in ty..ty + th {
-                                let row = y * stride + tx * 4;
-                                reader.read_exact(&mut pixels[row..row + tw * 4])?;
-                            }
+                            let pixel: [u8; 4] = body.get(at + 1..at + 5).ok_or_else(invalid)?.try_into().unwrap();
+                            solids.push(Some(pixel)); at += 5;
                         }
                         _ => return Err(invalid()),
                     }
                 }
+                let stride = rect.width as usize * 4;
+                let mut pixels = vec![0; rect.pixel_len()];
+                for y in 0..rect.height as usize {
+                    let tile_row = &solids[y / DAMAGE_TILE as usize * columns..][..columns];
+                    for (x0, x1) in raw_spans(rect, tile_row) {
+                        let span = body.get(at..at + (x1 - x0) * 4).ok_or_else(invalid)?;
+                        pixels[y * stride + x0 * 4..y * stride + x1 * 4].copy_from_slice(span);
+                        at += span.len();
+                    }
+                }
+                for (index, pixel) in solids.iter().enumerate() {
+                    let Some(pixel) = pixel else { continue };
+                    let (tx, ty) = ((index % columns) * DAMAGE_TILE as usize, (index / columns) * DAMAGE_TILE as usize);
+                    let tw = (DAMAGE_TILE as usize).min(rect.width as usize - tx);
+                    let th = (DAMAGE_TILE as usize).min(rect.height as usize - ty);
+                    let first = ty * stride + tx * 4;
+                    for p in pixels[first..first + tw * 4].chunks_exact_mut(4) { p.copy_from_slice(pixel); }
+                    for y in ty + 1..ty + th { pixels.copy_within(first..first + tw * 4, y * stride + tx * 4); }
+                }
                 out.push((rect, pixels));
             }
-            if remaining != 0 { return Err(invalid()); }
-            Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), rects: out }))
+            if at != len { return Err(invalid()); }
+            Ok(Some(CompositorMessage::Damage { serial: u64_at(&body, 0), rects: out }))
         }
         _ => Err(invalid()),
     }
@@ -238,10 +244,23 @@ pub fn write_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuff
     Ok(())
 }
 
-/// The tiles of `rect` as (x, y, width, height) relative to its origin, row by row.
-fn tiles(rect: Rect) -> impl Iterator<Item = (usize, usize, usize, usize)> {
-    let (w, h, t) = (rect.width as usize, rect.height as usize, DAMAGE_TILE as usize);
-    (0..h.div_ceil(t)).flat_map(move |row| (0..w.div_ceil(t)).map(move |col| (col * t, row * t, t.min(w - col * t), t.min(h - row * t))))
+/// Columns and rows of [`DAMAGE_TILE`]-sized tiles covering `rect`, from its origin.
+fn tile_grid(rect: Rect) -> (usize, usize) {
+    (rect.width.div_ceil(DAMAGE_TILE) as usize, rect.height.div_ceil(DAMAGE_TILE) as usize)
+}
+
+/// Pixel ranges, relative to the rectangle's left edge, that one row of `rect` sends raw: the runs of tiles in
+/// `tile_row` that are not solid.
+fn raw_spans(rect: Rect, tile_row: &[Option<[u8; 4]>]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let (tile, width) = (DAMAGE_TILE as usize, rect.width as usize);
+    let mut column = 0;
+    std::iter::from_fn(move || {
+        while column < tile_row.len() && tile_row[column].is_some() { column += 1; }
+        if column == tile_row.len() { return None; }
+        let start = column;
+        while column < tile_row.len() && tile_row[column].is_none() { column += 1; }
+        Some((start * tile, (column * tile).min(width)))
+    })
 }
 
 /// The pixel every pixel of a tile equals, if there is one.
@@ -252,16 +271,25 @@ fn solid_pixel(framebuffer: &[u8], stride: usize, x: usize, y: usize, w: usize, 
 }
 
 /// Writes a damage message like [`write_damage`], sending each [`DAMAGE_TILE`]-sized tile of a single colour as
-/// one pixel. Readers return the same [`CompositorMessage::Damage`].
+/// one pixel. Each rectangle carries a table of its tiles, one kind byte each and the pixel of solid tiles, then
+/// its other pixels row by row. Readers return the same [`CompositorMessage::Damage`].
 pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuffer: &[u8], rects: &[Rect]) -> io::Result<()> {
     if framebuffer.len() != size.pixel_len() { return Err(invalid()); }
     if rects.len() > MAX_DAMAGE_RECTS || !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
-    let stride = size.width as usize * 4;
+    let (stride, tile) = (size.width as usize * 4, DAMAGE_TILE as usize);
     let solids: Vec<Vec<Option<[u8; 4]>>> = rects.iter().map(|r| {
-        tiles(*r).map(|(tx, ty, tw, th)| solid_pixel(framebuffer, stride, r.x as usize + tx, r.y as usize + ty, tw, th)).collect()
+        let (columns, rows) = tile_grid(*r);
+        (0..columns * rows).map(|i| {
+            let (tx, ty) = ((i % columns) * tile, (i / columns) * tile);
+            let (tw, th) = (tile.min(r.width as usize - tx), tile.min(r.height as usize - ty));
+            solid_pixel(framebuffer, stride, r.x as usize + tx, r.y as usize + ty, tw, th)
+        }).collect()
     }).collect();
     let body: usize = rects.iter().zip(&solids).map(|(r, kinds)| {
-        tiles(*r).zip(kinds).map(|((_, _, tw, th), solid)| 1 + if solid.is_some() { 4 } else { tw * th * 4 }).sum::<usize>()
+        let (columns, _) = tile_grid(*r);
+        let table: usize = kinds.iter().map(|k| if k.is_some() { 5 } else { 1 }).sum();
+        let raw: usize = (0..r.height as usize).map(|y| raw_spans(*r, &kinds[y / tile * columns..][..columns]).map(|(a, b)| (b - a) * 4).sum::<usize>()).sum();
+        table + raw
     }).sum();
     let len = 12 + rects.len() * 16 + body;
     writer.write_all(&MAGIC)?; writer.write_all(&[4])?;
@@ -270,17 +298,14 @@ pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, fra
     writer.write_all(&(rects.len() as u32).to_le_bytes())?;
     for r in rects { for v in [r.x, r.y, r.width, r.height] { writer.write_all(&v.to_le_bytes())?; } }
     for (rect, kinds) in rects.iter().zip(&solids) {
-        for ((tx, ty, tw, th), solid) in tiles(*rect).zip(kinds) {
-            match solid {
-                Some(pixel) => { writer.write_all(&[TILE_SOLID])?; writer.write_all(pixel)?; }
-                None => {
-                    writer.write_all(&[TILE_RAW])?;
-                    for y in rect.y as usize + ty..rect.y as usize + ty + th {
-                        let start = y * stride + (rect.x as usize + tx) * 4;
-                        writer.write_all(&framebuffer[start..start + tw * 4])?;
-                    }
-                }
-            }
+        for kind in kinds {
+            match kind { Some(pixel) => { writer.write_all(&[TILE_SOLID])?; writer.write_all(pixel)?; } None => writer.write_all(&[TILE_RAW])? }
+        }
+        let (columns, _) = tile_grid(*rect);
+        for y in rect.y as usize..(rect.y + rect.height) as usize {
+            let tile_row = &kinds[(y - rect.y as usize) / tile * columns..][..columns];
+            let row = y * stride + rect.x as usize * 4;
+            for (x0, x1) in raw_spans(*rect, tile_row) { writer.write_all(&framebuffer[row + x0 * 4..row + x1 * 4])?; }
         }
     }
     Ok(())
@@ -364,6 +389,21 @@ mod tests {
         let mut forged = tiled.clone(); forged[9 + 12 + 3 * 16] = 2;
         assert!(read_compositor(&mut &forged[..], Some(size)).is_err());
         assert!(read_compositor(&mut &tiled[..], None).is_err());
+    }
+
+    #[test]
+    fn tiled_damage_splits_rows_around_solid_tiles() {
+        let size = Size::new(200, 130).unwrap();
+        let mut framebuffer = vec![0; size.pixel_len()];
+        for (i, p) in framebuffer.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i % 200, i / 200);
+            p.copy_from_slice(&if (64..128).contains(&x) || (y >= 64 && x >= 180) { [x as u8, y as u8, 3, 4] } else { [1, 2, 3, 4] });
+        }
+        let rects = [Rect { x: 0, y: 0, width: 200, height: 130 }, Rect { x: 30, y: 10, width: 150, height: 100 }];
+        let mut plain = Vec::new(); write_damage(&mut plain, 5, size, &framebuffer, &rects).unwrap();
+        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 5, size, &framebuffer, &rects).unwrap();
+        assert_eq!(read_compositor(&mut &tiled[..], Some(size)).unwrap(), read_compositor(&mut &plain[..], Some(size)).unwrap());
+        assert!(tiled.len() < plain.len());
     }
 
     #[test]
