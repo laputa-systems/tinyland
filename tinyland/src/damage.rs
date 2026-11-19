@@ -38,7 +38,8 @@ pub fn clip(rect: Rect, width: u32, height: u32) -> Option<(u32, u32, u32, u32)>
     let y0 = i64::from(rect.y).max(0);
     let x1 = (i64::from(rect.x) + i64::from(rect.width)).min(i64::from(width));
     let y1 = (i64::from(rect.y) + i64::from(rect.height)).min(i64::from(height));
-    (x0 < x1 && y0 < y1).then_some((x0 as u32, y0 as u32, x1 as u32, y1 as u32))
+    if x0 >= x1 || y0 >= y1 { return None; }
+    Some((u32::try_from(x0).ok()?, u32::try_from(y0).ok()?, u32::try_from(x1).ok()?, u32::try_from(y1).ok()?))
 }
 
 /// `damage` clipped to a `width` x `height` area, with overlapping rectangles united, and at most `limit`
@@ -104,5 +105,7 @@ mod tests {
         assert_eq!(output_rects(&damage, 100, 60, 2), vec![(0, 0, 100, 60)]);
         assert_eq!(output_rects(&Damage::full(), 30, 20, 8), vec![(0, 0, 30, 20)]);
         assert_eq!(clip(rect(i32::MIN, i32::MIN, i32::MAX, i32::MAX), 10, 10), None);
+        assert_eq!(clip(rect(i32::MAX, 0, i32::MAX, 1), u32::MAX, 1),
+            Some((2_147_483_647, 0, u32::MAX - 1, 1)));
     }
 }

@@ -32,18 +32,54 @@ was not reproduced: `Region::contains` (tinyland/src/surface.rs:31-44) takes the
 last matching operation, so subtract-then-add of overlapping rectangles keeps
 the subtracted area, unlike the order-independent set semantics of `wl_region`.
 
+DSLP-3 closed, Types, 2026-11-19, base 7d1bb584: measured each Rust strict-profile
+candidate in the pinned Alpine image using workspace all-target Clippy, one
+`-W` candidate per run. Counts below are unique primary diagnostic locations
+across all targets (including tests); production counts exclude harnesses, test
+files and inline test modules. There are 16,643 tracked Rust lines, so more than
+three false positives exceeds one per 5,000 lines. No new profile setting was
+adopted; the existing `-D warnings` profile remains clean.
+
+- `unsafe_code`: 126 total, 61 production; reject `forbid`: daemon and shared
+  transport use libc for actual FD, socket, VT and device operations.
+- `wildcard_enum_match_arm`: 10 total, 9 production; reject: fallback cases
+  include Wayland protocol enums and intentionally ignore unsupported requests.
+- `match_wildcard_for_single_variants`: 0; reject, no defect or hatch witness.
+- `cast_possible_truncation`: 97 total, 51 production; reject: bounded wire
+  lengths and clipped geometry yield many findings. Four geometry casts were
+  replaced with checked conversions, but the setting exceeds the noise budget.
+- `cast_sign_loss`: 83 total, 39 production; reject: e.g. recvmsg's negative
+  result is handled before its conversion; other validated dimensions recur.
+- `unwrap_used`: 666 total, 36 production; reject: guarded map/FD invariants and
+  fixed-width slice conversions produce numerous findings. Tests account for
+  most occurrences; no test policy was adopted.
+- `expect_used`: 46 total, 7 production; reject: internal lifecycle invariants
+  and infallible fixed error strings are flagged; test assertions dominate.
+- `redundant_clone`: 8 total; reject: no demonstrated type defect or escape
+  hatch removed by this setting; clone elimination is outside this type audit.
+- `needless_pass_by_value`: 4 total; reject: ownership can itself be intentional
+  (shutdown consumes the server), and no type defect or hatch was demonstrated.
+
+The clipped damage coordinate contract formerly depended on four unchecked
+signed-to-unsigned casts. `damage::clip` now uses checked conversions after its
+intersection guard; its existing clipping test and a large-coordinate boundary
+witness cover the result. The old bounds establish that all four conversions
+succeed when the guard passes, so this does not change accepted geometry.
+First-party Rust lexical counts, excluding harness/test files and text after
+the first `#[cfg(test)]` in each remaining file: unsafe blocks 60 -> 60, allow
+attributes 6 -> 6, unwrap/expect 44 -> 44, `as` tokens 276 -> 272. Whole
+tracked Rust counts respectively: 132 -> 132, 7 -> 7, 726 -> 726, 440 -> 436.
+These conservative lexical counts may include comments and `as` import aliases;
+the production approximation excludes any code after an inline test module. DSLP-6, DSLP-7 and DSLP-8 remain open. Remaining
+leads, ranked: seatd FD lifecycle unwraps, compositor surface-map unwraps,
+and shm validated signed dimensions; these need separate contract tracing.
+Real devices, VT transitions, downstream bctl and performance are unqualified;
+this change preserves the public and wire contracts.
+
 ## Tickets
 
 
 
-### DSLP-3 · P2 · Types: strict profile and typing findings
-
-- **Area:** deslop · types
-- **Where:** type checker and lint configuration; Rust/Python sources
-- **Problem:** The strict-profile candidates in the deslop skill's tools reference have not been measured here.
-- **Recommendation:** Run the deslop Types step. Accept: clean at the adopted profile, escape hatches not increased, witnesses recorded.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
 
