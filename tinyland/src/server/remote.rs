@@ -30,12 +30,14 @@ pub(super) struct Transport {
     last_ship: Option<Instant>,
     /// Output damage presented but not yet sent to the host.
     unsent: crate::damage::Damage,
+    /// The output as the host last received it.
+    shipped: Option<crate::moves::Shipped>,
 }
 
 impl Transport {
     #[cfg(test)]
     pub(super) fn test_transport() -> Self {
-        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, deadline: None, serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() }
+        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, deadline: None, serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default(), shipped: None }
     }
 
     fn new(size: Size) -> Result<Self, String> {
@@ -47,7 +49,7 @@ impl Transport {
         }
         let mut outgoing = Vec::new();
         tinyland_remote::write_compositor(&mut outgoing, &CompositorMessage::Ready { size }, None).map_err(|e| e.to_string())?;
-        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() })
+        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default(), shipped: None })
     }
 
     /// The encoded bytes waiting to be written to the host.
@@ -95,7 +97,10 @@ impl Transport {
             .map(|(x0, y0, x1, y1)| tinyland_remote::Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }).collect();
         self.unsent.clear();
         self.outgoing.clear();
-        tinyland_remote::write_tiled_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &rects).map_err(|e| e.to_string())?;
+        let shipped = match &mut self.shipped { Some(shipped) if shipped.size() == size => shipped, slot => slot.insert(crate::moves::Shipped::new(size)) };
+        let (moves, sent) = shipped.plan(&state.framebuffer, &rects);
+        tinyland_remote::write_tiled_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &moves, &sent).map_err(|e| e.to_string())?;
+        shipped.record(&state.framebuffer, &rects);
         self.written = 0;
         self.flight = Some((self.serial, callbacks));
         self.last_ship = Some(now);

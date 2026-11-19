@@ -6,6 +6,8 @@ const MAX_CLIPBOARD: usize = 1024 * 1024;
 pub const MAX_DAMAGE_RECTS: usize = 64;
 /// Edge of the tiles a tiled damage rectangle is cut into, from the rectangle's origin.
 pub const DAMAGE_TILE: u32 = 64;
+/// The most moves one damage message may carry.
+pub const MAX_DAMAGE_MOVES: usize = 64;
 const TILE_RAW: u8 = 0;
 const TILE_SOLID: u8 = 1;
 
@@ -39,10 +41,34 @@ impl Rect {
     fn pixel_len(self) -> usize { self.width as usize * self.height as usize * 4 }
 }
 
-/// `Frame` replaces the whole output. `Damage` replaces only its rectangles, each with its rows of BGRX pixels;
-/// with no rectangles it still asks the host to acknowledge a presentation.
+/// Copies `height` rows of the columns `x..x + width` of the previous output from row `src_y` to row `dst_y`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Move { pub x: u32, pub width: u32, pub src_y: u32, pub dst_y: u32, pub height: u32 }
+
+impl Move {
+    fn inside(self, size: Size) -> bool {
+        Rect { x: self.x, y: self.src_y, width: self.width, height: self.height }.inside(size)
+            && Rect { x: self.x, y: self.dst_y, width: self.width, height: self.height }.inside(size)
+    }
+
+    /// The rectangle this move writes.
+    pub fn destination(self) -> Rect { Rect { x: self.x, y: self.dst_y, width: self.width, height: self.height } }
+
+    /// Applies the move to `pixels`, a whole `size` output of BGRX rows, copying rows in the order that keeps
+    /// overlapping source rows intact.
+    pub fn apply(self, size: Size, pixels: &mut [u8]) {
+        let (stride, span) = (size.width as usize * 4, self.width as usize * 4);
+        let row = |y: u32| y as usize * stride + self.x as usize * 4;
+        let copy = |pixels: &mut [u8], i: u32| { let from = row(self.src_y + i); pixels.copy_within(from..from + span, row(self.dst_y + i)); };
+        if self.dst_y < self.src_y { for i in 0..self.height { copy(pixels, i); } } else { for i in (0..self.height).rev() { copy(pixels, i); } }
+    }
+}
+
+/// `Frame` replaces the whole output. `Damage` first applies its moves, in order, to the previous output, then
+/// replaces its rectangles, each with its rows of BGRX pixels; with neither it still asks the host to acknowledge
+/// a presentation. Moves read the output as their earlier moves left it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> }, Damage { serial: u64, rects: Vec<(Rect, Vec<u8>)> } }
+pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> }, Damage { serial: u64, moves: Vec<Move>, rects: Vec<(Rect, Vec<u8>)> } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostMessage {
@@ -158,9 +184,9 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
                 let mut pixels = vec![0; rect.pixel_len()]; reader.read_exact(&mut pixels)?;
                 out.push((rect, pixels));
             }
-            Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), rects: out }))
+            Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), moves: Vec::new(), rects: out }))
         }
-        4 if size.is_some() && len >= 12 => {
+        5 if size.is_some() && len >= 16 => {
             let size = size.unwrap();
             let mut body = vec![0; len]; reader.read_exact(&mut body)?;
             let count = u32_at(&body, 8) as usize;
@@ -168,6 +194,13 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
             let rects: Vec<Rect> = body[12..12 + count * 16].chunks_exact(16).map(|b| Rect { x: u32_at(b, 0), y: u32_at(b, 4), width: u32_at(b, 8), height: u32_at(b, 12) }).collect();
             if !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
             let mut at = 12 + count * 16;
+            let moves_count = u32_at(body.get(at..at + 4).ok_or_else(invalid)?, 0) as usize;
+            at += 4;
+            if moves_count > MAX_DAMAGE_MOVES { return Err(invalid()); }
+            let table = body.get(at..at + moves_count * 20).ok_or_else(invalid)?;
+            let moves: Vec<Move> = table.chunks_exact(20).map(|b| Move { x: u32_at(b, 0), width: u32_at(b, 4), src_y: u32_at(b, 8), dst_y: u32_at(b, 12), height: u32_at(b, 16) }).collect();
+            if !moves.iter().all(|m| m.inside(size)) { return Err(invalid()); }
+            at += moves_count * 20;
             let mut out = Vec::with_capacity(count);
             for rect in rects {
                 let (columns, rows) = tile_grid(rect);
@@ -204,7 +237,7 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
                 out.push((rect, pixels));
             }
             if at != len { return Err(invalid()); }
-            Ok(Some(CompositorMessage::Damage { serial: u64_at(&body, 0), rects: out }))
+            Ok(Some(CompositorMessage::Damage { serial: u64_at(&body, 0), moves, rects: out }))
         }
         _ => Err(invalid()),
     }
@@ -219,8 +252,9 @@ pub fn write_compositor<W: Write>(writer: &mut W, message: &CompositorMessage, s
             writer.write_all(&((pixels.len() + 8) as u32).to_le_bytes())?;
             writer.write_all(&serial.to_le_bytes())?; writer.write_all(pixels)
         }
-        CompositorMessage::Damage { serial, rects } => {
+        CompositorMessage::Damage { serial, moves, rects } => {
             let size = size.ok_or_else(invalid)?;
+            if !moves.is_empty() { return Err(invalid()); }
             if rects.iter().any(|(rect, pixels)| pixels.len() != rect.pixel_len()) { return Err(invalid()); }
             let table: Vec<Rect> = rects.iter().map(|(rect, _)| *rect).collect();
             damage_header(writer, *serial, size, &table)?;
@@ -270,12 +304,14 @@ fn solid_pixel(framebuffer: &[u8], stride: usize, x: usize, y: usize, w: usize, 
     uniform.then_some(first)
 }
 
-/// Writes a damage message like [`write_damage`], sending each [`DAMAGE_TILE`]-sized tile of a single colour as
-/// one pixel. Each rectangle carries a table of its tiles, one kind byte each and the pixel of solid tiles, then
-/// its other pixels row by row. Readers return the same [`CompositorMessage::Damage`].
-pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuffer: &[u8], rects: &[Rect]) -> io::Result<()> {
+/// Writes a damage message with `moves` and the rectangles cut from `framebuffer`, sending each
+/// [`DAMAGE_TILE`]-sized tile of a single colour as one pixel. After the rectangle and move tables, each rectangle
+/// carries a table of its tiles, one kind byte each and the pixel of solid tiles, then its other pixels row by
+/// row. Readers return it as a [`CompositorMessage::Damage`].
+pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuffer: &[u8], moves: &[Move], rects: &[Rect]) -> io::Result<()> {
     if framebuffer.len() != size.pixel_len() { return Err(invalid()); }
     if rects.len() > MAX_DAMAGE_RECTS || !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
+    if moves.len() > MAX_DAMAGE_MOVES || !moves.iter().all(|m| m.inside(size)) { return Err(invalid()); }
     let (stride, tile) = (size.width as usize * 4, DAMAGE_TILE as usize);
     let solids: Vec<Vec<Option<[u8; 4]>>> = rects.iter().map(|r| {
         let (columns, rows) = tile_grid(*r);
@@ -291,12 +327,14 @@ pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, fra
         let raw: usize = (0..r.height as usize).map(|y| raw_spans(*r, &kinds[y / tile * columns..][..columns]).map(|(a, b)| (b - a) * 4).sum::<usize>()).sum();
         table + raw
     }).sum();
-    let len = 12 + rects.len() * 16 + body;
-    writer.write_all(&MAGIC)?; writer.write_all(&[4])?;
+    let len = 16 + rects.len() * 16 + moves.len() * 20 + body;
+    writer.write_all(&MAGIC)?; writer.write_all(&[5])?;
     writer.write_all(&u32::try_from(len).map_err(|_| invalid())?.to_le_bytes())?;
     writer.write_all(&serial.to_le_bytes())?;
     writer.write_all(&(rects.len() as u32).to_le_bytes())?;
     for r in rects { for v in [r.x, r.y, r.width, r.height] { writer.write_all(&v.to_le_bytes())?; } }
+    writer.write_all(&(moves.len() as u32).to_le_bytes())?;
+    for m in moves { for v in [m.x, m.width, m.src_y, m.dst_y, m.height] { writer.write_all(&v.to_le_bytes())?; } }
     for (rect, kinds) in rects.iter().zip(&solids) {
         for kind in kinds {
             match kind { Some(pixel) => { writer.write_all(&[TILE_SOLID])?; writer.write_all(pixel)?; } None => writer.write_all(&[TILE_RAW])? }
@@ -353,15 +391,15 @@ mod tests {
         let framebuffer: Vec<u8> = (0..size.pixel_len() as u32).map(|n| n as u8).collect();
         let rects = [Rect { x: 1, y: 1, width: 2, height: 2 }, Rect { x: 3, y: 0, width: 1, height: 1 }];
         let mut wire = Vec::new(); write_damage(&mut wire, 9, size, &framebuffer, &rects).unwrap();
-        let Some(CompositorMessage::Damage { serial, rects: got }) = read_compositor(&mut &wire[..], Some(size)).unwrap() else { panic!("not damage") };
+        let Some(CompositorMessage::Damage { serial, rects: got, .. }) = read_compositor(&mut &wire[..], Some(size)).unwrap() else { panic!("not damage") };
         assert_eq!(serial, 9);
         assert_eq!(got[0], (rects[0], [&framebuffer[20..28], &framebuffer[36..44]].concat()));
         assert_eq!(got[1], (rects[1], framebuffer[12..16].to_vec()));
-        let mut again = Vec::new(); write_compositor(&mut again, &CompositorMessage::Damage { serial, rects: got }, Some(size)).unwrap();
+        let mut again = Vec::new(); write_compositor(&mut again, &CompositorMessage::Damage { serial, moves: vec![], rects: got }, Some(size)).unwrap();
         assert_eq!(again, wire);
         for n in 1..wire.len() { assert!(read_compositor(&mut &wire[..n], Some(size)).is_err()); }
         let mut empty = Vec::new(); write_damage(&mut empty, 10, size, &framebuffer, &[]).unwrap();
-        assert_eq!(read_compositor(&mut &empty[..], Some(size)).unwrap(), Some(CompositorMessage::Damage { serial: 10, rects: vec![] }));
+        assert_eq!(read_compositor(&mut &empty[..], Some(size)).unwrap(), Some(CompositorMessage::Damage { serial: 10, moves: vec![], rects: vec![] }));
         for bad in [Rect { x: 3, y: 0, width: 2, height: 1 }, Rect { x: 0, y: 0, width: 0, height: 1 }, Rect { x: u32::MAX, y: 0, width: 2, height: 1 }] {
             assert!(write_damage(&mut Vec::new(), 1, size, &framebuffer, &[bad]).is_err());
             let mut forged = Vec::new(); write_damage(&mut forged, 1, size, &framebuffer, &[Rect { x: 0, y: 0, width: 1, height: 1 }]).unwrap();
@@ -379,14 +417,14 @@ mod tests {
         for (i, p) in framebuffer.chunks_exact_mut(4).enumerate() { p.copy_from_slice(&[7, 8, 9, 0]); if i % 150 >= 128 && i / 150 < 3 { p[0] = i as u8; } }
         let rects = [Rect { x: 0, y: 0, width: 150, height: 70 }, Rect { x: 140, y: 1, width: 10, height: 2 }, Rect { x: 5, y: 66, width: 1, height: 1 }];
         let mut plain = Vec::new(); write_damage(&mut plain, 3, size, &framebuffer, &rects).unwrap();
-        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 3, size, &framebuffer, &rects).unwrap();
+        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 3, size, &framebuffer, &[], &rects).unwrap();
         assert_eq!(read_compositor(&mut &tiled[..], Some(size)).unwrap(), read_compositor(&mut &plain[..], Some(size)).unwrap());
         assert!(tiled.len() * 6 < plain.len());
         for n in 1..tiled.len() { assert!(read_compositor(&mut &tiled[..n], Some(size)).is_err()); }
         let mut grown = tiled.clone(); grown.push(0);
         let len = u32::from_le_bytes(grown[5..9].try_into().unwrap()) + 1; grown[5..9].copy_from_slice(&len.to_le_bytes());
         assert!(read_compositor(&mut &grown[..], Some(size)).is_err());
-        let mut forged = tiled.clone(); forged[9 + 12 + 3 * 16] = 2;
+        let mut forged = tiled.clone(); forged[9 + 12 + 3 * 16 + 4] = 2;
         assert!(read_compositor(&mut &forged[..], Some(size)).is_err());
         assert!(read_compositor(&mut &tiled[..], None).is_err());
     }
@@ -401,9 +439,34 @@ mod tests {
         }
         let rects = [Rect { x: 0, y: 0, width: 200, height: 130 }, Rect { x: 30, y: 10, width: 150, height: 100 }];
         let mut plain = Vec::new(); write_damage(&mut plain, 5, size, &framebuffer, &rects).unwrap();
-        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 5, size, &framebuffer, &rects).unwrap();
+        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 5, size, &framebuffer, &[], &rects).unwrap();
         assert_eq!(read_compositor(&mut &tiled[..], Some(size)).unwrap(), read_compositor(&mut &plain[..], Some(size)).unwrap());
         assert!(tiled.len() < plain.len());
+    }
+
+    #[test]
+    fn moves_rebuild_a_scrolled_frame_from_the_previous_one() {
+        let size = Size::new(70, 90).unwrap();
+        let previous: Vec<u8> = (0..size.pixel_len()).map(|i| (i / 280 * 7 + i % 280) as u8).collect();
+        let mut current = previous.clone();
+        let stride = 280;
+        current.copy_within(10 * stride..90 * stride, 0);
+        for b in &mut current[80 * stride..] { *b = 0xaa; }
+        let moves = [Move { x: 0, width: 70, src_y: 10, dst_y: 0, height: 80 }];
+        let rects = [Rect { x: 0, y: 80, width: 70, height: 10 }];
+        let mut wire = Vec::new(); write_tiled_damage(&mut wire, 4, size, &current, &moves, &rects).unwrap();
+        let Some(CompositorMessage::Damage { serial: 4, moves: got_moves, rects: got }) = read_compositor(&mut &wire[..], Some(size)).unwrap() else { panic!("not damage") };
+        assert_eq!(got_moves, moves);
+        let mut rebuilt = previous.clone();
+        for m in &got_moves { m.apply(size, &mut rebuilt); }
+        for (rect, pixels) in &got { for (row, line) in pixels.chunks_exact(rect.width as usize * 4).enumerate() { let at = (rect.y as usize + row) * stride + rect.x as usize * 4; rebuilt[at..at + line.len()].copy_from_slice(line); } }
+        assert_eq!(rebuilt, current);
+        let mut down = previous.clone(); Move { x: 0, width: 70, src_y: 0, dst_y: 10, height: 80 }.apply(size, &mut down);
+        assert_eq!(&down[10 * stride..], &previous[..80 * stride]);
+        for bad in [Move { x: 0, width: 71, src_y: 0, dst_y: 0, height: 1 }, Move { x: 0, width: 1, src_y: 85, dst_y: 0, height: 6 }, Move { x: 0, width: 0, src_y: 0, dst_y: 0, height: 1 }] {
+            assert!(write_tiled_damage(&mut Vec::new(), 1, size, &current, &[bad], &[]).is_err());
+        }
+        assert!(write_compositor(&mut Vec::new(), &CompositorMessage::Damage { serial: 1, moves: moves.to_vec(), rects: vec![] }, Some(size)).is_err());
     }
 
     #[test]

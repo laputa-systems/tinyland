@@ -608,7 +608,7 @@ fn remote_frames_ship_at_most_once_per_interval_while_callbacks_follow_the_refre
     let size = tinyland_remote::Size::new(4, 2).unwrap();
     let mut transport = super::super::remote::Transport::test_transport();
     let shipped = |transport: &super::super::remote::Transport| match tinyland_remote::read_compositor(&mut &transport.sent()[..], Some(size)).unwrap() {
-        Some(tinyland_remote::CompositorMessage::Damage { serial, rects }) => (serial, rects.into_iter().map(|(r, _)| (r.x, r.y, r.width, r.height)).collect::<Vec<_>>()),
+        Some(tinyland_remote::CompositorMessage::Damage { serial, rects, .. }) => (serial, rects.into_iter().map(|(r, _)| (r.x, r.y, r.width, r.height)).collect::<Vec<_>>()),
         other => panic!("expected damage, got {other:?}"),
     };
     let start = Instant::now();
