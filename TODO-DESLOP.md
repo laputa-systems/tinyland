@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 6
+Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier B). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -14,17 +14,27 @@ The suite leaves idle timing and keymap regeneration ignored; device, VT, guest,
 oracle, and downstream qualification remain separate. No vendored source trees
 are tracked; the generated keymap provenance is recorded in AGENTS.md.
 
+Diagnose, 2026-11-19, base 5a58058: reviewed the untrusted-input and privilege
+paths through the ultrareview lenses (os-boundaries, security, error-model,
+lifecycle-concurrency, durable-state). Read and assessed: Wayland request
+dispatch and commit transactions, shm pool and buffer geometry and fd handling,
+damage arithmetic, the remote protocol reader and writer, seatd admission,
+device path resolution and identity checks, the SCM_RIGHTS transport, the
+session and VT state machine, and the compositor's per-client caps. Filed
+DSLP-6 (P2, uncapped positioner and pointer creation), DSLP-7 (P3, seatd spins
+on accept failure), and DSLP-8 (P3, remote damage area unbounded); each was
+reproduced against the built product with a headless compositor client, the
+pinned-image daemon, or the remote-protocol reader before filing. Not covered:
+real DRM devices, VT transitions and logind signals, libseat ABI compatibility
+against an external client, the WLCS adapter, the QEMU guest proofs, downstream
+bctl, and performance. One observation is recorded here and not filed because it
+was not reproduced: `Region::contains` (tinyland/src/surface.rs:31-44) takes the
+last matching operation, so subtract-then-add of overlapping rectangles keeps
+the subtracted area, unlike the order-independent set semantics of `wl_region`.
+
 ## Tickets
 
 
-### DSLP-2 · P2 · Diagnose: ultrareview into this backlog
-
-- **Area:** deslop · diagnose
-- **Where:** whole repository
-- **Problem:** No review has ranked this repository's risks for the deslop pass.
-- **Recommendation:** Run the deslop Diagnose step. Accept: the diff touches only docs, comments, and this file, and every finding names its Fix with.
-- **Fix with:** deslop
-- **Effort:** S
 
 ### DSLP-3 · P2 · Types: strict profile and typing findings
 
@@ -52,4 +62,34 @@ are tracked; the generated keymap provenance is recorded in AGENTS.md.
 - **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
 - **Fix with:** deslop
 - **Effort:** M
+
+
+### DSLP-6 · P2 · A Wayland client can create unbounded xdg_positioner and wl_pointer objects
+
+- **Area:** Security
+- **Where:** tinyland/src/server/dispatch_impl.rs:997 (xdg_wm_base.create_positioner), tinyland/src/server/dispatch_impl.rs:715 (wl_seat.get_pointer) and :728 (wl_seat.get_keyboard), tinyland/src/server.rs:69-83 (per-client caps)
+- **Problem:** The compositor caps the object types it retains in per-client maps (surfaces 128, toplevels 32, buffers 64, pools 16, regions 32, sources 32, devices 16, seats 8, outputs 8, callbacks 32), but two creation paths have no count check and are not charged to the per-client byte budget: `xdg_wm_base.create_positioner` inserts into `State::positioners` (dispatch_impl.rs:997-1000), and `wl_seat.get_pointer`/`get_keyboard` push into `SeatData::pointers`/`keyboards` (dispatch_impl.rs:715-756) for each of up to eight seats. Reproduced against the headless compositor: one client created 300000 positioners, received no error, and still completed a wl_display.sync round trip, while resident memory grew by 61.4 MiB (about 215 bytes each); the same client created 300000 pointers on one seat, again with no error, growing memory by 39.5 MiB. The same harness shows the region cap rejecting the 33rd region with `too many regions for client`, so the policy is real for the other object types. A buggy or hostile client can exhaust compositor memory and end the session; 1M each would be roughly 200 MiB and 130 MiB.
+- **Recommendation:** Add a per-client positioner cap and a per-seat pointer and keyboard cap beside the existing limits, and reject past each with the same wl_display NoMemory error the other caps use, so the offender is disconnected. Do not count an object after the client destroys it. Verify with headless tests that the create past each limit errors and the client keeps its earlier objects.
+- **Fix with:** lifecycle-concurrency
+- **Effort:** S
+
+
+### DSLP-7 · P3 · seatd spins and refuses new clients when accept fails
+
+- **Area:** Reliability
+- **Where:** seatd/src/loop.rs:137-146 (handle_listen), seatd/src/loop.rs:274-292 (listen revents), seatd/src/admit.rs:300-317 (accept_client)
+- **Problem:** accept_client returns None when accept4 fails, after logging; handle_listen then leaves the pending connection queued and sets neither `dirty` nor any backoff. The listen descriptor stays readable, so poll returns immediately and the daemon spends a full core on failing accepts while admitting nobody. Reproduced in the pinned Alpine image with the daemon at a 24-descriptor limit (`ulimit -n 24`), holding 36 client connections: 747 connects were refused over 4 s, daemon CPU was 0.99 CPU-seconds per wall second, and a fresh client's connect was refused; after the held sockets closed, CPU returned to 0.00 and a fresh client received its PONG. At the default log level each iteration also writes one line, so the spin floods the log. The trigger is the daemon's descriptor budget, so the shipped 1024-descriptor default needs about 1020 held connections; any process that can connect, which the README names as the admission boundary, can reach it. Already-accepted clients keep being serviced, so impact is refusal of new sessions plus CPU and log burn until descriptors free.
+- **Recommendation:** On accept failure, stop selecting the listen descriptor, or back off to a deadline, until a client slot frees, and bound the error log rate. Verify with a socket test that the daemon does not spin and that admission recovers when descriptors free.
+- **Fix with:** error-model
+- **Effort:** S
+
+
+### DSLP-8 · P3 · Remote damage messages can materialize far more pixels than one frame
+
+- **Area:** Data
+- **Where:** remote-protocol/src/lib.rs:135-211 (read_compositor tags 3 and 4), remote-protocol/src/lib.rs:314-323 (damage_header), remote-protocol/src/lib.rs:276-312 (write_tiled_damage)
+- **Problem:** read_compositor bounds each damage rectangle to the output Size and the rectangle count to MAX_DAMAGE_RECTS (64), but never bounds the sum of the rectangle areas. Overlapping and repeated rectangles are accepted, and a tiled rectangle (tag 4) encodes a solid 64x64 tile in five bytes, so a small message materializes a large Vec per rectangle. Reproduced by feeding hand-built messages to read_compositor for Size 4096x4096: 1,291,269 wire bytes carrying 63 full-output solid-tile rectangles returned 4,227,858,432 damage bytes (4.03 GiB, about 3270x the input) and raised the reader's resident set by 4032 MiB; eight such rectangles needed 163,989 wire bytes for 512 MiB. That contradicts the module's own intent that a damage message is bounded by one output, with excess rectangles collapsed to a bounding box. A hostile or compromised compositor can exhaust the reading host's memory; a reader-side bound also protects other future senders.
+- **Recommendation:** Reject a damage message whose rectangle areas sum past size.pixel_len(), or require rectangles to be disjoint, in both tag 3 and tag 4; keep the writers' current invariants. Add tests for overlapping and repeated rectangles in both encodings.
+- **Fix with:** os-boundaries
+- **Effort:** S
 
