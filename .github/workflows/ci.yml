@@ -26,7 +26,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: build the pinned Alpine test image
-        run: docker build -f Dockerfile.test -t tinyland-tests .
       - name: run the test suite in the pinned Alpine image
-        run: docker run --rm tinyland-tests
+        run: make test-ci
