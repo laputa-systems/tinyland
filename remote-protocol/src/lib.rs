@@ -4,6 +4,10 @@ const MAGIC: [u8; 4] = *b"TLR1";
 const MAX_CLIPBOARD: usize = 1024 * 1024;
 /// The most rectangles one damage message may carry; a compositor with more sends their bounding box.
 pub const MAX_DAMAGE_RECTS: usize = 64;
+/// Edge of the tiles a tiled damage rectangle is cut into, from the rectangle's origin.
+pub const DAMAGE_TILE: u32 = 64;
+const TILE_RAW: u8 = 0;
+const TILE_SOLID: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size { width: u32, height: u32 }
@@ -156,6 +160,46 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
             }
             Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), rects: out }))
         }
+        4 if size.is_some() && len >= 12 => {
+            let size = size.unwrap();
+            let mut head = [0; 12]; reader.read_exact(&mut head)?;
+            let count = u32_at(&head, 8) as usize;
+            if count > MAX_DAMAGE_RECTS || len < 12 + count * 16 { return Err(invalid()); }
+            let mut table = vec![0; count * 16]; reader.read_exact(&mut table)?;
+            let rects: Vec<Rect> = table.chunks_exact(16).map(|b| Rect { x: u32_at(b, 0), y: u32_at(b, 4), width: u32_at(b, 8), height: u32_at(b, 12) }).collect();
+            if !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
+            let mut remaining = len - 12 - count * 16;
+            let mut out = Vec::with_capacity(count);
+            for rect in rects {
+                let mut pixels = vec![0; rect.pixel_len()];
+                let stride = rect.width as usize * 4;
+                for (tx, ty, tw, th) in tiles(rect) {
+                    let mut kind = [0; 1];
+                    remaining = remaining.checked_sub(1).ok_or_else(invalid)?; reader.read_exact(&mut kind)?;
+                    match kind[0] {
+                        TILE_SOLID => {
+                            let mut pixel = [0; 4];
+                            remaining = remaining.checked_sub(4).ok_or_else(invalid)?; reader.read_exact(&mut pixel)?;
+                            for y in ty..ty + th {
+                                let row = y * stride + tx * 4;
+                                for p in pixels[row..row + tw * 4].chunks_exact_mut(4) { p.copy_from_slice(&pixel); }
+                            }
+                        }
+                        TILE_RAW => {
+                            remaining = remaining.checked_sub(tw * th * 4).ok_or_else(invalid)?;
+                            for y in ty..ty + th {
+                                let row = y * stride + tx * 4;
+                                reader.read_exact(&mut pixels[row..row + tw * 4])?;
+                            }
+                        }
+                        _ => return Err(invalid()),
+                    }
+                }
+                out.push((rect, pixels));
+            }
+            if remaining != 0 { return Err(invalid()); }
+            Ok(Some(CompositorMessage::Damage { serial: u64_at(&head, 0), rects: out }))
+        }
         _ => Err(invalid()),
     }
 }
@@ -189,6 +233,54 @@ pub fn write_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuff
         for y in rect.y as usize..(rect.y + rect.height) as usize {
             let start = y * stride + rect.x as usize * 4;
             writer.write_all(&framebuffer[start..start + rect.width as usize * 4])?;
+        }
+    }
+    Ok(())
+}
+
+/// The tiles of `rect` as (x, y, width, height) relative to its origin, row by row.
+fn tiles(rect: Rect) -> impl Iterator<Item = (usize, usize, usize, usize)> {
+    let (w, h, t) = (rect.width as usize, rect.height as usize, DAMAGE_TILE as usize);
+    (0..h.div_ceil(t)).flat_map(move |row| (0..w.div_ceil(t)).map(move |col| (col * t, row * t, t.min(w - col * t), t.min(h - row * t))))
+}
+
+/// The pixel every pixel of a tile equals, if there is one.
+fn solid_pixel(framebuffer: &[u8], stride: usize, x: usize, y: usize, w: usize, h: usize) -> Option<[u8; 4]> {
+    let first: [u8; 4] = framebuffer[y * stride + x * 4..][..4].try_into().unwrap();
+    let uniform = (y..y + h).all(|row| framebuffer[row * stride + x * 4..][..w * 4].chunks_exact(4).all(|p| p == first));
+    uniform.then_some(first)
+}
+
+/// Writes a damage message like [`write_damage`], sending each [`DAMAGE_TILE`]-sized tile of a single colour as
+/// one pixel. Readers return the same [`CompositorMessage::Damage`].
+pub fn write_tiled_damage<W: Write>(writer: &mut W, serial: u64, size: Size, framebuffer: &[u8], rects: &[Rect]) -> io::Result<()> {
+    if framebuffer.len() != size.pixel_len() { return Err(invalid()); }
+    if rects.len() > MAX_DAMAGE_RECTS || !rects.iter().all(|r| r.inside(size)) { return Err(invalid()); }
+    let stride = size.width as usize * 4;
+    let solids: Vec<Vec<Option<[u8; 4]>>> = rects.iter().map(|r| {
+        tiles(*r).map(|(tx, ty, tw, th)| solid_pixel(framebuffer, stride, r.x as usize + tx, r.y as usize + ty, tw, th)).collect()
+    }).collect();
+    let body: usize = rects.iter().zip(&solids).map(|(r, kinds)| {
+        tiles(*r).zip(kinds).map(|((_, _, tw, th), solid)| 1 + if solid.is_some() { 4 } else { tw * th * 4 }).sum::<usize>()
+    }).sum();
+    let len = 12 + rects.len() * 16 + body;
+    writer.write_all(&MAGIC)?; writer.write_all(&[4])?;
+    writer.write_all(&u32::try_from(len).map_err(|_| invalid())?.to_le_bytes())?;
+    writer.write_all(&serial.to_le_bytes())?;
+    writer.write_all(&(rects.len() as u32).to_le_bytes())?;
+    for r in rects { for v in [r.x, r.y, r.width, r.height] { writer.write_all(&v.to_le_bytes())?; } }
+    for (rect, kinds) in rects.iter().zip(&solids) {
+        for ((tx, ty, tw, th), solid) in tiles(*rect).zip(kinds) {
+            match solid {
+                Some(pixel) => { writer.write_all(&[TILE_SOLID])?; writer.write_all(pixel)?; }
+                None => {
+                    writer.write_all(&[TILE_RAW])?;
+                    for y in rect.y as usize + ty..rect.y as usize + ty + th {
+                        let start = y * stride + (rect.x as usize + tx) * 4;
+                        writer.write_all(&framebuffer[start..start + tw * 4])?;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -253,6 +345,25 @@ mod tests {
         }
         assert!(write_damage(&mut Vec::new(), 1, size, &framebuffer, &[Rect { x: 0, y: 0, width: 1, height: 1 }; MAX_DAMAGE_RECTS + 1]).is_err());
         assert!(read_compositor(&mut &wire[..], None).is_err());
+    }
+
+    #[test]
+    fn tiled_damage_matches_plain_damage_and_shrinks_solid_tiles() {
+        let size = Size::new(150, 70).unwrap();
+        let mut framebuffer = vec![0; size.pixel_len()];
+        for (i, p) in framebuffer.chunks_exact_mut(4).enumerate() { p.copy_from_slice(&[7, 8, 9, 0]); if i % 150 >= 128 && i / 150 < 3 { p[0] = i as u8; } }
+        let rects = [Rect { x: 0, y: 0, width: 150, height: 70 }, Rect { x: 140, y: 1, width: 10, height: 2 }, Rect { x: 5, y: 66, width: 1, height: 1 }];
+        let mut plain = Vec::new(); write_damage(&mut plain, 3, size, &framebuffer, &rects).unwrap();
+        let mut tiled = Vec::new(); write_tiled_damage(&mut tiled, 3, size, &framebuffer, &rects).unwrap();
+        assert_eq!(read_compositor(&mut &tiled[..], Some(size)).unwrap(), read_compositor(&mut &plain[..], Some(size)).unwrap());
+        assert!(tiled.len() * 6 < plain.len());
+        for n in 1..tiled.len() { assert!(read_compositor(&mut &tiled[..n], Some(size)).is_err()); }
+        let mut grown = tiled.clone(); grown.push(0);
+        let len = u32::from_le_bytes(grown[5..9].try_into().unwrap()) + 1; grown[5..9].copy_from_slice(&len.to_le_bytes());
+        assert!(read_compositor(&mut &grown[..], Some(size)).is_err());
+        let mut forged = tiled.clone(); forged[9 + 12 + 3 * 16] = 2;
+        assert!(read_compositor(&mut &forged[..], Some(size)).is_err());
+        assert!(read_compositor(&mut &tiled[..], None).is_err());
     }
 
     #[test]

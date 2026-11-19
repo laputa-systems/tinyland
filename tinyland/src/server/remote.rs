@@ -95,7 +95,7 @@ impl Transport {
             .map(|(x0, y0, x1, y1)| tinyland_remote::Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }).collect();
         self.unsent.clear();
         self.outgoing.clear();
-        tinyland_remote::write_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &rects).map_err(|e| e.to_string())?;
+        tinyland_remote::write_tiled_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &rects).map_err(|e| e.to_string())?;
         self.written = 0;
         self.flight = Some((self.serial, callbacks));
         self.last_ship = Some(now);
