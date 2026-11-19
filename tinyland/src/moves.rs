@@ -20,6 +20,9 @@ type HashedMap<V> = HashMap<u64, V, BuildHasherDefault<Identity>>;
 /// Width of the column bands rows are hashed in. A scrollbar or other column that changes differently from the
 /// scrolled content only spoils its own band.
 const BAND: u32 = 64;
+/// How far beyond a damaged rectangle its rows' earlier positions are looked for: damage often arrives as
+/// stripes that a scroll moves rows between.
+const SEARCH: u32 = 512;
 /// The fewest rows worth sending as a move.
 const MIN_ROWS: u32 = 32;
 /// A row whose hash appears more often than this in the shipped band, such as a flat background, does not vote.
@@ -35,6 +38,10 @@ pub struct Shipped {
     /// Row hashes of the frame being planned, for [`Shipped::record`] to keep; `None` where not computed.
     fresh: Vec<Option<u64>>,
 }
+
+fn source(m: Move) -> Rect { Rect { x: m.x, y: m.src_y, width: m.width, height: m.height } }
+
+fn intersects(a: Rect, b: Rect) -> bool { a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height }
 
 fn hash(row: &[u8]) -> u64 {
     let (words, tail) = row.as_chunks::<8>();
@@ -71,8 +78,11 @@ impl Shipped {
     pub fn plan(&mut self, current: &[u8], rects: &[Rect]) -> (Vec<Move>, Vec<Rect>) {
         let (mut moves, mut rest) = (Vec::new(), Vec::new());
         for (i, &r) in rects.iter().enumerate() {
-            let overlaps = rects.iter().enumerate().any(|(j, o)| j != i && r.x < o.x + o.width && o.x < r.x + r.width && r.y < o.y + o.height && o.y < r.y + r.height);
-            match (!overlaps && r.height >= 2 * MIN_ROWS).then(|| self.plan_rect(current, r)).flatten() {
+            let overlaps = rects.iter().enumerate().any(|(j, o)| j != i && intersects(r, *o));
+            let planned = (!overlaps && r.height >= 2 * MIN_ROWS).then(|| self.plan_rect(current, r)).flatten();
+            // Moves apply in order, so a source an earlier move overwrote no longer holds shipped pixels.
+            let planned = planned.filter(|(found, _)| found.iter().all(|m| moves.iter().all(|earlier: &Move| !intersects(source(*m), earlier.destination()))));
+            match planned {
                 Some((found, pieces)) => { moves.extend(found); rest.extend(pieces); }
                 None => rest.push(r),
             }
@@ -85,9 +95,10 @@ impl Shipped {
         let bands = self.bands();
         let mut votes: HashMap<i64, u32> = HashMap::new();
         let mut previous: HashedMap<Vec<u32>> = HashedMap::default();
+        let (lo, hi) = (r.y.saturating_sub(SEARCH), (r.y + r.height + SEARCH).min(self.size.height()));
         for band in first_band..=last_band {
             previous.clear();
-            for y in r.y..r.y + r.height {
+            for y in lo..hi {
                 let rows = previous.entry(self.hashes[(y * bands + band) as usize]).or_default();
                 if rows.len() <= MAX_CANDIDATES { rows.push(y); }
             }
@@ -104,7 +115,7 @@ impl Shipped {
         let columns = |band: u32| ((band * BAND).max(r.x), ((band + 1) * BAND).min(r.x + r.width));
         let same = |band: u32, y: u32| {
             let from = i64::from(y) + dy;
-            if from < i64::from(r.y) || from >= i64::from(r.y + r.height) { return false; }
+            if from < i64::from(lo) || from >= i64::from(hi) { return false; }
             let (x0, x1) = columns(band);
             current[self.row(y, x0, x1)] == self.pixels[self.row(from as u32, x0, x1)]
         };
@@ -243,10 +254,11 @@ mod tests {
             let offset = (next() % 300) as usize;
             let mut current = tall[offset * stride..(offset + 160) * stride].to_vec();
             if next() % 2 == 0 { for b in &mut current[(next() % 150) as usize * stride..][..stride * 4] { *b = 0x55; } }
-            let rects: Vec<Rect> = match next() % 3 {
+            let rects: Vec<Rect> = match next() % 4 {
                 0 => vec![Rect { x: 0, y: 0, width: 200, height: 160 }],
                 1 => vec![Rect { x: 10, y: 0, width: 150, height: 160 }, Rect { x: 0, y: 0, width: 10, height: 160 }, Rect { x: 160, y: 0, width: 40, height: 160 }],
-                _ => vec![Rect { x: 0, y: 0, width: 200, height: 100 }, Rect { x: 0, y: 100, width: 200, height: 60 }],
+                2 => vec![Rect { x: 0, y: 0, width: 200, height: 100 }, Rect { x: 0, y: 100, width: 200, height: 60 }],
+                _ => (0..5).map(|i| Rect { x: 0, y: i * 32, width: 200, height: 32 }).chain([Rect { x: 0, y: 0, width: 1, height: 1 }].into_iter().filter(|_| false)).collect(),
             };
             let (moves, sent) = shipped.plan(&current, &rects);
             host = rebuild(size, &host, &current, &moves, &sent);
