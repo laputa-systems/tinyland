@@ -92,10 +92,10 @@ frame terminates the session. The child is terminated and reaped on shutdown.
 
 The `tinyland-remote` workspace crate defines the wire codec. Each message has
 `TLR1`, a one-byte type, and a little-endian u32 body length. Bodies use
-little-endian integers. Types 1 through 3 are Ready (u32 width, u32 height),
-Frame (u64 serial, pixels) and Damage (u64 serial, u32 count, then count
+little-endian integers. Types 1 through 4 are Ready (u32 width, u32 height),
+Frame (u64 serial, pixels), Damage (u64 serial, u32 count, then count
 rectangles of u32 x, y, width, height, then each rectangle's pixel rows in
-order); types 16 through 22 are Presented (u64 serial),
+order) and TiledDamage; types 16 through 22 are Presented (u64 serial),
 Key (u32 source, u16 evdev code, u8 pressed), Pointer (u32 source, u32 x,
 u32 y), Button (u32 source, u8 button, u8 pressed), Wheel (u32 source, i32
 horizontal, i32 vertical), ResetInput (u32 source), and Clipboard (u32 source,
@@ -119,8 +119,16 @@ little-endian order, B,G,R,X with a width times four stride. Damage replaces
 only its rectangles of the previous output, in the same pixel order with each
 rectangle's width times four stride. Rectangles are nonempty, lie inside the
 output, and number at most 64. A Damage message with no rectangles changes no
-pixels but still completes a presentation. The compositor sends Damage for
-every frame; its first frame covers the whole output. The host sends
+pixels but still completes a presentation.
+
+TiledDamage carries the same rectangles more compactly. After the rectangle
+table, each rectangle is cut into 64 by 64 tiles from its own origin, the last
+row and column clipped to the rectangle. Its tiles follow in row order, each a
+kind byte: 0 for a tile sent raw, or 1 followed by the one B,G,R,X pixel that
+every pixel of the tile equals. Then come the rectangle's raw pixels in row
+order, leaving out the pixels inside solid tiles. The body length must account
+for every byte. Readers return a TiledDamage message as Damage. The compositor
+sends TiledDamage for every frame; its first frame covers the whole output. The host sends
 Presented only after publishing the validated framebuffer, independent of
 viewer presence.
 
