@@ -1,5 +1,5 @@
 Prefix: TINY
-Next: 17
+Next: 22
 
 # Open work
 
@@ -60,4 +60,49 @@ qualification. Runtime proof gaps are stated in each ticket.
 - **Recommendation:** Run the test in a loop to measure its failure rate, find the timing or shared-state assumption that the assertion depends on, and make the test deterministic without weakening what it checks.
 - **Fix with:** `root-cause`
 - **Effort:** S
+
+### TINY-17 · P3 · seatd spins and refuses new clients when accept fails
+
+- **Area:** Reliability
+- **Where:** seatd/src/loop.rs:137-146 (handle_listen), seatd/src/loop.rs:274-292 (listen revents), seatd/src/admit.rs:300-317 (accept_client)
+- **Problem:** accept_client returns None when accept4 fails, after logging; handle_listen then leaves the pending connection queued and sets neither `dirty` nor any backoff. The listen descriptor stays readable, so poll returns immediately and the daemon spends a full core on failing accepts while admitting nobody. Reproduced in the pinned Alpine image with the daemon at a 24-descriptor limit (`ulimit -n 24`), holding 36 client connections: 747 connects were refused over 4 s, daemon CPU was 0.99 CPU-seconds per wall second, and a fresh client's connect was refused; after the held sockets closed, CPU returned to 0.00 and a fresh client received its PONG. At the default log level each iteration also writes one line, so the spin floods the log. The trigger is the daemon's descriptor budget, so the shipped 1024-descriptor default needs about 1020 held connections; any process that can connect, which the README names as the admission boundary, can reach it. Already-accepted clients keep being serviced, so impact is refusal of new sessions plus CPU and log burn until descriptors free.
+- **Recommendation:** On accept failure, stop selecting the listen descriptor, or back off to a deadline, until a client slot frees, and bound the error log rate. Verify with a socket test that the daemon does not spin and that admission recovers when descriptors free.
+- **Fix with:** error-model
+- **Effort:** S
+
+### TINY-18 · P3 · Remote damage messages can materialize far more pixels than one frame
+
+- **Area:** Data
+- **Where:** remote-protocol/src/lib.rs:135-211 (read_compositor tags 3 and 4), remote-protocol/src/lib.rs:314-323 (damage_header), remote-protocol/src/lib.rs:276-312 (write_tiled_damage)
+- **Problem:** read_compositor bounds each damage rectangle to the output Size and the rectangle count to MAX_DAMAGE_RECTS (64), but never bounds the sum of the rectangle areas. Overlapping and repeated rectangles are accepted, and a tiled rectangle (tag 4) encodes a solid 64x64 tile in five bytes, so a small message materializes a large Vec per rectangle. Reproduced by feeding hand-built messages to read_compositor for Size 4096x4096: 1,291,269 wire bytes carrying 63 full-output solid-tile rectangles returned 4,227,858,432 damage bytes (4.03 GiB, about 3270x the input) and raised the reader's resident set by 4032 MiB; eight such rectangles needed 163,989 wire bytes for 512 MiB. That contradicts the module's own intent that a damage message is bounded by one output, with excess rectangles collapsed to a bounding box. A hostile or compromised compositor can exhaust the reading host's memory; a reader-side bound also protects other future senders.
+- **Recommendation:** Reject a damage message whose rectangle areas sum past size.pixel_len(), or require rectangles to be disjoint, in both tag 3 and tag 4; keep the writers' current invariants. Add tests for overlapping and repeated rectangles in both encodings.
+- **Fix with:** os-boundaries
+- **Effort:** S
+
+### TINY-19 · P3 · Establish representative compositor performance evidence
+
+- **Area:** Performance
+- **Where:** docs/CAMPAIGN-DAMAGE.md; tinyland/src/server/tests/damage.rs:88
+- **Problem:** The 300-step headless damage differential checks pixels and sparse updates but does not measure shipped frame throughput, latency, CPU, allocations or bytes. The headed bctl comparison is historical and lacks a reproducible pinned baseline and retained samples here. No current evidence detects a performance regression or attributes it across compositor, guest and viewer.
+- **Recommendation:** Extend the existing headed damage campaign with pinned candidate and reference, completed-frame and pixel checks, interleaved gated samples, stage CPU and byte counters, and separate sampling or tracing for attribution. Qualify actual devices and downstream separately.
+- **Fix with:** bench-pyramid
+- **Effort:** L
+
+### TINY-20 · P3 · Measure client density, seatd responsiveness and startup
+
+- **Area:** Performance
+- **Where:** seatd/harness/storm.rs:201; seatd/doc/validation.md:55; tinyland/docs/verification.md:92
+- **Problem:** The switch storm checks 60 completed transitions and post-cleanup daemon RSS and descriptors, not per-client retained or peak memory, latency or throughput. The ignored idle test samples only daemon CPU ticks and voluntary switches over five seconds. Neither component has a startup measurement or an interleaved baseline; regressions in these outcomes can go unnoticed.
+- **Recommendation:** Add representative client-density, request-response and startup journeys with completion checks, per-process and container memory scope, operation counts, gated interleaved samples and an accepted reference. Use separate CPU sampling, allocation and syscall tracing for attribution; document overhead and host validity.
+- **Fix with:** bench-pyramid
+- **Effort:** M
+
+### TINY-21 · P3 · Retire destroyed seats without losing input object accounting
+
+- **Area:** Resource lifecycle
+- **Where:** tinyland/src/server/dispatch_impl.rs:675-703, :717-740, :772-779, :796-831
+- **Problem:** The seat destroyed callback does nothing, so State.seats retains seat records after release or disconnect. On seat release, input children may remain live and their vectors remain attached to the retained seat. The new pointer and keyboard limits are per seat, while seat admission counts only resources whose client lookup succeeds. Rebinding after release may therefore evade the intended per-client resource bound; repeated disconnects also retain seat records. The current disconnect test checks emptied input vectors but not removal of the seat. The rebind impact has not been reproduced.
+- **Recommendation:** Exercise release, rebind and disconnect with live pointer and keyboard children, then account for their actual lifetimes and retire seat state without losing live input resources. Assert bounded retained state and continued input delivery.
+- **Fix with:** lifecycle-concurrency
+- **Effort:** M
 
