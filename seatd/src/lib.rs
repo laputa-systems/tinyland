@@ -12,3 +12,5 @@ pub mod shutdown;
 pub mod sys;
 pub mod vt;
 pub mod wire;
+#[cfg(test)]
+mod test_gate;
