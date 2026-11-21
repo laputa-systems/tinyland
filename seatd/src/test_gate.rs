@@ -20,7 +20,6 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     fn pipe() -> (i32, i32) {
         let mut fds = [0; 2];
