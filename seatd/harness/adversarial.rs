@@ -408,6 +408,10 @@ fn admit_non_socket_path_is_inspected_under_the_startup_lock() {
 }
 
 fn spawn_readiness_three(sock: &str, inherit: bool) -> (Child, OwnedFd) {
+    spawn_readiness_env(sock, None, inherit)
+}
+
+fn spawn_readiness_env(sock: &str, vtbound: Option<&str>, inherit: bool) -> (Child, OwnedFd) {
     let mut fds = [0; 2];
     assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
     let (r, w) = (fds[0], fds[1]);
@@ -417,6 +421,9 @@ fn spawn_readiness_three(sock: &str, inherit: bool) -> (Child, OwnedFd) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(v) = vtbound {
+        cmd.env("SEATD_VTBOUND", v);
+    }
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -787,24 +794,12 @@ const S_PONG: u16 = 0x8007;
 
 fn spawn_with_env(sock: &str, vtbound: Option<&str>) -> Daemon {
     try_unlink(sock);
-    let mut cmd = Command::new(daemon_bin());
-    cmd.arg("-l")
-        .arg("silent")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(v) = vtbound {
-        cmd.env("SEATD_VTBOUND", v);
-    }
-    cmd.env("SEATD_SOCK", sock);
-    let child = cmd.spawn().expect("spawn");
-    for _ in 0..50 {
-        if std::path::Path::new(sock).exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(std::path::Path::new(sock).exists(), "daemon socket");
+    let (child, ready) = spawn_readiness_env(sock, vtbound, true);
+    let fd = ready.as_raw_fd();
+    poll_readable(fd, "readiness byte");
+    let mut one = [0u8; 1];
+    let n = unsafe { libc::read(fd, one.as_mut_ptr().cast(), 1) };
+    assert_eq!((n, one), (1, *b"\n"), "readiness byte");
     Daemon { child }
 }
 
@@ -989,6 +984,50 @@ fn wait_for_fds(child: &Child, want: usize) {
     );
 }
 
+fn settle_fds(child: &Child, sock: &str, want: usize) {
+    let mut c = Raw::connect(sock);
+    c.send(7, &[]);
+    assert_eq!(c.recv().unwrap().0, S_PONG);
+    drop(c);
+    wait_for_fds(child, want);
+}
+
+#[test]
+fn shutdown_fd_count_settles_only_after_backlogged_connections_are_accepted() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sock = ".work/tmp/storm-backlog.sock";
+    let mut d = spawn_with_env(sock, Some("0"));
+    let baseline = rest_fd_count(&d.child);
+    let pid = d.child.id() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGSTOP);
+    }
+    for _ in 0..8 {
+        drop(Raw::connect(sock));
+    }
+    assert_eq!(proc_fd_count(d.child.id()), baseline, "a stopped daemon has accepted nothing");
+    let resumed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waker = {
+        let resumed = resumed.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            resumed.store(true, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                libc::kill(pid, libc::SIGCONT);
+            }
+        })
+    };
+    settle_fds(&d.child, sock, baseline);
+    assert!(
+        resumed.load(std::sync::atomic::Ordering::SeqCst),
+        "fd count settled while connections were still queued unaccepted"
+    );
+    assert_eq!(proc_fd_count(d.child.id()), baseline);
+    waker.join().unwrap();
+    terminate(&mut d.child);
+    d.child.wait().ok();
+}
+
 #[test]
 fn shutdown_reconnect_storm_leaks_no_fds() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -1004,13 +1043,13 @@ fn shutdown_reconnect_storm_leaks_no_fds() {
         let s = Raw::connect(sock);
         drop(s);
     }
-    wait_for_fds(&d.child, baseline);
+    settle_fds(&d.child, sock, baseline);
     assert_eq!(proc_fd_count(d.child.id()), baseline);
     for _ in 0..800 {
         let s = Raw::connect(sock);
         drop(s);
     }
-    wait_for_fds(&d.child, baseline);
+    settle_fds(&d.child, sock, baseline);
     assert_eq!(proc_fd_count(d.child.id()), baseline, "0 fd growth over 1000 reconnects");
     terminate(&mut d.child);
     d.child.wait().ok();
@@ -1034,7 +1073,7 @@ fn shutdown_malformed_storm_leaks_no_fds() {
         use std::io::Read as _Read;
         let _ = s.s.read(&mut buf);
     }
-    wait_for_fds(&d.child, baseline);
+    settle_fds(&d.child, sock, baseline);
     assert_eq!(proc_fd_count(d.child.id()), baseline);
     terminate(&mut d.child);
     d.child.wait().ok();
