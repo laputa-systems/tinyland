@@ -245,9 +245,11 @@ mod tests {
             assert!(slots[0].client.devices.is_empty());
             return;
         }
+        let launch = crate::test_gate::child_launch();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "device::tests::device_teardown_reports_revocation_failure", "--nocapture"])
             .env(marker, "1").output().unwrap();
+        drop(launch);
         assert!(output.status.success());
         let diagnostic = String::from_utf8(output.stderr).unwrap();
         assert!(diagnostic.contains("Could not deactivate device /dev/input/event-test"), "{diagnostic}");

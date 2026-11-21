@@ -346,6 +346,7 @@ mod tests {
     #[test]
     fn stale_socket_is_reclaimed() {
         let path = tmp_sock("stale");
+        let _listeners = crate::test_gate::listeners();
         let fd = open_socket(&path, ExistingSocket::ReclaimStale, -1, -1).unwrap();
         let raw = raw_fd(&fd);
         let _ = raw;
@@ -364,6 +365,7 @@ mod tests {
     #[test]
     fn refuse_policy_keeps_stale_socket() {
         let path = tmp_sock("refuse-stale");
+        let _listeners = crate::test_gate::listeners();
         drop(open_socket(&path, ExistingSocket::ReclaimStale, -1, -1).unwrap());
         assert!(!probe_live(&path));
         let before = std::fs::symlink_metadata(&path).unwrap();
@@ -427,6 +429,7 @@ mod tests {
     #[test]
     fn crash_without_unlink_is_reclaimed_by_next_owner() {
         let path = tmp_sock("crash");
+        let _listeners = crate::test_gate::listeners();
         let first = open_socket(&path, ExistingSocket::ReclaimStale, -1, -1).unwrap();
         assert!(probe_live(&path));
         assert!(open_socket(&path, ExistingSocket::ReclaimStale, -1, -1).is_err());
