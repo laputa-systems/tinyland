@@ -16,6 +16,8 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
 
 ## Verification
 
+`make clean` removes this checkout’s build output in `./target`. It refuses symlinks and ordinary files at those paths.
+
 - Edit: a named test in the pinned image (`region_`: 0.13s execution,
   build separate). Change: `make test` (ground 17.41s warm; candidate 22.54s,
   both observed on a busy host); `make lint` candidate 18.07s. Scenario:
