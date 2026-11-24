@@ -1,7 +1,5 @@
 # seatd intermittent test failures
 
-Base revision `35bd8809ed341cf40da8f0a513a38d16fdea1c9e`; evidence in `docs/ci-failures-2026-11-20.md` on `fix/deslop-ci`.
-
 All runs below use the repository's `tinyland-tests:local` Alpine image (aarch64, musl) with the worktree mounted at `/src`, `--cpus 4`, and four `yes > /dev/null` burners inside the container. Each iteration runs the whole test binary once.
 
 ## Findings

@@ -1,5 +1,5 @@
 Prefix: TINY
-Next: 22
+Next: 24
 
 # Open work
 
@@ -15,6 +15,24 @@ Next: 22
 Priorities are assigned from impact and likelihood. Source-confirmed findings
 below include a concrete event sequence; they are not claims of device or VM
 qualification. Runtime proof gaps are stated in each ticket.
+
+### TINY-22 · P2 · Qualify repeatable coverage and mutation checks
+
+- **Area:** Tests
+- **Where:** Makefile; tinyland/src/server/dispatch_impl.rs; remote-protocol/src/lib.rs
+- **Problem:** A coverage and mutation run used ephemeral tools, and the available checks do not provide a qualified repeatable coverage and bounded mutation recipe. The prior crate mirror lacked cargo-llvm-cov and cargo-mutants; current mirror availability is unverified. Coverage of critical behavior and mutation survivors remain unproven beyond the narrow trial.
+- **Recommendation:** Check tool availability, establish a reproducible bounded coverage and mutation recipe, and use negative controls to verify the checks detect relevant faults. Disposition survivors in critical code.
+- **Fix with:** test-audit
+- **Effort:** M
+
+### TINY-23 · P2 · Qualify the warm workspace test cost
+
+- **Area:** Tests
+- **Where:** Makefile; docs/bench.md
+- **Problem:** The recorded warm workspace test comparison ran on a busy host and cannot establish whether the test cost budget holds. A valid comparison remains unproven.
+- **Recommendation:** On an idle host, measure interleaved warm baseline and candidate workspace test runs with readiness checks before and after, and assess the test cost against its budget and observed spread.
+- **Fix with:** benchmark-checklist
+- **Effort:** S
 
 ### TINY-11 · P3 · Retired seat bindings remain counted and retained
 
