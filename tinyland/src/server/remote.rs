@@ -7,12 +7,10 @@ use tinyland_remote::{Button, CompositorMessage, HostMessage, Size};
 const DEADLINE: Duration = Duration::from_secs(5);
 /// The virtual display refresh: surfaces are presented and their frame callbacks completed at most this often.
 const REFRESH: Duration = Duration::from_micros(16_667);
-/// The shortest time between two frames sent to the host when their damage is large; presentations in between
-/// accumulate their damage.
+/// The time between two frames sent to the host when their damage covers the whole output; presentations in between
+/// accumulate their damage. Smaller damage waits proportionally less, down to one refresh, so the host never receives
+/// more than one output's worth of pixels per interval while partial updates such as pointer hover keep the refresh rate.
 const SHIP_INTERVAL: Duration = Duration::from_micros(33_333);
-/// Damage covering at most this fraction of the output is sent at the refresh rate: pointer and hover changes are a few
-/// small rectangles, and holding them for the ship interval halves how often the pointer visibly moves.
-const SMALL_DAMAGE_DIVISOR: u64 = 8;
 /// Output rectangles per frame sent to the host; more are sent as their bounding box.
 const MAX_SHIP_RECTS: usize = 16;
 const MAX_SOURCES: usize = 64;
@@ -97,13 +95,17 @@ impl Transport {
         Ok(None)
     }
 
-    /// When the unsent damage may be sent: one refresh after the last frame for small damage, one ship interval for large.
+    /// When the unsent damage may be sent: the ship interval scaled by the fraction of the output it covers, but never
+    /// sooner than one refresh after the last frame.
     fn ship_at(&self, size: Size, now: Instant) -> Instant {
         let (width, height) = (size.width(), size.height());
-        let area: u64 = crate::damage::output_rects(&self.unsent, width, height, MAX_SHIP_RECTS).iter()
-            .map(|&(x0, y0, x1, y1)| u64::from(x1 - x0) * u64::from(y1 - y0)).sum();
-        let small = !self.unsent.is_full() && area * SMALL_DAMAGE_DIVISOR <= u64::from(width) * u64::from(height);
-        self.last_ship.map_or(now, |at| at + if small { REFRESH } else { SHIP_INTERVAL })
+        let total = u64::from(width) * u64::from(height);
+        let area: u64 = if self.unsent.is_full() { total } else {
+            crate::damage::output_rects(&self.unsent, width, height, MAX_SHIP_RECTS).iter()
+                .map(|&(x0, y0, x1, y1)| u64::from(x1 - x0) * u64::from(y1 - y0)).sum::<u64>().min(total)
+        };
+        let scaled = SHIP_INTERVAL.mul_f64(area as f64 / total.max(1) as f64);
+        self.last_ship.map_or(now, |at| at + scaled.max(REFRESH))
     }
 
     pub(super) fn queue_cursor(&mut self, state: &State) -> Result<(), String> {
