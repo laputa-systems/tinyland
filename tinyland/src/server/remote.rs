@@ -14,6 +14,11 @@ const MAX_SHIP_RECTS: usize = 16;
 const MAX_SOURCES: usize = 64;
 const WRITE_CHUNK: usize = 64 * 1024;
 
+/// The host starts with no cursor, so nothing is sent until the guest shows one.
+fn hidden_cursor() -> CompositorMessage {
+    CompositorMessage::Cursor { hotspot_x: 0, hotspot_y: 0, width: 0, height: 0, pixels: Vec::new() }
+}
+
 pub(super) struct Transport {
     input: File,
     output: File,
@@ -21,6 +26,8 @@ pub(super) struct Transport {
     incoming_deadline: Option<Instant>,
     outgoing: Vec<u8>,
     written: usize,
+    frame_end: usize,
+    cursor: Option<CompositorMessage>,
     deadline: Option<Instant>,
     serial: u64,
     /// The frame awaiting acknowledgment, and whether its acknowledgment completes the submitted callbacks.
@@ -35,7 +42,7 @@ pub(super) struct Transport {
 impl Transport {
     #[cfg(test)]
     pub(super) fn test_transport() -> Self {
-        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, deadline: None, serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() }
+        Self { input: File::open("/dev/null").unwrap(), output: File::options().write(true).open("/dev/null").unwrap(), incoming: Vec::new(), incoming_deadline: None, outgoing: Vec::new(), written: 0, frame_end: 0, cursor: Some(hidden_cursor()), deadline: None, serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() }
     }
 
     fn new(size: Size) -> Result<Self, String> {
@@ -47,7 +54,7 @@ impl Transport {
         }
         let mut outgoing = Vec::new();
         tinyland_remote::write_compositor(&mut outgoing, &CompositorMessage::Ready { size }, None).map_err(|e| e.to_string())?;
-        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() })
+        Ok(Self { input, output, incoming: Vec::new(), incoming_deadline: None, outgoing, written: 0, frame_end: 0, cursor: Some(hidden_cursor()), deadline: Some(Instant::now() + DEADLINE), serial: 0, flight: None, sources: BTreeSet::new(), last_present: None, last_ship: None, unsent: Default::default() })
     }
 
     /// The encoded bytes waiting to be written to the host.
@@ -64,6 +71,8 @@ impl Transport {
     /// Advances presentation at `now`: presents a dirty scene at most once per refresh and sends accumulated
     /// damage at most once per ship interval. Returns how long until the next step is due, if one is waiting.
     pub(super) fn tick(&mut self, state: &mut State, size: Size, now: Instant) -> Result<Option<Duration>, String> {
+        state.remote_cursor = true;
+        self.queue_cursor(state)?;
         if self.flight.is_some() || !self.outgoing.is_empty() { return Ok(None); }
         let ship_at = self.last_ship.map_or(now, |at| at + SHIP_INTERVAL);
         if state.pending_present {
@@ -83,7 +92,29 @@ impl Transport {
         Ok(None)
     }
 
+    pub(super) fn queue_cursor(&mut self, state: &State) -> Result<(), String> {
+        let cursor = state.cursor_placement().and_then(|(id, _)| {
+            let pixels = state.surfaces.get(&id)?.pixels.as_ref()?;
+            if pixels.width > 256 || pixels.height > 256 { return None; }
+            let hotspot = state.pointer.cursor.as_ref()?.hotspot;
+            let (b, g, r) = pixels.format.channel_offsets();
+            let mut bytes = Vec::with_capacity(pixels.bytes.len());
+            for pixel in pixels.bytes.chunks_exact(4) {
+                bytes.extend([pixel[b], pixel[g], pixel[r], if pixels.format.has_alpha() { pixel[3] } else { 255 }]);
+            }
+            let inside = |value: i32, edge: u32| value.clamp(0, edge.saturating_sub(1) as i32) as u32;
+            Some(CompositorMessage::Cursor { hotspot_x: inside(hotspot.0, pixels.width), hotspot_y: inside(hotspot.1, pixels.height), width: pixels.width, height: pixels.height, pixels: bytes })
+        }).unwrap_or_else(hidden_cursor);
+        if self.cursor.as_ref() != Some(&cursor) {
+            tinyland_remote::write_compositor(&mut self.outgoing, &cursor, None).map_err(|e| e.to_string())?;
+            self.cursor = Some(cursor);
+            if self.deadline.is_none() { self.deadline = Some(Instant::now() + DEADLINE); }
+        }
+        Ok(())
+    }
+
     fn present(&mut self, state: &mut State) {
+        state.remote_cursor = true;
         for (x0, y0, x1, y1) in state.submit_damage() {
             self.unsent.add(crate::positioner::Rect { x: x0 as i32, y: y0 as i32, width: (x1 - x0) as i32, height: (y1 - y0) as i32 });
         }
@@ -97,6 +128,7 @@ impl Transport {
         self.outgoing.clear();
         tinyland_remote::write_tiled_damage(&mut self.outgoing, self.serial, size, &state.framebuffer, &rects).map_err(|e| e.to_string())?;
         self.written = 0;
+        self.frame_end = self.outgoing.len();
         self.flight = Some((self.serial, callbacks));
         self.last_ship = Some(now);
         self.deadline = Some(now + DEADLINE);
@@ -115,7 +147,7 @@ impl Transport {
             }
         }
         if self.written == self.outgoing.len() {
-            self.outgoing.clear(); self.written = 0;
+            self.outgoing.clear(); self.written = 0; self.frame_end = 0;
             if self.flight.is_none() { self.deadline = None; }
         }
         Ok(())
@@ -147,7 +179,7 @@ impl Transport {
 
     pub(super) fn handle(&mut self, state: &mut State, size: Size, msg: HostMessage) -> Result<(), String> {
         if let HostMessage::Presented { serial } = msg {
-            let Some((_, callbacks)) = self.flight.filter(|(flight, _)| *flight == serial && self.outgoing.is_empty()) else {
+            let Some((_, callbacks)) = self.flight.filter(|(flight, _)| *flight == serial && self.written >= self.frame_end) else {
                 return Err("unexpected presentation acknowledgment".into());
             };
             self.flight = None; self.deadline = None;

@@ -1216,3 +1216,49 @@ fn a_toplevel_surface_cannot_become_a_subsurface() {
     let response = f.request(&sub, 1, &[3, other.id().protocol_id(), parent.id().protocol_id()]);
     assert!(String::from_utf8_lossy(&response).contains("already has role"), "an xdg surface keeps its role");
 }
+
+#[test]
+fn remote_cursor_changes_are_separate_from_frames() {
+    use tinyland_remote::{CompositorMessage, HostMessage, Size};
+    let mut f = Fixture::with_output((8, 4));
+    let pointer = f.pointer_seat();
+    mapped_toplevel(&mut f, 10);
+    f.move_pointer(5.0, 2.0);
+    let serial = f.state.pointer.enter_serial;
+    let cursor = f.surface();
+    f.request(&pointer, 0, &[serial, cursor.id().protocol_id(), 1, 1]);
+    f.show(&cursor, 2, 2, 77);
+    let mut transport = remote::Transport::test_transport();
+    let size = Size::new(8, 4).unwrap();
+    transport.queue_cursor(&f.state).unwrap();
+    let expected = CompositorMessage::Cursor { hotspot_x: 1, hotspot_y: 1, width: 2, height: 2, pixels: [77, 77, 77, 255].repeat(4) };
+    assert_eq!(tinyland_remote::read_compositor(&mut transport.sent(), None).unwrap(), Some(expected));
+    transport.write().unwrap();
+    f.request(&pointer, 0, &[serial, cursor.id().protocol_id(), 1, 1]);
+    transport.queue_cursor(&f.state).unwrap();
+    assert!(transport.sent().is_empty());
+    transport.queue_frame(&mut f.state, size).unwrap();
+    f.move_pointer(3.0, 1.0);
+    transport.queue_cursor(&f.state).unwrap();
+    assert!(f.state.framebuffer.chunks_exact(4).all(|p| p[0] == 10));
+    transport.write().unwrap();
+    transport.handle(&mut f.state, size, HostMessage::Presented { serial: 1 }).unwrap();
+    transport.queue_frame(&mut f.state, size).unwrap();
+    assert!(f.state.framebuffer.chunks_exact(4).all(|p| p[0] == 10));
+    let mut wire = transport.sent();
+    assert!(matches!(tinyland_remote::read_compositor(&mut wire, Some(size)).unwrap(), Some(CompositorMessage::Damage { .. })));
+    assert!(wire.is_empty());
+    f.request(&pointer, 0, &[serial, 0, 0, 0]);
+    transport.queue_cursor(&f.state).unwrap();
+    let mut wire = transport.sent();
+    tinyland_remote::read_compositor(&mut wire, Some(size)).unwrap();
+    assert_eq!(tinyland_remote::read_compositor(&mut wire, None).unwrap(), Some(CompositorMessage::Cursor { hotspot_x: 0, hotspot_y: 0, width: 0, height: 0, pixels: vec![] }));
+    transport.write().unwrap();
+    transport.handle(&mut f.state, size, HostMessage::Presented { serial: 2 }).unwrap();
+    f.request(&pointer, 0, &[serial, cursor.id().protocol_id(), 1, 1]);
+    transport.queue_cursor(&f.state).unwrap();
+    transport.write().unwrap();
+    f.state.pointer.focus = None;
+    transport.queue_cursor(&f.state).unwrap();
+    assert_eq!(tinyland_remote::read_compositor(&mut transport.sent(), None).unwrap(), Some(CompositorMessage::Cursor { hotspot_x: 0, hotspot_y: 0, width: 0, height: 0, pixels: vec![] }));
+}

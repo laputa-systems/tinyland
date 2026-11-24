@@ -51,6 +51,7 @@ pub struct State {
     popups: Vec<PopupData>,
     pointer: PointerState,
     has_pointer: bool,
+    remote_cursor: bool,
     pending_present: bool,
     submitted: Option<SubmittedFrame>,
     /// The output as last sent by `submit_damage`, and the scene it showed.
@@ -110,6 +111,7 @@ impl State {
         popups: Vec::new(),
         pointer: PointerState::centered(out_size),
         has_pointer: false,
+        remote_cursor: false,
         pending_present: false,
         submitted: None,
         framebuffer: Vec::new(),
@@ -762,7 +764,9 @@ impl State {
     /// Visible surfaces with pixels, in drawing order, with their output extents.
     fn scene(&self) -> Vec<(ObjectId, Rect)> {
         let mut scene = Vec::new();
+        let cursor = self.remote_cursor.then(|| self.cursor_placement().map(|(id, _)| id)).flatten();
         for (surface, (x, y)) in self.visible_surfaces() {
+            if cursor.as_ref() == Some(&surface) { continue; }
             self.scene_surface(&surface, x, y, &mut scene);
         }
         scene

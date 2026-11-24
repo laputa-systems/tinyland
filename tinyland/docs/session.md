@@ -95,7 +95,7 @@ The `tinyland-remote` workspace crate defines the wire codec. Each message has
 little-endian integers. Types 1 through 4 are Ready (u32 width, u32 height),
 Frame (u64 serial, pixels), Damage (u64 serial, u32 count, then count
 rectangles of u32 x, y, width, height, then each rectangle's pixel rows in
-order) and TiledDamage; types 16 through 22 are Presented (u64 serial),
+order), TiledDamage, and Cursor (type 5: u32 hotspot x, hotspot y, width, height, followed by premultiplied BGRA pixel rows). Cursor edges are at most 256 pixels; a zero width and height with zero hotspot and no pixels hides it. The host draws the cursor locally and it is absent from remote frame pixels. Cursor messages need no acknowledgment. Types 16 through 22 are Presented (u64 serial),
 Key (u32 source, u16 evdev code, u8 pressed), Pointer (u32 source, u32 x,
 u32 y), Button (u32 source, u8 button, u8 pressed), Wheel (u32 source, i32
 horizontal, i32 vertical), ResetInput (u32 source), and Clipboard (u32 source,

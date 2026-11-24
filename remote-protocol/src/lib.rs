@@ -42,7 +42,7 @@ impl Rect {
 /// `Frame` replaces the whole output. `Damage` replaces only its rectangles, each with its rows of BGRX pixels;
 /// with no rectangles it still asks the host to acknowledge a presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> }, Damage { serial: u64, rects: Vec<(Rect, Vec<u8>)> } }
+pub enum CompositorMessage { Ready { size: Size }, Frame { serial: u64, pixels: Vec<u8> }, Damage { serial: u64, rects: Vec<(Rect, Vec<u8>)> }, Cursor { hotspot_x: u32, hotspot_y: u32, width: u32, height: u32, pixels: Vec<u8> } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostMessage {
@@ -53,6 +53,12 @@ pub enum HostMessage {
     Wheel { source: u32, horizontal: i32, vertical: i32 },
     ResetInput { source: u32 },
     Clipboard { source: u32, text: String },
+}
+
+fn valid_cursor(hotspot_x: u32, hotspot_y: u32, width: u32, height: u32, len: usize) -> bool {
+    width <= 256 && height <= 256 && (width == 0) == (height == 0)
+        && (width != 0 || (hotspot_x == 0 && hotspot_y == 0))
+        && len == width as usize * height as usize * 4
 }
 
 fn invalid() -> io::Error { io::Error::new(io::ErrorKind::InvalidData, "invalid remote message") }
@@ -206,6 +212,13 @@ pub fn read_compositor<R: Read>(reader: &mut R, size: Option<Size>) -> io::Resul
             if at != len { return Err(invalid()); }
             Ok(Some(CompositorMessage::Damage { serial: u64_at(&body, 0), rects: out }))
         }
+        5 if (16..=16 + 256 * 256 * 4).contains(&len) => {
+            let mut head = [0; 16]; reader.read_exact(&mut head)?;
+            let (hotspot_x, hotspot_y, width, height) = (u32_at(&head, 0), u32_at(&head, 4), u32_at(&head, 8), u32_at(&head, 12));
+            if !valid_cursor(hotspot_x, hotspot_y, width, height, len - 16) { return Err(invalid()); }
+            let mut pixels = vec![0; len - 16]; reader.read_exact(&mut pixels)?;
+            Ok(Some(CompositorMessage::Cursor { hotspot_x, hotspot_y, width, height, pixels }))
+        }
         _ => Err(invalid()),
     }
 }
@@ -218,6 +231,13 @@ pub fn write_compositor<W: Write>(writer: &mut W, message: &CompositorMessage, s
             writer.write_all(&MAGIC)?; writer.write_all(&[2])?;
             writer.write_all(&((pixels.len() + 8) as u32).to_le_bytes())?;
             writer.write_all(&serial.to_le_bytes())?; writer.write_all(pixels)
+        }
+        CompositorMessage::Cursor { hotspot_x, hotspot_y, width, height, pixels } => {
+            if !valid_cursor(*hotspot_x, *hotspot_y, *width, *height, pixels.len()) { return Err(invalid()); }
+            let mut b = Vec::with_capacity(16 + pixels.len());
+            for v in [hotspot_x, hotspot_y, width, height] { b.extend(v.to_le_bytes()); }
+            b.extend(pixels);
+            emit(writer, 5, &b)
         }
         CompositorMessage::Damage { serial, rects } => {
             let size = size.ok_or_else(invalid)?;
@@ -325,6 +345,26 @@ fn damage_header<W: Write>(writer: &mut W, serial: u64, size: Size, rects: &[Rec
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cursor_roundtrip_and_invalid_geometry() {
+        let image = CompositorMessage::Cursor { hotspot_x: 1, hotspot_y: 2, width: 2, height: 1, pixels: vec![1, 2, 3, 4, 5, 6, 7, 8] };
+        let hidden = CompositorMessage::Cursor { hotspot_x: 0, hotspot_y: 0, width: 0, height: 0, pixels: vec![] };
+        for msg in [image, hidden] {
+            let mut wire = Vec::new(); write_compositor(&mut wire, &msg, None).unwrap();
+            assert_eq!(wire[4], 5);
+            assert_eq!(read_compositor(&mut &wire[..], None).unwrap(), Some(msg));
+            for n in 1..wire.len() { assert!(read_compositor(&mut &wire[..n], None).is_err()); }
+        }
+        for (x, y, w, h, pixels) in [(0, 0, 257, 1, vec![]), (0, 0, 1, 257, vec![]), (0, 0, 0, 1, vec![]), (0, 0, 1, 0, vec![]), (1, 0, 0, 0, vec![]), (0, 0, 1, 1, vec![0; 3])] {
+            let msg = CompositorMessage::Cursor { hotspot_x: x, hotspot_y: y, width: w, height: h, pixels: pixels.clone() };
+            assert!(write_compositor(&mut Vec::new(), &msg, None).is_err());
+            let mut body = Vec::new();
+            for n in [x, y, w, h] { body.extend(n.to_le_bytes()); }
+            body.extend(pixels);
+            let mut wire = Vec::new(); emit(&mut wire, 5, &body).unwrap();
+            assert!(read_compositor(&mut &wire[..], None).is_err());
+        }
+    }
     #[test]
     fn host_roundtrip_and_truncation() {
         let messages = [HostMessage::Presented { serial: 42 }, HostMessage::Key { source: 1, code: 30, pressed: true }, HostMessage::Pointer { source: 2, x: 1, y: 9 }, HostMessage::Button { source: 3, button: Button::Middle, pressed: false }, HostMessage::Wheel { source: 4, horizontal: -2, vertical: 3 }, HostMessage::ResetInput { source: 5 }, HostMessage::Clipboard { source: 6, text: "hello λ".into() }];
