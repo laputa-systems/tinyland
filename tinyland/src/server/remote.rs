@@ -7,8 +7,12 @@ use tinyland_remote::{Button, CompositorMessage, HostMessage, Size};
 const DEADLINE: Duration = Duration::from_secs(5);
 /// The virtual display refresh: surfaces are presented and their frame callbacks completed at most this often.
 const REFRESH: Duration = Duration::from_micros(16_667);
-/// The shortest time between two frames sent to the host; presentations in between accumulate their damage.
+/// The shortest time between two frames sent to the host when their damage is large; presentations in between
+/// accumulate their damage.
 const SHIP_INTERVAL: Duration = Duration::from_micros(33_333);
+/// Damage covering at most this fraction of the output is sent at the refresh rate: pointer and hover changes are a few
+/// small rectangles, and holding them for the ship interval halves how often the pointer visibly moves.
+const SMALL_DAMAGE_DIVISOR: u64 = 8;
 /// Output rectangles per frame sent to the host; more are sent as their bounding box.
 const MAX_SHIP_RECTS: usize = 16;
 const MAX_SOURCES: usize = 64;
@@ -74,22 +78,32 @@ impl Transport {
         state.remote_cursor = true;
         self.queue_cursor(state)?;
         if self.flight.is_some() || !self.outgoing.is_empty() { return Ok(None); }
-        let ship_at = self.last_ship.map_or(now, |at| at + SHIP_INTERVAL);
         if state.pending_present {
             let present_at = self.last_present.map_or(now, |at| at + REFRESH);
             if now < present_at { return Ok(Some(present_at - now)); }
             self.last_present = Some(now);
             self.present(state);
+            let ship_at = self.ship_at(size, now);
             let unsent = self.unsent.is_full() || !self.unsent.rects().is_empty();
             if unsent && now >= ship_at { return self.ship(state, size, true, now).map(|()| None); }
             state.complete_frame(now_ms());
             return Ok(unsent.then(|| ship_at - now));
         }
         if self.unsent.is_full() || !self.unsent.rects().is_empty() {
+            let ship_at = self.ship_at(size, now);
             if now >= ship_at { return self.ship(state, size, false, now).map(|()| None); }
             return Ok(Some(ship_at - now));
         }
         Ok(None)
+    }
+
+    /// When the unsent damage may be sent: one refresh after the last frame for small damage, one ship interval for large.
+    fn ship_at(&self, size: Size, now: Instant) -> Instant {
+        let (width, height) = (size.width(), size.height());
+        let area: u64 = crate::damage::output_rects(&self.unsent, width, height, MAX_SHIP_RECTS).iter()
+            .map(|&(x0, y0, x1, y1)| u64::from(x1 - x0) * u64::from(y1 - y0)).sum();
+        let small = !self.unsent.is_full() && area * SMALL_DAMAGE_DIVISOR <= u64::from(width) * u64::from(height);
+        self.last_ship.map_or(now, |at| at + if small { REFRESH } else { SHIP_INTERVAL })
     }
 
     pub(super) fn queue_cursor(&mut self, state: &State) -> Result<(), String> {

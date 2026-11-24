@@ -601,6 +601,26 @@ fn clipboard_owns_a_nonblocking_write_description_and_rejects_other_targets() {
 }
 
 #[test]
+fn small_remote_damage_ships_at_the_refresh_rate() {
+    use std::time::{Duration, Instant};
+    let mut f = Fixture::with_output((64, 64));
+    let surface = mapped_frame(&mut f, 1);
+    let size = tinyland_remote::Size::new(64, 64).unwrap();
+    let mut transport = super::super::remote::Transport::test_transport();
+    let start = Instant::now();
+    f.request(&surface, 3, &[2]);
+    f.show(&surface, 4, 2, 5);
+    assert_eq!(transport.tick(&mut f.state, size, start).unwrap(), None);
+    transport.write().unwrap();
+    transport.handle(&mut f.state, size, tinyland_remote::HostMessage::Presented { serial: 1 }).unwrap();
+
+    f.request(&surface, 3, &[3]);
+    f.show(&surface, 4, 2, 6);
+    assert_eq!(transport.tick(&mut f.state, size, start + Duration::from_millis(17)).unwrap(), None);
+    assert!(!transport.sent().is_empty(), "a pointer-sized change is sent at the next refresh, not held for the ship interval");
+}
+
+#[test]
 fn remote_frames_ship_at_most_once_per_interval_while_callbacks_follow_the_refresh() {
     use std::time::{Duration, Instant};
     let mut f = Fixture::with_output((4, 2));
