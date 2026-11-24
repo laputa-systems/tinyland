@@ -8,7 +8,7 @@ Next: 22
 - **Area:** Performance
 - **Where:** `tinyland/src/server/dispatch_impl.rs`, `tinyland/src/shm.rs`, `tinyland/src/server.rs`, `tinyland/src/output.rs`
 - **Problem:** The remote and DRM paths now track incremental damage (2026-11-18); DRM repairs missed damage independently for each scanout buffer. On 2026-11-18, bctl's SmolVM runtime ran it on virtio-gpu's double-buffered scanout for idle, typing, scrolling, animation, video and dashboard pages. Every page loaded and passed its content checks (joshuarli/bctl tests/bench/results/2026-11-18-realistic-headed/#smolvm). Exact-pixel comparison through a real device, physical DRM devices and VT transitions remain pending. The remote path: Damage and DamageBuffer are tracked, commits patch only damaged rows, and only damaged output rectangles are recomposed and sent, paced to 30 frames a second.
-- **Recommendation:** Continue [the upstream damage campaign](docs/CAMPAIGN-DAMAGE.md): qualify real DRM devices, VT transitions, callback ordering and recovery, and the pinned downstream bctl integration. Complete the remaining fixture and performance gates before closing.
+- **Recommendation:** Continue [the upstream damage campaign](docs/roadmap.md#campaign-incremental-wayland-damage-and-scanout-qualification): qualify real DRM devices, VT transitions, callback ordering and recovery, and the pinned downstream bctl integration. Complete the remaining fixture and performance gates before closing.
 - **Fix with:** `make-it-fast`
 - **Effort:** L
 
@@ -82,7 +82,7 @@ qualification. Runtime proof gaps are stated in each ticket.
 ### TINY-19 · P3 · Establish representative compositor performance evidence
 
 - **Area:** Performance
-- **Where:** docs/CAMPAIGN-DAMAGE.md; tinyland/src/server/tests/damage.rs:88
+- **Where:** docs/roadmap.md; tinyland/src/server/tests/damage.rs:88
 - **Problem:** The 300-step headless damage differential checks pixels and sparse updates but does not measure shipped frame throughput, latency, CPU, allocations or bytes. The headed bctl comparison is historical and lacks a reproducible pinned baseline and retained samples here. No current evidence detects a performance regression or attributes it across compositor, guest and viewer.
 - **Recommendation:** Extend the existing headed damage campaign with pinned candidate and reference, completed-frame and pixel checks, interleaved gated samples, stage CPU and byte counters, and separate sampling or tracing for attribution. Qualify actual devices and downstream separately.
 - **Fix with:** bench-pyramid

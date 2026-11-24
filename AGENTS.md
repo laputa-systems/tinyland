@@ -41,7 +41,7 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
   `tinyland/harness/regenerate-keymap.sh` regenerates it. No vendored source trees are tracked.
 - Library consumers: tinyland and seatd consume seatd-protocol; tinyland and downstream bctl
   consume tinyland-remote. bctl must test candidate changes to its contract.
-- Headed bctl damage workload: `docs/CAMPAIGN-DAMAGE.md`. Real device, VT, VM, oracle,
+- Headed bctl damage workload: `docs/roadmap.md`. Real device, VT, VM, oracle,
   and downstream qualification are separate: `tinyland/docs/verification.md` and
   `seatd/doc/validation.md`. The ordinary suite does not qualify them.
 
@@ -52,4 +52,4 @@ and mold for Linux musl links. Keep scratch in ignored `.work/`.
 - Daemon operation and recovery: [runtime](seatd/doc/runtime.md) and [recovery](seatd/doc/recovery.md).
 - Daemon tests and device qualification: [validation](seatd/doc/validation.md).
 - Deferred fixes and draft designs: [TODO.md](TODO.md).
-- Active incremental compositor/DRM damage campaign: [TINY-14](docs/CAMPAIGN-DAMAGE.md); keep upstream ownership and coordinate the pinned bctl integration.
+- Active and future work: [roadmap](docs/roadmap.md); its Status is the only handoff. Keep upstream ownership and coordinate the pinned bctl integration.
