@@ -1,9 +1,11 @@
 FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+COPY --from=oci.17166969.xyz/owned-tools@sha256:aaec19e7a44cbc53b40db2d22093600ee888689b89be94da90e5398ed02f1883 /opt/laputa /opt/laputa
+ENV PATH=$PATH:/opt/laputa/bin
 
 ARG WLCS_COMMIT=2b385328366de5db19521b9b3eef81861430d984
 
-RUN apk add --no-cache bash boost-dev build-base ca-certificates cmake curl git \
-        gmock gtest-dev mold musl-dev pkgconf samurai wayland-dev wayland-protocols
+RUN apk add --no-cache bash boost-dev build-base ca-certificates curl git \
+        gmock gtest-dev musl-dev pkgconf wayland-dev wayland-protocols
 
 COPY ack-initial-configure.patch /ack-initial-configure.patch
 RUN git init /wlcs-src \
