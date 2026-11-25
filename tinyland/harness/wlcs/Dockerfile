@@ -4,8 +4,22 @@ ENV PATH=$PATH:/opt/laputa/bin
 
 ARG WLCS_COMMIT=2b385328366de5db19521b9b3eef81861430d984
 
-RUN apk add --no-cache bash boost-dev build-base ca-certificates curl git \
-        gmock gtest-dev musl-dev pkgconf wayland-dev wayland-protocols
+RUN apk add --no-cache bash boost-dev ca-certificates curl git libgcc \
+        musl-dev pkgconf wayland-dev wayland-protocols
+# Rust links host proc-macros against -lgcc_s, which only gcc's package symlinks.
+RUN ln -s libgcc_s.so.1 /usr/lib/libgcc_s.so \
+ && ln -s /opt/laputa/bin/clang /usr/local/bin/cc \
+ && ln -s /opt/laputa/bin/clang++ /usr/local/bin/c++
+ENV AR=llvm-ar
+
+# Alpine's gtest is built against libstdc++; build it against the owned clang++'s libc++.
+ARG GOOGLETEST_VERSION=1.17.0
+RUN curl -fsSL "https://github.com/google/googletest/releases/download/v$GOOGLETEST_VERSION/googletest-$GOOGLETEST_VERSION.tar.gz" -o /tmp/googletest.tar.gz \
+ && echo "65fab701d9829d38cb77c14acdc431d2108bfdbf8979e40eb8ae567edf10b27c  /tmp/googletest.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/googletest.tar.gz -C /tmp \
+ && cmake -G Ninja -S "/tmp/googletest-$GOOGLETEST_VERSION" -B /tmp/googletest-build -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build /tmp/googletest-build --target install \
+ && rm -rf /tmp/googletest.tar.gz "/tmp/googletest-$GOOGLETEST_VERSION" /tmp/googletest-build
 
 COPY ack-initial-configure.patch /ack-initial-configure.patch
 RUN git init /wlcs-src \
